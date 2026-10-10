@@ -3,6 +3,7 @@
 //   ?phase=pairing|offline|no-config   previews the Doctor (no gateway connected)
 //   ?single=1                          one gateway only
 //   ?empty=1                           connected, but no guys yet
+//   ?stills=1                          the browser tab isn't in front, so its stream sends no frames
 import type { Backend } from "./ipc";
 import type { ChatMessage, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Roster } from "./types";
 
@@ -321,7 +322,7 @@ const browserState = { url: "https://www.trattoria.example/reservations", title:
 const streams = new Map<number, number>();
 let streamSeq = 0;
 
-async function mockFrame(): Promise<ArrayBuffer> {
+function mockPage(label: string): HTMLCanvasElement {
   const w = 1280, h = 800;
   const canvas = document.createElement("canvas");
   canvas.width = w;
@@ -337,7 +338,7 @@ async function mockFrame(): Promise<ArrayBuffer> {
   ctx.fillStyle = "#1d1a18";
   ctx.font = "28px -apple-system, sans-serif";
   ctx.fillText(browserState.url, 40, 160);
-  ctx.fillText(`Live mock frame · ${new Date().toLocaleTimeString()}`, 40, 220);
+  ctx.fillText(`${label} · ${new Date().toLocaleTimeString()}`, 40, 220);
   ctx.fillStyle = "#34c759";
   ctx.fillRect(40, 280, 320, 80);
   ctx.fillStyle = "#fff";
@@ -348,9 +349,14 @@ async function mockFrame(): Promise<ArrayBuffer> {
     ctx.arc(c.x, c.y, 14, 0, Math.PI * 2);
     ctx.fill();
   }
+  return canvas;
+}
+
+async function mockFrame(): Promise<ArrayBuffer> {
+  const canvas = mockPage("Live mock frame");
   const blob = await new Promise<Blob>((r) => canvas.toBlob((b) => r(b!), "image/jpeg", 0.7));
   const jpeg = new Uint8Array(await blob.arrayBuffer());
-  const header = new TextEncoder().encode(JSON.stringify({ url: browserState.url, cssWidth: w, cssHeight: h, scrollX: 0, scrollY: 0 }));
+  const header = new TextEncoder().encode(JSON.stringify({ url: browserState.url, cssWidth: canvas.width, cssHeight: canvas.height, scrollX: 0, scrollY: 0 }));
   const out = new Uint8Array(1 + 4 + header.length + jpeg.length);
   out[0] = 1;
   new DataView(out.buffer).setUint32(1, header.length);
@@ -504,9 +510,12 @@ export const mockBackend: Backend = {
         const id = ++streamSeq;
         const ready = new TextEncoder().encode(JSON.stringify({ type: "ready", targetId: "t1", url: browserState.url, title: browserState.title }));
         channel.onmessage(new Uint8Array([0, ...ready]).buffer);
-        streams.set(id, window.setInterval(async () => channel.onmessage(await mockFrame()), 500));
+        if (!params.has("stills")) streams.set(id, window.setInterval(async () => channel.onmessage(await mockFrame()), 500));
         return { id, targetId: "t1", url: browserState.url } as T;
       }
+      case "browser_screenshot":
+        await new Promise((r) => setTimeout(r, 300));
+        return { src: mockPage("Mock screenshot").toDataURL("image/jpeg", 0.7), targetId: "t1", url: browserState.url } as T;
       case "browser_stream_stop":
         clearInterval(streams.get(Number(args?.id)));
         streams.delete(Number(args?.id));

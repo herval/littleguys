@@ -121,11 +121,15 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
     let cancelled = false;
     let stop: (() => void) | null = null;
     let poll = 0;
+    let noFrames = 0;
+    let live = false;
     let retries = 0;
 
     const onMessage = (m: BrowserStreamMessage) => {
       if (cancelled) return;
       if (m.kind === "frame") {
+        live = true;
+        clearInterval(poll); // stills may have been standing in until the tab painted
         const blob = new Blob([m.jpeg.slice()], { type: "image/jpeg" });
         showFrame({ src: URL.createObjectURL(blob), cssWidth: m.header.cssWidth, cssHeight: m.header.cssHeight });
         if (m.header.url) setUrl(m.header.url);
@@ -162,15 +166,16 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
       const tick = async () => {
         try {
           const shot = await core.browser.screenshot(gw, profile ?? undefined, target);
-          if (cancelled) return;
+          if (cancelled || live) return;
           showFrame({ src: shot.src, cssWidth: size.w, cssHeight: size.h });
           if (shot.url) setUrl(shot.url);
         } catch (e) {
-          if (!cancelled) setError(errorMessage(e));
+          if (!cancelled && !live) setError(errorMessage(e));
         }
       };
+      if (cancelled || live) return;
       await tick();
-      poll = window.setInterval(tick, 1500);
+      if (!cancelled && !live) poll = window.setInterval(tick, 1500);
     };
 
     (async () => {
@@ -188,6 +193,9 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
         if (cancelled) return started.stop();
         stop = started.stop;
         if (started.url) setUrl(started.url);
+        // Chrome only paints the tab in front of a visible window: a background tab, a
+        // minimized window or a sleeping display sends no frames. Show stills until one comes.
+        noFrames = window.setTimeout(() => !cancelled && !live && stills(target), 1500);
       } catch (e) {
         if (cancelled) return;
         if (isUnsupported(e)) return stills(targetId);
@@ -199,7 +207,8 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
     return () => {
       cancelled = true;
       stop?.();
-      if (poll) clearInterval(poll);
+      clearTimeout(noFrames);
+      clearInterval(poll);
     };
     // targetId changes come from the stream itself; switching tabs bumps `restart`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
