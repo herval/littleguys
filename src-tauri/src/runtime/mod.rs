@@ -60,8 +60,10 @@ pub mod claudecode;
 pub mod hermes;
 pub mod scheduler;
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -290,6 +292,15 @@ pub fn archived_filter(params: &Value) -> Option<bool> {
         Some(Value::String(s)) if s == "all" => None,
         _ => Some(false),
     }
+}
+
+/// Claude's face, the Claude Code mascot, as a data URL for `identity.avatarUrl`.
+pub fn claude_face() -> &'static str {
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        let svg = include_str!("../../assets/claude-code.svg");
+        format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg))
+    })
 }
 
 #[cfg(test)]

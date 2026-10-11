@@ -1,6 +1,7 @@
 // "Add a bot" tabs for runtimes other than OpenClaw: Hermes, Claude Code and ACP agents.
 import { Check, ChevronRight, Folder, Laptop, Network, RefreshCw, Terminal } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { core, errorMessage, isTauri } from "../lib/ipc";
 import type { ClaudeCodeProbe, HermesProbe, RegistryAgent } from "../lib/types";
 import { useApp } from "../stores/app";
@@ -190,7 +191,7 @@ export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
   return (
     <div>
       <div className="flex items-center gap-3 rounded-xl border border-[var(--color-line)] px-3.5 py-3">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--color-chip)] text-[15px]">✳️</span>
+        <img src={claudeFace} alt="" className="h-8 w-8 shrink-0 rounded-lg" />
         <div className="min-w-0 flex-1">
           <p className="font-medium">
             Claude Code on this Mac
@@ -249,7 +250,6 @@ export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
 // ---- ACP agents ------------------------------------------------------------------
 
 const AGENT_EMOJI: Record<string, string> = {
-  claude: "✳️",
   codex: "🌀",
   gemini: "✦",
   goose: "🪿",
@@ -262,9 +262,16 @@ const AGENT_EMOJI: Record<string, string> = {
   letta: "🧠",
 };
 
+const isClaude = (id: string) => id.toLowerCase().includes("claude");
+
 function emojiFor(id: string): string {
   const hit = Object.keys(AGENT_EMOJI).find((k) => id.toLowerCase().includes(k));
   return hit ? AGENT_EMOJI[hit] : "🤖";
+}
+
+/** Claude gets the Claude Code mascot (the bot fills it in when there's no emoji). */
+function AgentFace({ id }: { id: string }) {
+  return isClaude(id) ? <img src={claudeFace} alt="" className="h-full w-full rounded-[inherit]" /> : emojiFor(id);
 }
 
 /** "Claude Code" → "Claude", "Gemini CLI" → "Gemini". */
@@ -317,7 +324,7 @@ export function AcpTab({ onAdded }: { onAdded: (id: string) => void }) {
                 }`}
               >
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--color-chip)] text-[16px]">
-                  {emojiFor(a.id)}
+                  <AgentFace id={a.id} />
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block font-medium">
@@ -352,7 +359,7 @@ export function AcpTab({ onAdded }: { onAdded: (id: string) => void }) {
 function AcpForm({ agent, onBack, onAdded }: { agent: RegistryAgent | "custom"; onBack: () => void; onAdded: (id: string) => void }) {
   const custom = agent === "custom";
   const [name, setName] = useState(custom ? "" : friendlyName(agent.name));
-  const [emoji, setEmoji] = useState(custom ? "🤖" : emojiFor(agent.id));
+  const [emoji, setEmoji] = useState(custom ? "🤖" : isClaude(agent.id) ? "" : emojiFor(agent.id));
   const [cwd, setCwd] = useState("~");
   const [how, setHow] = useState<"command" | "url">("command");
   const [commandLine, setCommandLine] = useState("");
@@ -409,7 +416,9 @@ function AcpForm({ agent, onBack, onAdded }: { agent: RegistryAgent | "custom"; 
       </button>
       {!custom && (
         <div className="flex items-center gap-3 rounded-xl bg-[var(--color-chip)] px-3.5 py-2.5">
-          <span className="text-[20px]">{emojiFor(agent.id)}</span>
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[20px]">
+            <AgentFace id={agent.id} />
+          </span>
           <div className="min-w-0">
             <p className="font-medium">{agent.name}</p>
             <p className="truncate font-mono text-[11px] text-[var(--color-ink-3)]">{[agent.command, ...agent.args].join(" ")}</p>
@@ -439,7 +448,12 @@ function AcpForm({ agent, onBack, onAdded }: { agent: RegistryAgent | "custom"; 
           <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="Claude" />
         </Field>
         <Field label="Face">
-          <input className={`${inputBase} w-16 text-center text-[16px]`} value={emoji} onChange={(e) => setEmoji(e.target.value.trim())} />
+          <div className="relative">
+            <input className={`${inputBase} w-16 text-center text-[16px]`} value={emoji} onChange={(e) => setEmoji(e.target.value.trim())} />
+            {!emoji && !custom && isClaude(agent.id) && (
+              <img src={claudeFace} alt="" className="pointer-events-none absolute left-1/2 top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-md" />
+            )}
+          </div>
         </Field>
       </div>
       {!(custom && how === "url") && (

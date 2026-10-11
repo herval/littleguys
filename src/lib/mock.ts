@@ -4,6 +4,7 @@
 //   ?single=1                          one gateway only
 //   ?empty=1                           connected, but no guys yet
 //   ?stills=1                          the browser tab isn't in front, so its stream sends no frames
+import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import type { Backend } from "./ipc";
 import type { ChatMessage, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Roster } from "./types";
 
@@ -111,7 +112,7 @@ hermes.status = { ...hermes.status, kind: "hermes", capabilities: { ...hermes.st
 
 const claude = gateway("acp-claude", "Claude Code", "npx -y @agentclientprotocol/claude-agent-acp", "connected", {
   defaultAgentId: "bot",
-  agents: [{ id: "bot", name: "Claude", identity: { name: "Claude", emoji: "✳️" }, workspace: "/Users/you/dev/littleguy" }] as never,
+  agents: [{ id: "bot", name: "Claude", identity: { name: "Claude", avatarUrl: claudeFace }, workspace: "/Users/you/dev/littleguy" }] as never,
   sessions: [
     { key: "agent:bot:main", agentId: "bot", kind: "direct", updatedAt: now - 5 * min, lastMessagePreview: "Tests pass — 21/21.", workspaceDir: "/Users/you/dev/littleguy" },
     { key: "agent:bot:dashboard:b1", agentId: "bot", kind: "direct", label: "Invoice export", updatedAt: now - 2 * 60 * min, lastMessagePreview: "CSV export is in.", workspaceDir: "/Users/you/dev/billing-api" },
@@ -128,7 +129,7 @@ claude.status = {
 const ccKey = (id: string) => `agent:claude:dashboard:${id}`;
 const claudeCode = gateway("claude-5f2a9c1e7b", "Claude Code", "This Mac", "connected", {
   defaultAgentId: "claude",
-  agents: [{ id: "claude", name: "Claude Code", identity: { name: "Claude Code", emoji: "✳️" }, workspace: "/Users/you" }] as never,
+  agents: [{ id: "claude", name: "Claude Code", identity: { name: "Claude Code", avatarUrl: claudeFace }, workspace: "/Users/you" }] as never,
   sessions: [
     { key: ccKey("c1"), agentId: "claude", kind: "direct", derivedTitle: "Fix the flaky checkout test", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 20_000, lastMessagePreview: "Running the suite 20 times to catch the race…", hasActiveRun: true, status: "running" },
     { key: ccKey("c2"), agentId: "claude", kind: "direct", derivedTitle: "Upgrade the Terraform providers", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 2 * min, lastMessagePreview: "The plan only touches the providers. Applying it next.", status: "done" },

@@ -1450,8 +1450,12 @@ impl Inner {
     fn agents_list(&self) -> Value {
         let name = self.agent_name();
         let mut identity = json!({ "name": name });
-        if let Some(emoji) = self.config.emoji.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
-            identity["emoji"] = json!(emoji);
+        let claude = self.config.registry_id.as_deref().is_some_and(|id| id.contains("claude"));
+        match self.config.emoji.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            // ✳️ was Claude's face before it got the mascot.
+            Some("✳️") | None if claude => identity["avatarUrl"] = json!(super::claude_face()),
+            Some(emoji) => identity["emoji"] = json!(emoji),
+            None => {}
         }
         json!({
             "defaultId": AGENT_ID,

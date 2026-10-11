@@ -1471,7 +1471,7 @@ fn agents_list(inner: &Inner) -> Value {
         "agents": [{
             "id": AGENT_ID,
             "name": name,
-            "identity": { "name": name, "emoji": "✳️" },
+            "identity": { "name": name, "avatarUrl": super::claude_face() },
             "workspace": dirs::home_dir().map(|h| h.display().to_string()),
         }],
     })
