@@ -6,7 +6,7 @@
 //! Calls (`Runtime::call(method, params)`):
 //! - `agents.list` → `{defaultId, agents:[{id, name, identity:{name, emoji}, workspace?, model?:{primary}}]}`
 //! - `sessions.list {limit?, archived?}` → `{sessions:[SessionRow-ish: {key, agentId, label?, derivedTitle?,
-//!   displayName?, lastMessagePreview?, updatedAt, unread?, archived?, hasActiveRun?, status?, sessionId?}]}`:
+//!   displayName?, lastMessagePreview?, updatedAt, unread?, lastReadAt?, archived?, hasActiveRun?, status?, sessionId?}]}`:
 //!   the threads that aren't archived; `archived: true` lists only archived ones, `"all"` both ([`archived_filter`])
 //! - `sessions.subscribe`, `sessions.messages.subscribe {key}` → `{subscribed:true}`
 //! - `sessions.create {agentId, label?}` → `{ok:true, key}`

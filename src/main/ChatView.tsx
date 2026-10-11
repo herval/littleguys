@@ -4,6 +4,7 @@ import { sessions as sessionsApi } from "../lib/gateway";
 import { channelName, gatewayOf, guyName, hasMainChat, isOnThisMac, isRunning, phaseLabel, sessionRow, threadKind, threadTitle } from "../lib/guys";
 import { core } from "../lib/ipc";
 import { presentTense, toolKind } from "../lib/toolPhrases";
+import { firstUnread } from "../lib/transcript";
 import type { Guy, SessionRow } from "../lib/types";
 import { useApp } from "../stores/app";
 import { useArchive, useArchivedRow } from "../stores/archive";
@@ -14,6 +15,9 @@ import { Approvals } from "./Approvals";
 import { Composer } from "./Composer";
 import { FolderPicker, threadFolder, tildify, usePendingFolder } from "./FolderPicker";
 import { phaseLabel as livePhaseLabel, toItems, Transcript } from "./Transcript";
+
+/** How far down the pane an unread thread opens its "New" divider: under the day chip, with a bit of what you'd read. */
+const NEW_DIVIDER_TOP = 64;
 
 export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) {
   const agent = guy;
@@ -38,6 +42,10 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   // scrolling back down to the bottom turns it on again.
   const follow = useRef(true);
   const lastTop = useRef(0);
+  // An unread thread opens at its "New" divider instead, and keeps it there as
+  // things above it lay out, until you scroll or send. While everything new fits
+  // on screen that's the bottom anyway, so replies still come into view.
+  const atNew = useRef(false);
   const [showJump, setShowJump] = useState(false);
   const setFollow = useCallback((on: boolean) => {
     follow.current = on;
@@ -45,14 +53,30 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   }, []);
   const pin = useCallback(() => {
     const el = scrollRef.current;
-    if (!el || !follow.current) return;
+    if (!el) return;
+    const divider = atNew.current ? el.querySelector<HTMLElement>("[data-new-divider]") : null;
+    if (divider) {
+      const bottom = el.scrollHeight - el.clientHeight;
+      const top = el.scrollTop + divider.getBoundingClientRect().top - el.getBoundingClientRect().top - NEW_DIVIDER_TOP;
+      el.scrollTop = Math.max(0, Math.min(top, bottom));
+      lastTop.current = el.scrollTop;
+      setFollow(el.scrollTop >= bottom - 1);
+      return;
+    }
+    if (!follow.current) return;
     el.scrollTop = el.scrollHeight;
     lastTop.current = el.scrollTop;
-  }, []);
+  }, [setFollow]);
 
   useEffect(() => {
     open(tid);
   }, [open, tid]);
+
+  // Where you left off, as it was when you opened the thread (opening it reads it).
+  const [readTo, setReadTo] = useState<number | null>();
+  useLayoutEffect(() => {
+    if (readTo === undefined && row) setReadTo(row.unread ? (row.lastReadAt ?? 0) : null);
+  }, [readTo, row]);
 
   // Opening a thread reads it, and so does a reply landing while it's open,
   // unless you marked it unread here: then it waits until you open it again.
@@ -67,8 +91,13 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   const items = useMemo(() => toItems(thread?.messages ?? [], pendingMessages), [thread?.messages, pendingMessages]);
   const live = thread?.live ?? null;
   const running = Boolean(live) || rosterRunning;
+  const newFrom = useMemo(() => (readTo == null ? -1 : firstUnread(items, readTo || undefined)), [items, readTo]);
 
-  useLayoutEffect(pin, [pin, items.length, live?.text, live?.phase, thread?.loaded]);
+  const openedAtNew = useRef(false);
+  useLayoutEffect(() => {
+    if (newFrom > 0 && !openedAtNew.current) openedAtNew.current = atNew.current = true;
+  }, [newFrom]);
+  useLayoutEffect(pin, [pin, items.length, live?.text, live?.phase, thread?.loaded, newFrom]);
 
   // Images, videos and code blocks finish laying out after the first render, and
   // the pane shrinks when approvals or a taller composer show up.
@@ -132,6 +161,10 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
         ref={scrollRef}
         onScroll={(e) => {
           const el = e.currentTarget;
+          if (atNew.current) {
+            if (Math.abs(el.scrollTop - lastTop.current) < 2) return; // pin's own scroll
+            atNew.current = false;
+          }
           const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
           // Content growing below never moves scrollTop, so being far from the
           // bottom alone doesn't mean the user left it. Moving up does (unless the
@@ -142,6 +175,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
         }}
         // Catches a scroll up even when new content lands in the same frame.
         onWheel={(e) => {
+          atNew.current = false;
           if (e.deltaY < 0 && e.currentTarget.scrollTop > 0) setFollow(false);
         }}
         className="relative min-h-0 flex-1 overflow-y-auto px-5 pb-4 pt-2"
@@ -183,6 +217,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             live={live}
             waiting={waitingCount(thread)}
             toolStatus={thread?.toolStatus ?? {}}
+            newFrom={newFrom}
           />
           {thread?.sendError && (
             <p className="mt-3 text-center text-[12px] text-[var(--color-bad)]">{thread.sendError}</p>
@@ -193,6 +228,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
         <div className="relative">
           <button
             onClick={() => {
+              atNew.current = false;
               setFollow(true);
               const el = scrollRef.current;
               if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
@@ -218,6 +254,9 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
           placeholder={kind === "channel" ? `Reply in ${channelName(sessionKey) ?? "channel"} as ${guyName(agent)}…` : `Message ${guyName(agent)}…`}
           running={running}
           onSend={async (text, attachments) => {
+            // Replying means you've caught up.
+            atNew.current = false;
+            setReadTo(null);
             // Writing in an archived thread brings it back (OpenClaw won't start work in one that's archived).
             if (row?.archived) await useArchive.getState().unarchive(guy, row);
             setFollow(true);

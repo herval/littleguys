@@ -69,7 +69,7 @@ const attic = gateway("openclaw", "attic", "wss://attic.tail1234.ts.net", forced
     ? []
     : ([agent("openclaw", "main", "Jefe", "🦆", "anthropic/claude-opus-5"), agent("openclaw", "fox", "Fox", "🦊", "anthropic/claude-sonnet-5")] as never),
   sessions: [
-    { key: "agent:main:main", agentId: "main", kind: "direct", updatedAt: now - 3 * min, lastMessagePreview: "Booked! Table for 2 at 8pm, confirmation in your inbox.", unread: true },
+    { key: "agent:main:main", agentId: "main", kind: "direct", updatedAt: now - 3 * min, lastMessagePreview: "Booked! Table for 2 at 8pm, confirmation in your inbox.", unread: true, lastReadAt: now - 12 * min + 5_000 },
     { key: "agent:main:dashboard:a1", agentId: "main", kind: "direct", label: "Japan trip", updatedAt: now - 2 * 60 * min, lastMessagePreview: "Here's a 10-day itinerary that keeps travel under 3h/day." },
     { key: "agent:main:dashboard:a0", agentId: "main", kind: "direct", label: "Apartment hunt", updatedAt: now - 12 * 24 * 60 * min, lastMessagePreview: "Shortlisted 4 places near the park.", archived: true },
     { key: "agent:main:dashboard:a9", agentId: "main", kind: "direct", label: "Tax receipts", updatedAt: now - 41 * 24 * 60 * min, lastMessagePreview: "All 37 receipts are filed.", archived: true },
@@ -84,7 +84,7 @@ const garage = gateway("gw-garage1", "garage-1", "wss://garage-1.tail1234.ts.net
   defaultAgentId: "main",
   agents: [agent("gw-garage1", "main", "Octo", "🐙", "openai/gpt-5.6-sol"), agent("gw-garage1", "turtle", "Turtle", "🐢", "ollama/qwen3")] as never,
   sessions: [
-    { key: "agent:main:main", agentId: "main", kind: "direct", updatedAt: now - 26 * min, lastMessagePreview: "Done — PR is up: fix flaky auth test", unread: true },
+    { key: "agent:main:main", agentId: "main", kind: "direct", updatedAt: now - 26 * min, lastMessagePreview: "Done — PR is up: fix flaky auth test", unread: true, lastReadAt: now - 50 * min + 5_000 },
     { key: "agent:main:dashboard:o2", agentId: "main", kind: "direct", label: "Refactor billing", updatedAt: now - 3 * 24 * 60 * min, lastMessagePreview: "I'd split it into three modules." },
     { key: "agent:turtle:main", agentId: "turtle", kind: "direct", updatedAt: now - 5 * 24 * 60 * min, lastMessagePreview: "Your plants were watered 🌱" },
   ] as never,

@@ -32,10 +32,10 @@ export interface MediaRef {
 export type Item =
   | { kind: "user"; id: string; text: string; media: MediaRef[]; sender?: string; ts?: number; pending?: boolean }
   | { kind: "text"; id: string; text: string; ts?: number }
-  | { kind: "thinking"; id: string; text: string }
-  | { kind: "tool"; id: string; call: ToolCallBlock; result?: ToolResult }
-  | { kind: "media"; id: string; media: MediaRef }
-  | { kind: "note"; id: string; text: string; tone: "muted" | "error" };
+  | { kind: "thinking"; id: string; text: string; ts?: number }
+  | { kind: "tool"; id: string; call: ToolCallBlock; result?: ToolResult; ts?: number }
+  | { kind: "media"; id: string; media: MediaRef; ts?: number }
+  | { kind: "note"; id: string; text: string; tone: "muted" | "error"; ts?: number };
 
 const HIDDEN_REPLIES = new Set(["NO_REPLY", "HEARTBEAT_OK"]);
 const OVERSIZED = /^\[[^\]]*history record omitted from context because it exceeded [^\]]*\]$/i;
@@ -152,7 +152,7 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
     const onlyText = bs.every((b) => b.type === "text");
     const joined = bs.map((b) => (b.type === "text" ? (b as { text: string }).text : "")).join("").trim();
     if (onlyText && OVERSIZED.test(joined)) {
-      items.push({ kind: "note", id, text: "Something large here (a file or a long output) was too big to load.", tone: "muted" });
+      items.push({ kind: "note", id, text: "Something large here (a file or a long output) was too big to load.", tone: "muted", ts: m.timestamp });
       return;
     }
 
@@ -178,27 +178,28 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
     }
 
     if (m.role === "assistant") {
+      const ts = m.timestamp;
       bs.forEach((b, j) => {
         const bid = `${id}:${j}`;
         const r = b as Rec;
         const type = str(r.type);
         if (type === "text") {
           const { text, files } = extractMediaLines(cleanDirectives((b as { text: string }).text));
-          if (text && !HIDDEN_REPLIES.has(text.trim())) items.push({ kind: "text", id: bid, text, ts: m.timestamp });
-          files.forEach((f, k) => items.push({ kind: "media", id: `${bid}:f${k}`, media: f }));
+          if (text && !HIDDEN_REPLIES.has(text.trim())) items.push({ kind: "text", id: bid, text, ts });
+          files.forEach((f, k) => items.push({ kind: "media", id: `${bid}:f${k}`, media: f, ts }));
         } else if (type === "thinking" || type === "reasoning") {
           const text = String(r.thinking ?? r.text ?? "").trim();
-          if (text) items.push({ kind: "thinking", id: bid, text });
+          if (text) items.push({ kind: "thinking", id: bid, text, ts });
         } else if (type === "toolCall" || type === "toolcall" || type === "tool_use") {
           const call: ToolCallBlock = { id: String(r.id ?? bid), name: String(r.name ?? "tool"), arguments: r.arguments ?? r.input };
-          items.push({ kind: "tool", id: bid, call, result: results.get(call.id) });
+          items.push({ kind: "tool", id: bid, call, result: results.get(call.id), ts });
         } else if (type !== "tool_result") {
           const ref = mediaFrom(r);
-          if (ref) items.push({ kind: "media", id: bid, media: ref });
+          if (ref) items.push({ kind: "media", id: bid, media: ref, ts });
         }
       });
       if (m.stopReason === "error") {
-        items.push({ kind: "note", id: `${id}:err`, text: "This reply hit an error.", tone: "error" });
+        items.push({ kind: "note", id: `${id}:err`, text: "This reply hit an error.", tone: "error", ts });
       }
       return;
     }
@@ -206,7 +207,7 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
     // system / custom notices
     const display = str((m as unknown as Rec).display);
     const text = display ?? bs.filter((b) => b.type === "text").map((b) => (b as { text: string }).text).join(" ");
-    if (text) items.push({ kind: "note", id, text: cleanPreview(text), tone: "muted" });
+    if (text) items.push({ kind: "note", id, text: cleanPreview(text), tone: "muted", ts: m.timestamp });
   });
 
   pending.forEach((m, i) => {
@@ -223,3 +224,18 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
   return items;
 }
 
+/**
+ * Where you left off in a thread that came back unread: the first item newer
+ * than `lastReadAt`, other than your own messages. Without a read time (or with
+ * nothing newer, as when you marked it unread yourself), the guy's latest reply.
+ * -1 when there's nothing before it to set apart.
+ */
+export function firstUnread(items: Item[], lastReadAt?: number): number {
+  const mine = (it: Item) => it.kind === "user" && !it.sender;
+  let at = lastReadAt ? items.findIndex((it) => !mine(it) && (it.ts ?? 0) > lastReadAt) : -1;
+  if (at < 0) {
+    const lastMine = items.findLastIndex(mine);
+    at = lastMine + 1 < items.length ? lastMine + 1 : -1;
+  }
+  return at > 0 ? at : -1;
+}

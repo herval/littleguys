@@ -68,6 +68,16 @@ function DayChip({ label }: { label: string }) {
   );
 }
 
+/** Where you left off: everything below it came in since you last read the thread. */
+function NewDivider() {
+  return (
+    <div data-new-divider role="separator" aria-label="New messages" className="animate-fade my-3 flex items-center gap-2">
+      <span className="h-px flex-1 bg-[var(--color-accent)]" />
+      <span className="rounded-full bg-[var(--color-accent-strong)] px-2 py-px text-[10.5px] font-semibold uppercase tracking-wide text-white">New</span>
+    </div>
+  );
+}
+
 type Step = Extract<Item, { kind: "tool" | "thinking" }>;
 type Section = { day: string; label: string; nodes: React.ReactNode[] };
 
@@ -79,6 +89,7 @@ export function Transcript({
   live,
   waiting = 0,
   toolStatus,
+  newFrom = -1,
 }: {
   gatewayId: string;
   sessionKey: string;
@@ -88,6 +99,8 @@ export function Transcript({
   /** The last `waiting` items are messages queued behind the reply in progress. */
   waiting?: number;
   toolStatus: Record<string, ToolState>;
+  /** Index of the first item you haven't seen: a "New" divider goes above it. */
+  newFrom?: number;
 }) {
   const sections: Section[] = [];
   let prevKind: string | null = null;
@@ -118,8 +131,12 @@ export function Transcript({
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const ts = "ts" in item && item.ts ? item.ts : 0;
+    const ts = item.ts ?? 0;
     const section = sectionFor(ts);
+    if (i === newFrom) {
+      section.nodes.push(<NewDivider key="new" />);
+      prevKind = null;
+    }
     if (ts && lastTs && ts - lastTs > 30 * 60_000 && dayKey(ts) === dayKey(lastTs)) {
       section.nodes.push(
         <div key={`ts-${item.id}`} className="py-2 text-center text-[11px] text-[var(--color-ink-3)]">
@@ -149,7 +166,9 @@ export function Transcript({
     } else if (item.kind === "tool" || item.kind === "thinking") {
       // Back-to-back steps fold into one line; the reply stays the focus.
       const steps: Step[] = [item];
-      while (i + 1 < items.length && (items[i + 1].kind === "tool" || items[i + 1].kind === "thinking")) steps.push(items[++i] as Step);
+      while (i + 1 < items.length && i + 1 !== newFrom && (items[i + 1].kind === "tool" || items[i + 1].kind === "thinking")) {
+        steps.push(items[++i] as Step);
+      }
       section.nodes.push(
         <GuyLine key={item.id} agent={agent} showAvatar={startsGroup}>
           <WorkLog steps={steps} toolStatus={toolStatus} live={Boolean(live)} />

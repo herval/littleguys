@@ -1710,6 +1710,9 @@ impl Inner {
         }
         if let Some(v) = params.get("unread").and_then(Value::as_bool) {
             meta.unread = v;
+            if !v {
+                meta.last_read_at = Some(now_ms());
+            }
         }
         if let Some(v) = params.get("pinned").and_then(Value::as_bool) {
             meta.pinned = v;
@@ -2223,6 +2226,7 @@ fn session_row(meta: &SessionMeta, running: bool, cwd: &str) -> Value {
         "createdAt": meta.created_at,
         "updatedAt": meta.updated_at,
         "unread": meta.unread,
+        "lastReadAt": meta.last_read_at,
         "pinned": meta.pinned,
         "archived": meta.archived,
         "hasActiveRun": running,
@@ -3805,6 +3809,9 @@ struct SessionMeta {
     last_preview: Option<String>,
     #[serde(default)]
     unread: bool,
+    /// When it was last marked read (ms): what came after is new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_read_at: Option<u64>,
     #[serde(default)]
     pinned: bool,
     #[serde(default)]
