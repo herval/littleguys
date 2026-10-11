@@ -3192,7 +3192,7 @@ async fn cron_call(inner: &Arc<Inner>, method: &str, params: &Value, timeout: Du
             .await;
             for (entry, summary) in entries.iter_mut().zip(summaries) {
                 if let Some(s) = summary {
-                    entry["summary"] = json!(s);
+                    entry["summary"] = json!(truncate(&s, 300));
                 }
             }
             let total = entries.len();
@@ -3247,7 +3247,39 @@ async fn run_summary(inner: &Inner, profile: &str, session_id: String) -> Option
         .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
         .map(|m| text_of(m.get("content").unwrap_or(&Value::Null)))
         .find(|t| !t.trim().is_empty())
-        .map(|t| truncate(&t, 300))
+}
+
+/// Whether Hermes held back delivery of the job's latest run (`suppressed`, `suppressed_acked`),
+/// from `latest_execution.delivery_outcome`; `None` when Hermes doesn't report it.
+fn delivery_suppressed(job: &Value) -> Option<bool> {
+    let outcome = job.pointer("/latest_execution/delivery_outcome").and_then(Value::as_str)?;
+    Some(outcome.starts_with("suppressed"))
+}
+
+/// Silence markers, as in Hermes' `gateway/response_filters.py` (`LIVE_GATEWAY_SILENT_MARKERS`).
+const SILENCE_MARKERS: [&str; 8] = ["[SILENT]", "SILENT", "NO_REPLY", "NO REPLY", "[静默]", "静默", "[沉默]", "沉默"];
+
+/// Whether a cron reply is Hermes' "nothing to report" sentinel, which it doesn't deliver.
+/// Mirrors `is_autonomous_silence_response`: a reply that opens with a bracketed marker, or whose
+/// whole text / first line / last line is a marker. A marker mid-sentence is real content.
+fn is_silence_response(text: &str) -> bool {
+    let text = text.trim();
+    let Some(first) = text.lines().find(|l| !l.trim().is_empty()) else { return false };
+    let last = text.lines().rfind(|l| !l.trim().is_empty()).unwrap_or(first);
+    let upper = text.to_uppercase();
+    SILENCE_MARKERS.iter().any(|m| m.starts_with('[') && upper.starts_with(m)) || [text, first, last].into_iter().any(is_silence_marker)
+}
+
+/// Exactly a marker, ignoring case, inner whitespace and stray punctuation at the edges.
+fn is_silence_marker(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 64 {
+        return false;
+    }
+    // Square brackets stay, so a malformed `[SILENT` doesn't become `SILENT`.
+    let edge = |c: char| c != '[' && c != ']' && (c.is_ascii_punctuation() && !"$+<=>^`|~".contains(c) || "。，、！？；：「」『』【】（）《》…—–‘’“”·".contains(c));
+    let canonical = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_uppercase();
+    [canonical(text), canonical(text.trim_matches(edge))].iter().any(|c| SILENCE_MARKERS.contains(&c.as_str()))
 }
 
 /// The newest run session of a job.
@@ -3334,10 +3366,17 @@ async fn cron_check(inner: &Arc<Inner>) {
         // The newest run session: where to read the reply.
         let mut session_key = Value::Null;
         let mut summary = job.get("last_error").and_then(Value::as_str).filter(|_| !ok).map(str::to_string);
+        // Hermes didn't deliver this run (a [SILENT] reply, a script with nothing to say, an acked
+        // failure…), so neither should we. Hermes reports that as the execution's delivery outcome;
+        // without one, fall back to spotting the [SILENT] reply ourselves.
+        let suppressed = delivery_suppressed(&job);
+        let mut silent = suppressed == Some(true);
         if let Some(run_id) = latest_run(inner, &id, &profile).await {
             session_key = json!(keys::routine_run(&profile, &id, &run_id));
             if summary.is_none() {
-                summary = run_summary(inner, &profile, run_id).await;
+                let reply = run_summary(inner, &profile, run_id).await;
+                silent |= suppressed.is_none() && ok && reply.as_deref().is_some_and(is_silence_response);
+                summary = reply.map(|t| truncate(&t, 300));
             }
         }
         emit(inner, "cron", json!({
@@ -3346,6 +3385,7 @@ async fn cron_check(inner: &Arc<Inner>) {
             "job": out,
             "status": if ok { "ok" } else { "error" },
             "summary": summary,
+            "silent": silent,
             "sessionKey": session_key,
         }));
     }
@@ -3944,6 +3984,34 @@ mod tests {
         assert!(normalize_http("  ", 1).is_err());
         assert!(is_loopback_url("http://127.0.0.1:9119"));
         assert!(!is_loopback_url("http://box.local:9119"));
+    }
+
+    #[test]
+    fn spots_silent_cron_replies() {
+        // Expected values from Hermes' own is_autonomous_silence_response on the same inputs.
+        let cases = [
+            ("[SILENT]", true), ("  [silent]  ", true), ("[SILENT] No changes detected", true), ("SILENT", true),
+            ("NO_REPLY", true), ("no reply", true), (".NO_REPLY", true), ("*NO_REPLY*", true), ("[SILENT", false),
+            ("Checked 12 feeds.\n[SILENT]", true), ("[SILENT]\nnothing new", true), ("Nothing new, so [SILENT] it is.", false),
+            ("Silent retry succeeded", false), ("", false), ("   ", false), ("【静默】", true), ("静默。", true),
+            ("**[SILENT]**", true), ("`[SILENT]`", false), ("(NO REPLY)", true), ("$SILENT", false), ("Alert: disk 91%", false),
+            ("no   reply", true), ("Report:\n- a\n- b\nSILENT.", true), ("NO_REPLY please ignore", false),
+        ];
+        for (text, silent) in cases {
+            assert_eq!(is_silence_response(text), silent, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn reads_hermes_delivery_outcome() {
+        let job = |outcome: Value| json!({ "id": "c7664bd199c2", "no_agent": true, "latest_execution": { "status": "completed", "delivery_outcome": outcome } });
+        assert_eq!(delivery_suppressed(&job(json!("suppressed"))), Some(true));
+        assert_eq!(delivery_suppressed(&job(json!("suppressed_acked"))), Some(true));
+        assert_eq!(delivery_suppressed(&job(json!("delivered"))), Some(false));
+        assert_eq!(delivery_suppressed(&job(json!("failed"))), Some(false));
+        assert_eq!(delivery_suppressed(&job(Value::Null)), None);
+        assert_eq!(delivery_suppressed(&json!({ "id": "x", "latest_execution": {} })), None);
+        assert_eq!(delivery_suppressed(&json!({ "id": "x" })), None);
     }
 
     #[test]

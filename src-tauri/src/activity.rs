@@ -656,6 +656,10 @@ impl Activity {
         if !agent_id.is_empty() && self.is_hidden(gateway, agent_id) {
             return;
         }
+        // The run had nothing to report (Hermes' [SILENT]).
+        if payload.get("silent").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
         let status = payload.get("status").and_then(Value::as_str).unwrap_or("ok");
         let summary = payload.get("summary").and_then(Value::as_str).map(|s| truncate(s, 180));
         let title = if agent_id.is_empty() {
