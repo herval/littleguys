@@ -1,6 +1,6 @@
 # littleguys
 
-littleguys is a free, open-source macOS menu bar app for chatting with, approving and scheduling your AI agents ([OpenClaw](https://openclaw.ai), [Hermes](https://github.com/NousResearch/hermes-agent), Claude Code, Codex and any [ACP](https://agentclientprotocol.com) agent) across all your machines. Each agent gets a little guy in your menu bar.
+littleguys is a free, open-source macOS menu bar app for chatting with, approving and scheduling your AI agents ([OpenClaw](https://openclaw.ai), [Hermes](https://github.com/NousResearch/hermes-agent), Claude Code, Codex and any [ACP](https://agentclientprotocol.com) agent) across all your machines. Each agent gets a little guy in your menu bar. See it in action at [littleguys.dev](https://littleguys.dev).
 
 <p align="center">
   <img src="docs/littleguys.gif" width="800" alt="The littleguys menu-bar popover listing guys with a quick reply, then the chat window with a guy at work">
