@@ -228,13 +228,13 @@ type Where = { gatewayId: string; sessionKey: string };
 const UserBubble = memo(function UserBubble({ item, first, where }: { item: Extract<Item, { kind: "user" }>; first: boolean; where: Where }) {
   return (
     <div className={`flex justify-end pl-16 ${first ? "mt-3" : "mt-1"} ${item.pending ? "opacity-60" : ""}`}>
-      <div className="flex max-w-[640px] flex-col items-end gap-1">
+      <div className="flex min-w-0 max-w-[640px] flex-col items-end gap-1">
         {first && item.sender && <span className="px-1 text-[11px] text-[var(--color-ink-3)]">{item.sender}</span>}
         {item.media.map((m, i) => (
           <MediaView key={i} media={m} where={where} />
         ))}
         {item.text && (
-          <div className="bubble-me rounded-2xl rounded-tr-md bg-[var(--color-bubble-me)] px-3.5 py-2 text-white">
+          <div className="bubble-me max-w-full rounded-2xl rounded-tr-md bg-[var(--color-bubble-me)] px-3.5 py-2 text-white">
             <Markdown text={item.text} />
           </div>
         )}
