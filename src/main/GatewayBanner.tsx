@@ -1,5 +1,5 @@
 import { AlertCircle, ChevronRight } from "lucide-react";
-import { phaseLabel } from "../lib/guys";
+import { needsAction, statusLabel } from "../lib/guys";
 import { useApp } from "../stores/app";
 
 /**
@@ -13,7 +13,7 @@ export function GatewayBanner() {
     (g) => g.enabled && ["pairing", "auth-failed", "offline", "error"].includes(g.status.phase),
   );
   if (troubled.length === 0) return null;
-  const urgent = troubled.some((g) => g.status.phase === "pairing" || g.status.phase === "auth-failed");
+  const urgent = troubled.some((g) => needsAction(g.status));
   return (
     <button
       onClick={() => setSettingsOpen(true)}
@@ -28,7 +28,7 @@ export function GatewayBanner() {
         {troubled.map((g, i) => (
           <span key={g.id}>
             {i > 0 && " · "}
-            <span className="font-medium">{g.name}</span> {phaseLabel(g.status.phase).toLowerCase()}
+            <span className="font-medium">{g.name}</span> {statusLabel(g.status).toLowerCase()}
           </span>
         ))}
       </span>

@@ -1,4 +1,5 @@
-// The two things a gateway can need from you: approve this Mac, or a token.
+// What a gateway can need from you: approve this Mac, a token, or a setting
+// changed on the gateway host.
 import { Check, Copy } from "lucide-react";
 import { useState } from "react";
 import { core, errorMessage } from "../lib/ipc";
@@ -50,6 +51,32 @@ export function PairingFix({ status, compact = false }: { status: ConnStatus; co
           This Mac shows up as “littleguys” (device {status.deviceId.slice(0, 8)}…). You can also approve it from OpenClaw's Control UI.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * The gateway sits behind a Tailscale Serve route it doesn't run itself, so it
+ * won't take connections through it until it trusts the route's (loopback)
+ * proxy. Letting OpenClaw run the route instead also works, but only on a
+ * loopback-only gateway.bind, so it isn't offered here.
+ */
+export function ProxyFix({ status, compact = false }: { status: ConnStatus; compact?: boolean }) {
+  const host = status.gatewayName || hostOf(status.url);
+  return (
+    <div>
+      <p className={compact ? "text-[12px]" : "font-medium"}>
+        On <span className="font-medium">{host}</span>, run:
+      </p>
+      <CopyLine text={`openclaw config set gateway.trustedProxies '["127.0.0.1"]' --strict-json`} />
+      <CopyLine text="openclaw gateway restart" />
+      <p className="mt-2 text-[11.5px] text-[var(--color-ink-3)]">
+        {host} is reachable through a Tailscale Serve route that OpenClaw doesn't run, so it turns away everything that comes through it,
+        before a token or setup code is even sent. This tells it to trust that route; its token and device approval still apply.
+      </p>
+      <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-[var(--color-ink-3)]">
+        <Spinner size={11} /> littleguys tries again every 30 seconds; you'll still approve this Mac once.
+      </p>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 // Derived, display-level facts about little guys and their threads, across
 // every connected gateway.
-import type { AgentSummary, Capabilities, GatewayRoster, Guy, Roster, SessionRow } from "./types";
+import type { AgentSummary, Capabilities, ConnStatus, GatewayRoster, Guy, Roster, SessionRow } from "./types";
 
 export interface GuyActivity {
   running: boolean;
@@ -228,6 +228,24 @@ export function cleanPreview(text: string | null | undefined): string {
     .replace(/\[\[[a-z_]+\]\]\s*/gi, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * The gateway turned the connection away at the door, before any token could
+ * be sent: it's behind a Tailscale Serve route (or proxy) it doesn't trust.
+ */
+export function needsProxyFix(status: ConnStatus | null | undefined): boolean {
+  return status?.phase === "error" && status.detailCode === "PROXY_ATTRIBUTION_REQUIRED";
+}
+
+/** `phaseLabel`, but naming errors you can fix. */
+export function statusLabel(status: ConnStatus | undefined): string {
+  return needsProxyFix(status) ? "Needs a setting" : phaseLabel(status?.phase);
+}
+
+/** Needs something from you (approval, a token, a setting), rather than just waiting. */
+export function needsAction(status: ConnStatus | undefined): boolean {
+  return status?.phase === "pairing" || status?.phase === "auth-failed" || needsProxyFix(status);
 }
 
 export function phaseLabel(phase: string | undefined): string {

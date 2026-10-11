@@ -89,8 +89,13 @@ const garage = gateway("gw-garage1", "garage-1", "wss://garage-1.tail1234.ts.net
 });
 
 const shed = gateway("gw-shed", "shed", "wss://shed.tail1234.ts.net", "pairing", {});
-const lab = gateway("gw-lab", "lab", "wss://lab.tail1234.ts.net", "offline", {});
-lab.status = { ...lab.status, message: "can't reach wss://lab.tail1234.ts.net: HTTP error: 403 Forbidden" };
+const lab = gateway("gw-lab", "lab", "wss://lab.tail1234.ts.net", "error", {});
+lab.status = {
+  ...lab.status,
+  detailCode: "PROXY_ATTRIBUTION_REQUIRED",
+  message:
+    "The gateway refuses connections that come through a Tailscale Serve route (or other proxy) it doesn't manage. A token or setup code won't get past this; it needs a setting changed on that machine.",
+};
 
 const hermes = gateway("hermes-1", "Hermes", "http://127.0.0.1:9119", "connected", {
   defaultAgentId: "default",

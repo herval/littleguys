@@ -1,7 +1,7 @@
 import { CornerDownLeft, MessageCircleReply, Plus, Power, Settings } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { chat as chatApi } from "../lib/gateway";
-import { activityFor, cleanPreview, defaultThread, guyName, isMultiGateway, liveGateways, phaseLabel, threadKind } from "../lib/guys";
+import { activityFor, cleanPreview, defaultThread, guyName, isMultiGateway, liveGateways, needsAction, needsProxyFix, statusLabel, threadKind } from "../lib/guys";
 import { core, errorMessage, listen } from "../lib/ipc";
 import type { GatewayRoster, Guy, Roster } from "../lib/types";
 import { sortGuys, useApp } from "../stores/app";
@@ -117,7 +117,7 @@ function Header({ roster }: { roster: Roster }) {
       ? `${live.length} of ${enabled.length} online`
       : live.length
         ? live[0].name
-        : phaseLabel(enabled[0]?.status.phase);
+        : statusLabel(enabled[0]?.status);
   return (
     <div className="flex items-center justify-between px-3.5 pb-1.5 pt-3">
       <span className="font-display text-[13px] font-semibold tracking-tight">littleguys</span>
@@ -136,7 +136,7 @@ function GatewayHeader({ gateway }: { gateway: GatewayRoster }) {
 }
 
 function TroubleRow({ gateway: g }: { gateway: GatewayRoster }) {
-  const urgent = g.status.phase === "pairing" || g.status.phase === "auth-failed";
+  const urgent = needsAction(g.status);
   return (
     <button
       onClick={() => core.openMain({ view: "settings" })}
@@ -144,7 +144,7 @@ function TroubleRow({ gateway: g }: { gateway: GatewayRoster }) {
     >
       <span className={`h-1.5 w-1.5 rounded-full ${urgent ? "bg-[var(--color-warn)]" : "bg-[var(--color-bad)]"}`} />
       <span className="font-medium">{g.name}</span>
-      <span className="text-[var(--color-ink-3)]">{phaseLabel(g.status.phase).toLowerCase()}</span>
+      <span className="text-[var(--color-ink-3)]">{statusLabel(g.status).toLowerCase()}</span>
       <span className="ml-auto text-[11px] text-[var(--color-accent-strong)]">{urgent ? "Fix →" : ""}</span>
     </button>
   );
@@ -273,7 +273,9 @@ function Disconnected({ gateway }: { gateway?: GatewayRoster }) {
     "auth-failed": { title: "Can't sign in", body: status?.message ?? "The gateway rejected littleguys' credentials." },
     offline: { title: "Gateway is offline", body: status?.message ?? "littleguys will keep retrying." },
     "no-config": { title: "Let's get you set up", body: "OpenClaw isn't set up on this Mac yet." },
-    error: { title: "Something's off", body: status?.message ?? "" },
+    error: needsProxyFix(status)
+      ? { title: "One setting on your gateway", body: `${gateway?.name ?? "Your gateway"} won't take connections through its Tailscale Serve route yet.` }
+      : { title: "Something's off", body: status?.message ?? "" },
   };
   const c = gateway ? (copy[phase] ?? copy.starting) : { title: "All gateways are off", body: "Turn one on in Settings." };
   const actionable = !gateway || (phase !== "starting" && phase !== "connecting");

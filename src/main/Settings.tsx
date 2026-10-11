@@ -1,13 +1,13 @@
 import { Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { phaseLabel, RUNTIME_LABEL } from "../lib/guys";
+import { needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
 import { core, errorMessage, isTauri, listen } from "../lib/ipc";
 import type { GatewayRoster, UpdateState } from "../lib/types";
 import { useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputClass, Modal } from "../ui/kit";
-import { CredentialFix, PairingFix } from "./GatewayFix";
+import { CredentialFix, PairingFix, ProxyFix } from "./GatewayFix";
 import { GuyVisibility } from "./GuyVisibility";
 
 export function Settings() {
@@ -97,7 +97,7 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
     ? "bg-[var(--color-ink-3)]/40"
     : phase === "connected"
       ? "bg-[var(--color-ok)]"
-      : phase === "pairing" || phase === "auth-failed"
+      : needsAction(g.status)
         ? "bg-[var(--color-warn)]"
         : phase === "connecting" || phase === "starting"
           ? "bg-[var(--color-warn)] animate-pulse"
@@ -151,7 +151,7 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
               ? g.status.kind === "acp"
                 ? "Ready"
                 : `${g.agents.length} ${g.agents.length === 1 ? "guy" : "guys"}`
-              : phaseLabel(phase)
+              : statusLabel(g.status)
             : "Off"}
         </span>
         <input
@@ -193,7 +193,12 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
           <CredentialFix status={g.status} />
         </div>
       )}
-      {g.enabled && (phase === "offline" || phase === "error" || phase === "no-config") && g.status.message && (
+      {g.enabled && needsProxyFix(g.status) && (
+        <div className="mt-3 border-t border-[var(--color-line)] pt-3">
+          <ProxyFix status={g.status} compact />
+        </div>
+      )}
+      {g.enabled && (phase === "offline" || phase === "error" || phase === "no-config") && g.status.message && !needsProxyFix(g.status) && (
         <p className="mt-2 text-[11.5px] text-[var(--color-ink-3)]">{g.status.message}</p>
       )}
       {missingAdmin && (

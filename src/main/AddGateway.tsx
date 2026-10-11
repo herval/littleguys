@@ -1,13 +1,13 @@
 import { ChevronRight, Globe, KeyRound, Network, RefreshCw, RotateCw, Trash2, Wifi } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { gatewayOf, phaseLabel } from "../lib/guys";
+import { gatewayOf, needsProxyFix, phaseLabel } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { DiscoveredGateway, GatewayRoster } from "../lib/types";
 import { useApp } from "../stores/app";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputBase, inputClass, Modal, Segmented, Spinner } from "../ui/kit";
 import { AcpTab, HermesTab } from "./AddBotTabs";
-import { CredentialFix, PairingFix } from "./GatewayFix";
+import { CredentialFix, PairingFix, ProxyFix } from "./GatewayFix";
 
 type Tab = "openclaw" | "hermes" | "acp";
 
@@ -87,8 +87,10 @@ function statusOf(g: GatewayRoster | undefined): { tone: Tone; label: string } {
     case "pairing":
     case "auth-failed":
       return { tone: "warn", label: phaseLabel(g.status.phase) };
-    case "offline":
     case "error":
+      if (needsProxyFix(g.status)) return { tone: "warn", label: "Needs a setting" };
+      return { tone: "bad", label: "Can't connect" };
+    case "offline":
     case "no-config":
       return { tone: "bad", label: "Can't connect" };
     default:
@@ -402,6 +404,8 @@ function GatewayStatus({ id, onDone, onBack }: { id: string; onDone: () => void;
           </p>
         ) : status.phase === "pairing" ? (
           <PairingFix status={status} />
+        ) : needsProxyFix(status) ? (
+          <ProxyFix status={status} />
         ) : status.phase === "auth-failed" ? (
           <>
             <p className="mb-3 text-[12.5px]">This gateway needs its token (or password) the first time.</p>

@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{self, Message};
 
 use super::identity::{build_payload_v3, DeviceAuthPayload, DeviceIdentity, DeviceToken, DeviceTokenStore};
 use crate::openclaw::config::{self, Credential, Endpoint, GatewayMode, OpenclawPaths};
@@ -168,6 +168,9 @@ enum Outcome {
     /// retrying early only extends the lockout.
     RateLimited { wait: Duration },
     RetryAfter(Duration),
+    /// The gateway refuses this route for a reason only a change on the
+    /// gateway host fixes (no credential gets past it).
+    Blocked { message: String, code: String },
     Fatal(String),
 }
 
@@ -384,6 +387,7 @@ async fn run(inner: Arc<Inner>) {
                 set_status(&inner, |s| {
                     s.phase = Phase::Offline;
                     s.message = Some(reason);
+                    s.detail_code = None;
                     s.hello = None;
                 });
                 backoff(attempt)
@@ -393,6 +397,7 @@ async fn run(inner: Arc<Inner>) {
                 set_status(&inner, |s| {
                     s.phase = if no_install { Phase::NoConfig } else { Phase::Offline };
                     s.message = Some(message);
+                    s.detail_code = None;
                     s.hello = None;
                 });
                 backoff(attempt)
@@ -432,10 +437,21 @@ async fn run(inner: Arc<Inner>) {
                 wait
             }
             Outcome::RetryAfter(delay) => delay,
+            Outcome::Blocked { message, code } => {
+                set_status(&inner, |s| {
+                    s.phase = Phase::Error;
+                    s.message = Some(message);
+                    s.detail_code = Some(code);
+                    s.hello = None;
+                });
+                // Picks up the fix on the gateway host without a click.
+                Duration::from_secs(30)
+            }
             Outcome::Fatal(message) => {
                 set_status(&inner, |s| {
                     s.phase = Phase::Error;
                     s.message = Some(message);
+                    s.detail_code = None;
                     s.hello = None;
                 });
                 Duration::from_secs(60)
@@ -525,6 +541,11 @@ async fn connect_and_serve(inner: &Arc<Inner>, endpoint: &Endpoint, credential: 
     let connect = tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false);
     let (ws, _) = match tokio::time::timeout(Duration::from_secs(10), connect).await {
         Ok(Ok(pair)) => pair,
+        Ok(Err(tungstenite::Error::Http(response))) => {
+            let retry_after = response.headers().get("Retry-After").and_then(|v| v.to_str().ok()?.trim().parse().ok());
+            let body = response.body().as_deref().unwrap_or_default();
+            return classify_upgrade_rejection(&endpoint.url, response.status().as_u16(), retry_after, body);
+        }
         Ok(Err(e)) => return Outcome::Unreachable(format!("can't reach {}: {e}", endpoint.url)),
         Err(_) => return Outcome::Unreachable(format!("timed out reaching {}", endpoint.url)),
     };
@@ -755,6 +776,28 @@ fn classify_connect_error(inner: &Inner, endpoint: &Endpoint, error: RpcError, u
     Outcome::Fatal(error.message)
 }
 
+/// The gateway answered the WebSocket upgrade with an HTTP error instead of a
+/// connect challenge, i.e. before any credential was exchanged. OpenClaw
+/// explains itself in a JSON body: `{error: {message, type}}`.
+fn classify_upgrade_rejection(url: &str, status: u16, retry_after_secs: Option<u64>, body: &[u8]) -> Outcome {
+    let error = serde_json::from_slice::<Value>(body).map(|v| v["error"].clone()).unwrap_or(Value::Null);
+    match (status, error["type"].as_str()) {
+        // Reached through a proxy (usually a Tailscale Serve route the user set
+        // up by hand) that the gateway doesn't trust to say who's connecting.
+        (403, Some("proxy_attribution_required")) => Outcome::Blocked {
+            message: "The gateway refuses connections that come through a Tailscale Serve route (or other proxy) it doesn't manage. \
+                      A token or setup code won't get past this; it needs a setting changed on that machine."
+                .into(),
+            code: "PROXY_ATTRIBUTION_REQUIRED".into(),
+        },
+        (429, _) => Outcome::RateLimited { wait: Duration::from_secs(retry_after_secs.unwrap_or(300).clamp(30, 900) + 5) },
+        _ => {
+            let reason = error["message"].as_str().filter(|m| !m.is_empty()).map(|m| format!(": {m}")).unwrap_or_default();
+            Outcome::Unreachable(format!("{url} turned littleguys away (HTTP {status}){reason}"))
+        }
+    }
+}
+
 fn handle_frame(inner: &Inner, text: &str) {
     let Ok(frame) = serde_json::from_str::<Value>(text) else {
         log::warn!("dropping unparseable gateway frame");
@@ -816,6 +859,28 @@ mod tests {
         assert_eq!(auth.unwrap()["bootstrapToken"], "boot");
         assert_eq!(sig.as_deref(), Some("boot"));
         assert!(!used);
+    }
+
+    #[test]
+    fn untrusted_proxy_rejection_needs_a_gateway_fix() {
+        let body = br#"{"error":{"message":"Proxy client attribution is required.","type":"proxy_attribution_required"}}"#;
+        match classify_upgrade_rejection("wss://attic.tail1234.ts.net", 403, None, body) {
+            Outcome::Blocked { code, .. } => assert_eq!(code, "PROXY_ATTRIBUTION_REQUIRED"),
+            _ => panic!("expected Blocked"),
+        }
+    }
+
+    #[test]
+    fn other_upgrade_rejections_keep_the_gateways_reason() {
+        let body = br#"{"error":{"message":"websocket handlers unavailable"}}"#;
+        match classify_upgrade_rejection("wss://attic.tail1234.ts.net", 503, None, body) {
+            Outcome::Unreachable(m) => assert!(m.contains("HTTP 503") && m.contains("websocket handlers unavailable"), "{m}"),
+            _ => panic!("expected Unreachable"),
+        }
+        match classify_upgrade_rejection("wss://attic.tail1234.ts.net", 429, Some(120), b"") {
+            Outcome::RateLimited { wait } => assert_eq!(wait, Duration::from_secs(125)),
+            _ => panic!("expected RateLimited"),
+        }
     }
 
     #[test]

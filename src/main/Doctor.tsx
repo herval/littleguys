@@ -2,11 +2,11 @@ import { ChevronRight, Plus, RotateCw, Stethoscope } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { core, errorMessage, listen } from "../lib/ipc";
 import type { ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
-import { phaseLabel } from "../lib/guys";
+import { needsProxyFix, statusLabel } from "../lib/guys";
 import { useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { Button, Field, inputClass, Spinner } from "../ui/kit";
-import { CredentialFix, hostOf, PairingFix } from "./GatewayFix";
+import { CredentialFix, hostOf, PairingFix, ProxyFix } from "./GatewayFix";
 
 /**
  * Shown whenever there's no live gateway connection: explains what's wrong in
@@ -64,10 +64,15 @@ export function Doctor() {
               <CredentialFix status={status!} />
             </Card>
           )}
+          {needsProxyFix(status) && (
+            <Card>
+              <ProxyFix status={status!} />
+            </Card>
+          )}
           {report?.issues
             .filter((i) => i.fix !== "pairing" && i.fix !== "credential")
             .map((issue) => <IssueCard key={issue.id} issue={issue} report={report} onDone={check} />)}
-          {report && report.issues.length === 0 && phase !== "pairing" && phase !== "auth-failed" && phase !== "connecting" && phase !== "starting" && (
+          {report && report.issues.length === 0 && phase !== "pairing" && phase !== "auth-failed" && phase !== "connecting" && phase !== "starting" && !needsProxyFix(status) && (
             <p className="text-center text-[12.5px] text-[var(--color-ink-3)]">
               Nothing obviously broken — littleguys keeps retrying{status?.message ? ` (${status.message})` : ""}.
             </p>
@@ -81,7 +86,7 @@ export function Doctor() {
               <Card key={g.id}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-medium">{g.name}</span>
-                  <span className="text-[12px] text-[var(--color-ink-3)]">{phaseLabel(g.status.phase)}</span>
+                  <span className="text-[12px] text-[var(--color-ink-3)]">{statusLabel(g.status)}</span>
                 </div>
                 {g.status.phase === "pairing" && (
                   <div className="mt-2">
@@ -91,6 +96,11 @@ export function Doctor() {
                 {g.status.phase === "auth-failed" && (
                   <div className="mt-2">
                     <CredentialFix status={g.status} />
+                  </div>
+                )}
+                {needsProxyFix(g.status) && (
+                  <div className="mt-2">
+                    <ProxyFix status={g.status} compact />
                   </div>
                 )}
               </Card>
@@ -126,7 +136,7 @@ function headline(status: ConnStatus | null): string {
     case "no-config":
       return "Let's set up your little guys";
     case "error":
-      return "Something's off";
+      return needsProxyFix(status) ? "One setting on your gateway" : "Something's off";
     default:
       return "Waking up…";
   }
@@ -145,7 +155,7 @@ function subline(status: ConnStatus | null): string {
     case "no-config":
       return "littleguys runs on OpenClaw. It'll install and set it up for you — no terminal needed.";
     case "error":
-      return status.message ?? "";
+      return needsProxyFix(status) ? `${hostOf(status.url)} won't take connections through its Tailscale Serve route yet.` : (status.message ?? "");
     default:
       return status?.url ? `Connecting to ${hostOf(status.url)}…` : "Connecting to OpenClaw…";
   }
