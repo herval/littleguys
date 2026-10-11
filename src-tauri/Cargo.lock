@@ -2640,6 +2640,7 @@ dependencies = [
  "if-addrs",
  "json5",
  "log",
+ "mac-notification-sys",
  "mdns-sd",
  "objc2",
  "objc2-app-kit",

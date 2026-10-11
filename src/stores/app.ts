@@ -205,6 +205,13 @@ export const useApp = create<AppState>((set, get) => ({
     if (nav.view === "new-guy") return get().startNewGuy();
     if (nav.view === "add-gateway") return set({ addGatewayOpen: true });
     const agentId = nav.agentId ?? (nav.sessionKey ? agentIdFromKey(nav.sessionKey) : null);
+    // Routine runs open in the Routines tab, not as a chat.
+    if (nav.gatewayId && agentId && nav.sessionKey && threadKind(nav.sessionKey) === "routine") {
+      const uid = guyUid(nav.gatewayId, agentId);
+      get().selectGuy(uid);
+      get().selectRoutineRun(nav.sessionKey, uid);
+      return set({ sidebarTab: "routines" });
+    }
     if (nav.gatewayId && agentId) get().selectGuy(guyUid(nav.gatewayId, agentId), nav.sessionKey ?? undefined);
     if (nav.view === "routines" || nav.view === "files" || nav.view === "skills") set({ view: nav.view, sidebarTab: nav.view });
   },
