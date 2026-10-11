@@ -126,8 +126,9 @@ impl TrayAnimator {
                     for (frame, hold) in schedule(mood) {
                         if shown != Some(*frame) {
                             if let (Some(tray), Some(image)) = (app.tray_by_id(TRAY_ID), images.get(frame)) {
-                                let _ = tray.set_icon(Some(image.clone()));
-                                let _ = tray.set_icon_as_template(true);
+                                // One call: set_icon alone draws the frame as a
+                                // non-template image until the template flag lands.
+                                let _ = tray.set_icon_with_as_template(Some(image.clone()), true);
                             }
                             shown = Some(*frame);
                         }
