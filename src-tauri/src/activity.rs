@@ -4,6 +4,7 @@
 //! as `lg:roster`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -57,6 +58,55 @@ struct GatewayState {
     automated: HashSet<String>,
     approvals: HashMap<String, Value>,
     refresh_scheduled: bool,
+    is_openclaw: bool,
+    /// key → newest thing the guy said in a turn. OpenClaw's `sessions.list`
+    /// preview reads the saved transcript, which some runtimes (claude-cli)
+    /// only fill in when the turn ends (or never, when it's stopped), so a
+    /// long turn would keep previewing the message that started it.
+    live_previews: HashMap<String, LivePreview>,
+    /// Running threads whose messages this connection streams (`sessions.messages.subscribe`).
+    watched: HashSet<String>,
+}
+
+struct LivePreview {
+    text: String,
+    /// The gateway's preview during the turn; once it moves on, the transcript has caught up.
+    saved: Option<String>,
+}
+
+impl GatewayState {
+    /// True when the shown text changed.
+    fn set_live_preview(&mut self, key: &str, text: String) -> bool {
+        if let Some(live) = self.live_previews.get_mut(key) {
+            return std::mem::replace(&mut live.text, text) != live.text;
+        }
+        let saved = self
+            .roster
+            .sessions
+            .iter()
+            .find(|r| r.get("key").and_then(Value::as_str) == Some(key))
+            .and_then(saved_preview)
+            .map(str::to_string);
+        self.live_previews.insert(key.to_string(), LivePreview { text, saved });
+        true
+    }
+
+    /// Folds a fresh `sessions.list` row in; returns its key when it's newly worth watching.
+    fn track_row(&mut self, row: &Value) -> Option<String> {
+        let key = row.get("key").and_then(Value::as_str)?;
+        if !run_active(row) {
+            if self.live_previews.get(key).is_some_and(|live| live.saved.as_deref() != saved_preview(row)) {
+                self.live_previews.remove(key);
+            }
+            return None;
+        }
+        self.running.insert(key.to_string());
+        if let Some(live) = self.live_previews.get_mut(key) {
+            live.saved = saved_preview(row).map(str::to_string);
+        }
+        // Stream its replies so the preview can follow the turn.
+        (self.is_openclaw && self.watched.insert(key.to_string())).then(|| key.to_string())
+    }
 }
 
 #[derive(Default)]
@@ -80,6 +130,7 @@ pub struct Activity {
     clients: Mutex<HashMap<String, Runtime>>,
     tray: TrayAnimator,
     state: Mutex<State>,
+    publish_pending: AtomicBool,
 }
 
 const SESSION_LIST_LIMIT: u64 = 400;
@@ -93,6 +144,7 @@ impl Activity {
             clients: Mutex::new(HashMap::new()),
             tray,
             state: Mutex::new(State::default()),
+            publish_pending: AtomicBool::new(false),
         })
     }
 
@@ -125,11 +177,13 @@ impl Activity {
     pub fn attach(&self, client: Runtime, name: String, enabled: bool) {
         let id = client.id().to_string();
         let status = client.status();
+        let is_openclaw = client.as_openclaw().is_some();
         self.clients.lock().unwrap().insert(id.clone(), client);
         let mut state = self.state.lock().unwrap();
         if state.gateway(&id).is_none() {
             state.gateways.push(GatewayState {
                 roster: GatewayRoster { id, name, enabled, status, ..Default::default() },
+                is_openclaw,
                 ..Default::default()
             });
         }
@@ -155,6 +209,8 @@ impl Activity {
                         g.roster.sessions.clear();
                         g.running.clear();
                         g.approvals.clear();
+                        g.live_previews.clear();
+                        g.watched.clear();
                         g.roster.loaded = false;
                     }
                 }
@@ -226,6 +282,8 @@ impl Activity {
             if let Some(g) = state.gateway(gateway) {
                 g.running.clear();
                 g.approvals.clear();
+                // Subscriptions don't survive a reconnect.
+                g.watched.clear();
             }
         }
         let this = self.clone();
@@ -268,6 +326,8 @@ impl Activity {
                             match payload.get("phase").and_then(Value::as_str) {
                                 Some("start") => {
                                     g.running.insert(key.to_string());
+                                    // A new turn: the saved transcript (your message) is newest again.
+                                    g.live_previews.remove(key);
                                 }
                                 Some("end") | Some("error") => {
                                     notify = g.running.remove(key) && !focused;
@@ -285,21 +345,45 @@ impl Activity {
             }
             "chat" => {
                 let state_name = payload.get("state").and_then(Value::as_str).unwrap_or_default();
+                let (mut ran, mut said) = (false, false);
                 if let Some(key) = payload.get("sessionKey").and_then(Value::as_str) {
                     let mut state = self.state.lock().unwrap();
                     if let Some(g) = state.gateway(gateway) {
-                        match state_name {
-                            "delta" | "status" => {
-                                g.running.insert(key.to_string());
+                        ran = match state_name {
+                            "delta" | "status" => g.running.insert(key.to_string()),
+                            "final" | "aborted" | "error" => g.running.remove(key),
+                            _ => false,
+                        };
+                        if state_name == "delta" && g.is_openclaw {
+                            let text = payload.get("message").map(message_text).unwrap_or_default();
+                            if let Some(latest) = newest_paragraph(&text) {
+                                said = g.set_live_preview(key, truncate(latest, 200));
                             }
-                            "final" | "aborted" | "error" => {
-                                g.running.remove(key);
-                            }
-                            _ => {}
                         }
                     }
                 }
-                self.publish();
+                if ran {
+                    self.publish();
+                } else if said {
+                    self.publish_soon();
+                }
+            }
+            "session.message" => {
+                let message = payload.get("message").unwrap_or(&Value::Null);
+                let text = message_text(message);
+                if let (Some(key), Some("assistant"), false) = (
+                    payload.get("sessionKey").and_then(Value::as_str),
+                    message.get("role").and_then(Value::as_str),
+                    text.trim().is_empty(),
+                ) {
+                    let said = {
+                        let mut state = self.state.lock().unwrap();
+                        state.gateway(gateway).filter(|g| g.is_openclaw).is_some_and(|g| g.set_live_preview(key, truncate(&text, 200)))
+                    };
+                    if said {
+                        self.publish_soon();
+                    }
+                }
             }
             "exec.approval.requested" => {
                 if let Some(id) = approval_id(payload) {
@@ -388,6 +472,7 @@ impl Activity {
                 }),
             )
         );
+        let mut watch = Vec::new();
         {
             let mut state = self.state.lock().unwrap();
             let Some(g) = state.gateway(gateway) else { return };
@@ -397,13 +482,7 @@ impl Activity {
             }
             if let Ok(sessions) = &sessions {
                 let rows = sessions.get("sessions").and_then(Value::as_array).cloned().unwrap_or_default();
-                for row in &rows {
-                    let active = row.get("hasActiveRun").and_then(Value::as_bool) == Some(true)
-                        || row.get("status").and_then(Value::as_str) == Some("running");
-                    if let (true, Some(key)) = (active, row.get("key").and_then(Value::as_str)) {
-                        g.running.insert(key.to_string());
-                    }
-                }
+                watch.extend(rows.iter().filter_map(|row| g.track_row(row)));
                 g.roster.sessions = rows;
             }
             g.roster.loaded = agents.is_ok() && sessions.is_ok();
@@ -423,6 +502,14 @@ impl Activity {
             log::warn!("sessions.list failed: {e}");
         }
         self.publish();
+        for key in watch {
+            if let Err(e) = client.call("sessions.messages.subscribe", json!({ "key": key })).await {
+                log::warn!("sessions.messages.subscribe {key} failed: {e}");
+                if let Some(g) = self.state.lock().unwrap().gateway(gateway) {
+                    g.watched.remove(&key);
+                }
+            }
+        }
     }
 
     fn snapshot(&self) -> Roster {
@@ -433,7 +520,30 @@ impl Activity {
         }
         let mut hidden: Vec<String> = self.hidden.lock().unwrap().iter().cloned().collect();
         hidden.sort();
-        Roster { gateways: state.gateways.iter().map(|g| g.roster.clone()).collect(), hidden, updated_at: now_ms() }
+        let gateways = state
+            .gateways
+            .iter()
+            .map(|g| {
+                let mut roster = g.roster.clone();
+                apply_live_previews(&mut roster.sessions, &g.live_previews);
+                roster
+            })
+            .collect();
+        Roster { gateways, hidden, updated_at: now_ms() }
+    }
+
+    /// Streamed text arrives in bursts across every running thread; one roster
+    /// update per beat is plenty for a preview line.
+    fn publish_soon(self: &Arc<Self>) {
+        if self.publish_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            this.publish_pending.store(false, Ordering::Release);
+            this.publish();
+        });
     }
 
     fn publish(&self) {
@@ -520,19 +630,21 @@ impl Activity {
             if this.main_window_focused() && focused == Some((gateway.clone(), key.clone())) {
                 return;
             }
-            let row = {
+            let preview = {
                 let mut state = this.state.lock().unwrap();
-                state.gateway(&gateway).and_then(|g| {
-                    g.roster.sessions.iter().find(|r| r.get("key").and_then(Value::as_str) == Some(key.as_str())).cloned()
+                state.gateway(&gateway).and_then(|g| match g.live_previews.get(&key) {
+                    Some(live) => Some(truncate(&live.text, 180)),
+                    None => g
+                        .roster
+                        .sessions
+                        .iter()
+                        .find(|r| r.get("key").and_then(Value::as_str) == Some(key.as_str()))
+                        .and_then(saved_preview)
+                        .map(|s| truncate(s, 180)),
                 })
             };
             let agent_id = agent_id_from_key(&key).unwrap_or_default();
-            let preview = row
-                .as_ref()
-                .and_then(|r| r.get("lastMessagePreview"))
-                .and_then(Value::as_str)
-                .map(|s| truncate(s, 180))
-                .unwrap_or_else(|| "Finished working.".into());
+            let preview = preview.unwrap_or_else(|| "Finished working.".into());
             this.show_notification(&this.agent_label(&gateway, &agent_id), &preview);
         });
     }
@@ -660,6 +772,50 @@ pub fn agent_display_name(agent: &Value) -> String {
     }
 }
 
+/// A chat message's text (`content` as a string or text blocks).
+fn message_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => String::new(),
+    }
+}
+
+/// A turn's streamed text piles up every reply in it; the last paragraph is what was just said.
+fn newest_paragraph(text: &str) -> Option<&str> {
+    text.rsplit("\n\n").map(str::trim).find(|p| !p.is_empty())
+}
+
+/// Rows preview what the guy said last in a turn the transcript hasn't caught up with.
+fn apply_live_previews(rows: &mut [Value], live: &HashMap<String, LivePreview>) {
+    if live.is_empty() {
+        return;
+    }
+    for row in rows {
+        if let Some(text) = row.get("key").and_then(Value::as_str).and_then(|k| live.get(k)).map(|l| l.text.clone()) {
+            row["lastMessagePreview"] = json!(text);
+        }
+    }
+}
+
+fn saved_preview(row: &Value) -> Option<&str> {
+    row.get("lastMessagePreview").and_then(Value::as_str)
+}
+
+/// OpenClaw's own rule: a settled `status` wins, then `hasActiveRun`. A
+/// stopped claude-cli turn can leave `status: "running"` behind for good.
+fn run_active(row: &Value) -> bool {
+    let status = row.get("status").and_then(Value::as_str);
+    if status.is_some_and(|s| s != "queued" && s != "running") {
+        return false;
+    }
+    row.get("hasActiveRun").and_then(Value::as_bool).unwrap_or(status.is_some())
+}
+
 fn truncate(s: &str, max: usize) -> String {
     let s = s.trim();
     if s.chars().count() <= max {
@@ -687,6 +843,61 @@ mod tests {
         assert_eq!(agent_id_from_key("agent:main:main").as_deref(), Some("main"));
         assert_eq!(agent_id_from_key("agent:fox:dashboard:123").as_deref(), Some("fox"));
         assert_eq!(agent_id_from_key("global"), None);
+    }
+
+    #[test]
+    fn previews_the_newest_reply_of_a_running_turn() {
+        let delta = json!({ "role": "assistant", "content": [{ "type": "text", "text": "On it. Checking the map first.\n\nFound the trail; packing snacks now.\n\n" }] });
+        assert_eq!(newest_paragraph(&message_text(&delta)), Some("Found the trail; packing snacks now."));
+        assert_eq!(newest_paragraph(" \n\n "), None);
+        let tool_turn = json!({ "role": "assistant", "content": [{ "type": "toolCall", "name": "Bash" }, { "type": "text", "text": "Tests pass." }] });
+        assert_eq!(message_text(&tool_turn), "Tests pass.");
+        assert_eq!(message_text(&json!({ "role": "user", "content": "go for it" })), "go for it");
+    }
+
+    #[test]
+    fn live_preview_lasts_until_the_transcript_catches_up() {
+        let key = "agent:fox:dashboard:a1";
+        let row = |preview: &str, status: &str, active: bool| {
+            json!({ "key": key, "lastMessagePreview": preview, "status": status, "hasActiveRun": active })
+        };
+        let shown = |g: &GatewayState| {
+            let mut rows = g.roster.sessions.clone();
+            apply_live_previews(&mut rows, &g.live_previews);
+            rows[0]["lastMessagePreview"].as_str().unwrap().to_string()
+        };
+        let mut g = GatewayState { is_openclaw: true, ..Default::default() };
+
+        // A long claude-cli turn: the gateway keeps previewing your message.
+        g.roster.sessions = vec![row("go for it", "running", true)];
+        assert_eq!(g.track_row(&g.roster.sessions[0].clone()).as_deref(), Some(key));
+        assert_eq!(g.track_row(&g.roster.sessions[0].clone()), None, "already watched");
+        assert!(g.set_live_preview(key, "Found the trail; packing snacks now.".into()));
+        assert!(!g.set_live_preview(key, "Found the trail; packing snacks now.".into()), "nothing new to publish");
+        assert_eq!(shown(&g), "Found the trail; packing snacks now.");
+
+        // Turn over, transcript not saved yet (or never, if it was stopped).
+        g.running.clear();
+        g.roster.sessions = vec![row("go for it", "running", false)];
+        g.track_row(&g.roster.sessions[0].clone());
+        assert!(g.running.is_empty(), "a stopped turn's leftover status isn't a run");
+        assert_eq!(shown(&g), "Found the trail; packing snacks now.");
+
+        // The transcript caught up: the gateway's preview wins again.
+        g.roster.sessions = vec![row("Trail's mapped, snacks packed.", "done", false)];
+        g.track_row(&g.roster.sessions[0].clone());
+        assert!(g.live_previews.is_empty());
+        assert_eq!(shown(&g), "Trail's mapped, snacks packed.");
+    }
+
+    #[test]
+    fn reads_run_state_like_openclaw() {
+        assert!(run_active(&json!({ "status": "running", "hasActiveRun": true })));
+        assert!(run_active(&json!({ "status": "queued" })));
+        assert!(run_active(&json!({ "hasActiveRun": true })));
+        assert!(!run_active(&json!({ "status": "running", "hasActiveRun": false })));
+        assert!(!run_active(&json!({ "status": "done", "hasActiveRun": true })));
+        assert!(!run_active(&json!({})));
     }
 
     #[test]
