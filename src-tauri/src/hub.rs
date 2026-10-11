@@ -258,6 +258,10 @@ impl Hub {
         }
         if let Some(url) = &url {
             let dup = self.entries.lock().unwrap().iter().any(|e| {
+                // Hermes: one server, many profiles — each profile is its own bot.
+                if let (RuntimeKind::Hermes, Some(new), Some(old)) = (kind, hermes.as_ref(), e.hermes.as_ref()) {
+                    return e.kind == kind && gateways::same_hermes_target(old, new);
+                }
                 e.kind == kind
                     && (e.url.as_deref().is_some_and(|u| gateways::same_endpoint(u, url))
                         || e.hermes.as_ref().and_then(|h| h.url.as_deref()).is_some_and(|u| gateways::same_endpoint(u, url))

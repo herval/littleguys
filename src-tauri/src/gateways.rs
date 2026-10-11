@@ -268,6 +268,29 @@ pub fn same_endpoint(a: &str, b: &str) -> bool {
     key(a) == key(b)
 }
 
+/// Whether two Hermes configs show the same guys: same server and same profile. One server
+/// can host several profiles (api mode reaches them at `/p/<profile>`), each its own entry.
+pub fn same_hermes_target(a: &HermesConfig, b: &HermesConfig) -> bool {
+    /// (server, profile): the profile comes from the Profile field, else a `/p/<profile>` URL;
+    /// with neither, api mode is the server's default profile and local mode shows them all.
+    fn target(c: &HermesConfig) -> (String, Option<String>) {
+        let url = c.url.as_deref().unwrap_or("").trim().trim_end_matches('/');
+        let (server, in_url) = match url.find("/p/") {
+            Some(i) => (&url[..i], url[i + 3..].split('/').next()),
+            None => (url, None),
+        };
+        let profile = c.profile.as_deref().map(str::trim).filter(|p| !p.is_empty()).or(in_url.filter(|p| !p.is_empty()));
+        let profile = match (profile, c.mode) {
+            (None, HermesMode::Api) => Some("default"),
+            (p, _) => p,
+        };
+        (server.to_string(), profile.map(str::to_string))
+    }
+    let (a_server, a_profile) = target(a);
+    let (b_server, b_profile) = target(b);
+    same_endpoint(&a_server, &b_server) && a_profile == b_profile
+}
+
 // ---- discovery ---------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
@@ -439,5 +462,26 @@ mod tests {
     fn matches_equivalent_endpoints() {
         assert!(same_endpoint("wss://attic.ts.net", "wss://attic.ts.net:443/"));
         assert!(!same_endpoint("wss://attic.ts.net", "wss://garage.ts.net"));
+    }
+
+    #[test]
+    fn hermes_profiles_on_one_server_are_different_bots() {
+        let api = |url: &str, profile: &str| HermesConfig {
+            mode: HermesMode::Api,
+            url: Some(url.into()),
+            profile: Some(profile.into()).filter(|p: &String| !p.is_empty()),
+        };
+        let server = "http://10.2.0.22:8642";
+        assert!(!same_hermes_target(&api(server, ""), &api(server, "infra")));
+        assert!(!same_hermes_target(&api(server, "radar"), &api(server, "infra")));
+        assert!(same_hermes_target(&api(server, "infra"), &api(server, "infra")));
+        assert!(same_hermes_target(&api(server, ""), &api(server, "default")));
+        assert!(same_hermes_target(&api(server, ""), &api("http://10.2.0.22:8642/", " ")));
+        assert!(same_hermes_target(&api(server, "infra"), &api("http://10.2.0.22:8642/p/infra", "")));
+        assert!(same_hermes_target(&api(server, "infra"), &api("http://10.2.0.22:8642/p/infra/", "infra")));
+        assert!(!same_hermes_target(&api(server, "infra"), &api("http://10.2.0.23:8642", "infra")));
+        let local = |profile: Option<&str>| HermesConfig { mode: HermesMode::Local, url: None, profile: profile.map(str::to_string) };
+        assert!(same_hermes_target(&local(None), &local(None)));
+        assert!(!same_hermes_target(&local(None), &local(Some("infra"))));
     }
 }
