@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,17 @@ pub struct GatewayEntry {
     pub acp: Option<AcpConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hermes: Option<HermesConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<ClaudeCodeConfig>,
+}
+
+/// Claude Code on this Mac: every session is a thread (see runtime/claudecode.rs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeCodeConfig {
+    /// littleguys answers background sessions' permission prompts (they wait for it).
+    #[serde(default)]
+    pub approvals: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -115,19 +127,32 @@ enum StoredCredential {
 
 pub struct GatewayStore {
     dir: PathBuf,
+    /// Saved entries this build can't read (a kind from a newer littleguys), written back
+    /// as they were, so going back a version never loses them.
+    kept: Mutex<Vec<Value>>,
 }
 
 impl GatewayStore {
     pub fn new(dir: &Path) -> Self {
-        Self { dir: dir.to_path_buf() }
+        Self { dir: dir.to_path_buf(), kept: Mutex::new(Vec::new()) }
     }
 
-    /// Saved gateways, with the `~/.openclaw` entry always present and first.
+    /// Saved gateways, with the `~/.openclaw` entry always present and first. Read entry
+    /// by entry: one this build doesn't understand is set aside, not the whole file.
     pub fn load(&self) -> Vec<GatewayEntry> {
-        let mut entries: Vec<GatewayEntry> = std::fs::read_to_string(self.dir.join("gateways.json"))
+        let rows: Vec<Value> = std::fs::read_to_string(self.dir.join("gateways.json"))
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
+        let mut entries = Vec::new();
+        let mut kept = Vec::new();
+        for row in rows {
+            match serde_json::from_value::<GatewayEntry>(row.clone()) {
+                Ok(entry) => entries.push(entry),
+                Err(_) => kept.push(row),
+            }
+        }
+        *self.kept.lock().unwrap() = kept;
         if let Some(pos) = entries.iter().position(|e| e.id == OPENCLAW_GATEWAY_ID) {
             let entry = entries.remove(pos);
             entries.insert(0, GatewayEntry { url: None, kind: RuntimeKind::Openclaw, ..entry });
@@ -143,6 +168,7 @@ impl GatewayStore {
                     kind: RuntimeKind::Openclaw,
                     acp: None,
                     hermes: None,
+                    claude: None,
                 },
             );
         }
@@ -150,7 +176,9 @@ impl GatewayStore {
     }
 
     pub fn save(&self, entries: &[GatewayEntry]) -> anyhow::Result<()> {
-        crate::gateway::identity::write_private(&self.dir.join("gateways.json"), &serde_json::to_vec_pretty(entries)?)
+        let mut rows = entries.iter().map(serde_json::to_value).collect::<serde_json::Result<Vec<Value>>>()?;
+        rows.extend(self.kept.lock().unwrap().iter().cloned());
+        crate::gateway::identity::write_private(&self.dir.join("gateways.json"), &serde_json::to_vec_pretty(&rows)?)
     }
 
     fn read_credentials(&self) -> HashMap<String, StoredCredential> {
@@ -428,6 +456,56 @@ async fn discover_bonjour() -> Vec<Discovered> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lg-gateways-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn claude_code_round_trips() {
+        let dir = scratch_dir();
+        let store = GatewayStore::new(&dir);
+        let mut entries = store.load();
+        entries.push(GatewayEntry {
+            id: "claude-1".into(),
+            name: String::new(),
+            url: None,
+            enabled: true,
+            added_at_ms: 1,
+            kind: RuntimeKind::Claudecode,
+            acp: None,
+            hermes: None,
+            claude: Some(ClaudeCodeConfig { approvals: true }),
+        });
+        store.save(&entries).unwrap();
+        let again = GatewayStore::new(&dir).load();
+        assert_eq!(again.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["openclaw", "claude-1"]);
+        assert_eq!(again[1].kind, RuntimeKind::Claudecode);
+        assert_eq!(again[1].claude, Some(ClaudeCodeConfig { approvals: true }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entries_from_a_newer_littleguys_survive_a_save() {
+        let dir = scratch_dir();
+        std::fs::write(
+            dir.join("gateways.json"),
+            r#"[{"id":"openclaw","kind":"openclaw"},{"id":"future-1","kind":"teleporter","teleporter":{"x":1}},{"id":"hermes-1","kind":"hermes","hermes":{"mode":"local"}}]"#,
+        )
+        .unwrap();
+        let store = GatewayStore::new(&dir);
+        let entries = store.load();
+        // The one it can't read doesn't take the others with it.
+        assert_eq!(entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["openclaw", "hermes-1"]);
+        store.save(&entries).unwrap();
+        let rows: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(dir.join("gateways.json")).unwrap()).unwrap();
+        assert_eq!(rows.len(), 3);
+        let future = rows.iter().find(|r| r["id"] == "future-1").unwrap();
+        assert_eq!(future, &serde_json::json!({ "id": "future-1", "kind": "teleporter", "teleporter": { "x": 1 } }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn normalizes_pasted_addresses() {

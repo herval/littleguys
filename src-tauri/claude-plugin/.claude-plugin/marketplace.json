@@ -1,0 +1,16 @@
+{
+  "name": "littleguys",
+  "owner": {
+    "name": "littleguys"
+  },
+  "metadata": {
+    "description": "littleguys: your Claude Code sessions in the menu bar."
+  },
+  "plugins": [
+    {
+      "name": "littleguys",
+      "source": "./plugin",
+      "description": "Shows every Claude Code session in littleguys, live, and lets you reply to them and answer their permission prompts from the menu bar."
+    }
+  ]
+}

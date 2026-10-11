@@ -1,0 +1,7 @@
+{
+  "name": "littleguys",
+  "version": "0.1.0",
+  "description": "Shows every Claude Code session in littleguys, live, and lets you reply to them and answer their permission prompts from the menu bar.",
+  "author": { "name": "littleguys" },
+  "homepage": "https://littleguys.dev"
+}

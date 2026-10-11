@@ -22,7 +22,7 @@ export type Phase =
   | "no-config"
   | "error";
 
-export type RuntimeKind = "openclaw" | "hermes" | "acp";
+export type RuntimeKind = "openclaw" | "hermes" | "acp" | "claudecode";
 
 /** What a bot runtime can do; the UI hides the rest (see src-tauri/src/runtime/mod.rs). */
 export interface Capabilities {
@@ -85,6 +85,8 @@ export interface HelloSnapshot {
   };
   snapshot?: { sessionDefaults?: { defaultAgentId?: string; mainSessionKey?: string } };
   features?: { methods?: string[] };
+  /** Claude Code: littleguys answers background sessions' permission prompts. */
+  approvals?: boolean;
 }
 
 export interface ExecApproval {
@@ -145,6 +147,19 @@ export interface HermesConfig {
   profile?: string | null;
 }
 
+/** Claude Code on this Mac (every session is a thread). */
+export interface ClaudeCodeConfig {
+  /** littleguys answers background sessions' permission prompts. */
+  approvals: boolean;
+}
+
+/** What `claude_code_detect` found. */
+export interface ClaudeCodeProbe {
+  installed: boolean;
+  version?: string | null;
+  plugin?: { enabled: boolean; folder?: string | null } | null;
+}
+
 export interface GatewayEntry {
   id: string;
   name: string;
@@ -154,6 +169,7 @@ export interface GatewayEntry {
   kind: RuntimeKind;
   acp?: AcpConfig;
   hermes?: HermesConfig;
+  claude?: ClaudeCodeConfig;
 }
 
 export interface RegistryAgent {

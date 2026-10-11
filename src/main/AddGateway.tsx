@@ -6,16 +6,16 @@ import type { DiscoveredGateway, GatewayRoster } from "../lib/types";
 import { useApp } from "../stores/app";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputBase, inputClass, Modal, Segmented, Spinner } from "../ui/kit";
-import { AcpTab, HermesTab } from "./AddBotTabs";
-import { CredentialFix, PairingFix, ProxyFix } from "./GatewayFix";
+import { AcpTab, ClaudeCodeTab, HermesTab } from "./AddBotTabs";
+import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix } from "./GatewayFix";
 
-type Tab = "openclaw" | "hermes" | "acp";
+type Tab = "openclaw" | "hermes" | "claude" | "acp";
 
 const sectionLabel = "text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]";
 
 /**
- * Adding a bot: an OpenClaw gateway, a Hermes install, or an ACP agent
- * (Claude Code, Codex, Gemini CLI…). Then it walks you through whatever the
+ * Adding a bot: an OpenClaw gateway, a Hermes install, Claude Code (every
+ * session on this Mac), or an ACP agent (Codex, Gemini CLI…). Then it walks you through whatever the
  * new bot needs (approval, token, login).
  */
 export function AddGateway() {
@@ -39,12 +39,14 @@ export function AddGateway() {
               options={[
                 { value: "openclaw", label: "OpenClaw" },
                 { value: "hermes", label: "Hermes" },
+                { value: "claude", label: "Claude Code" },
                 { value: "acp", label: "Agents (ACP)" },
               ]}
             />
             <div className="mt-5">
               {tab === "openclaw" && <OpenClawTab onOpen={setOpenId} />}
               {tab === "hermes" && <HermesTab onAdded={setOpenId} />}
+              {tab === "claude" && <ClaudeCodeTab onAdded={setOpenId} />}
               {tab === "acp" && <AcpTab onAdded={setOpenId} />}
             </div>
             <div className="mt-6 flex justify-end">
@@ -398,10 +400,14 @@ function GatewayStatus({ id, onDone, onBack }: { id: string; onDone: () => void;
             Connected
             {gateway.loaded && (
               <span className="font-normal text-[var(--color-ink-2)]">
-                — {gateway.agents.length} little {gateway.agents.length === 1 ? "guy" : "guys"} joined
+                {status.kind === "claudecode"
+                  ? ` — following ${gateway.sessions.length} ${gateway.sessions.length === 1 ? "session" : "sessions"}`
+                  : ` — ${gateway.agents.length} little ${gateway.agents.length === 1 ? "guy" : "guys"} joined`}
               </span>
             )}
           </p>
+        ) : needsClaudePlugin(status) ? (
+          <ClaudePluginFix status={status} />
         ) : status.phase === "pairing" ? (
           <PairingFix status={status} />
         ) : needsProxyFix(status) ? (

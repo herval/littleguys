@@ -10,9 +10,9 @@ use tauri::AppHandle;
 use crate::activity::Activity;
 use crate::gateway::client::{ConnStatus, EndpointSource, GatewayClient, Hooks};
 use crate::gateway::identity::{now_ms, DeviceIdentity, DeviceTokenStore};
-use crate::gateways::{self, AcpConfig, Discovered, GatewayEntry, GatewayStore, HermesConfig, OPENCLAW_GATEWAY_ID};
+use crate::gateways::{self, AcpConfig, ClaudeCodeConfig, Discovered, GatewayEntry, GatewayStore, HermesConfig, OPENCLAW_GATEWAY_ID};
 use crate::openclaw::config::{self, Credential, OpenclawPaths};
-use crate::runtime::{acp::AcpClient, hermes::HermesClient, Runtime, RuntimeKind};
+use crate::runtime::{acp::AcpClient, claudecode::ClaudeCodeClient, hermes::HermesClient, Runtime, RuntimeKind};
 
 pub struct Hub {
     app_version: String,
@@ -73,6 +73,9 @@ impl Hub {
         if entry.kind == RuntimeKind::Hermes && entry.url.is_none() {
             return "Hermes".into();
         }
+        if entry.kind == RuntimeKind::Claudecode {
+            return "Claude Code".into();
+        }
         match &entry.url {
             Some(url) => gateways::display_name_for(url),
             None => {
@@ -130,6 +133,13 @@ impl Hub {
                 name.clone(),
                 entry.acp.clone().unwrap_or_default(),
                 credential,
+                self.data_dir.clone(),
+                hooks,
+            )),
+            RuntimeKind::Claudecode => Runtime::ClaudeCode(ClaudeCodeClient::new(
+                entry.id.clone(),
+                name.clone(),
+                entry.claude.clone().unwrap_or_default(),
                 self.data_dir.clone(),
                 hooks,
             )),
@@ -204,6 +214,7 @@ impl Hub {
             kind: RuntimeKind::Openclaw,
             acp: None,
             hermes: None,
+            claude: None,
         };
         if credential.is_some() {
             self.store.set_credential(&entry.id, credential.as_ref()).map_err(|e| e.to_string())?;
@@ -236,20 +247,26 @@ impl Hub {
         Ok(id)
     }
 
-    /// Add a Hermes install or an ACP agent.
+    /// Add a Hermes install, an ACP agent or Claude Code.
     pub fn add_bot(
         &self,
         kind: RuntimeKind,
         name: Option<String>,
         acp: Option<AcpConfig>,
         hermes: Option<HermesConfig>,
+        claude: Option<ClaudeCodeConfig>,
         credential: Option<Credential>,
     ) -> Result<GatewayEntry, String> {
         let url = match kind {
             RuntimeKind::Openclaw => return Err("use add() for OpenClaw gateways".into()),
             RuntimeKind::Hermes => hermes.as_ref().and_then(|h| h.url.clone()),
             RuntimeKind::Acp => acp.as_ref().and_then(|a| a.url.clone()),
+            RuntimeKind::Claudecode => None,
         };
+        // One Mac, one Claude Code: it follows every session there.
+        if kind == RuntimeKind::Claudecode && self.entries.lock().unwrap().iter().any(|e| e.kind == kind) {
+            return Err("Claude Code is already added.".into());
+        }
         if kind == RuntimeKind::Acp {
             let cfg = acp.as_ref().ok_or("missing ACP agent settings")?;
             if cfg.command.as_deref().unwrap_or("").trim().is_empty() && cfg.url.as_deref().unwrap_or("").trim().is_empty() {
@@ -272,7 +289,15 @@ impl Hub {
             }
         }
         let entry = GatewayEntry {
-            id: format!("{}-{}", match kind { RuntimeKind::Hermes => "hermes", _ => "acp" }, &uuid::Uuid::new_v4().simple().to_string()[..10]),
+            id: format!(
+                "{}-{}",
+                match kind {
+                    RuntimeKind::Hermes => "hermes",
+                    RuntimeKind::Claudecode => "claude",
+                    _ => "acp",
+                },
+                &uuid::Uuid::new_v4().simple().to_string()[..10]
+            ),
             name: name.map(|n| n.trim().to_string()).unwrap_or_default(),
             url: None,
             enabled: true,
@@ -280,6 +305,7 @@ impl Hub {
             kind,
             acp,
             hermes,
+            claude: if kind == RuntimeKind::Claudecode { Some(claude.unwrap_or_default()) } else { None },
         };
         if credential.is_some() {
             self.store.set_credential(&entry.id, credential.as_ref()).map_err(|e| e.to_string())?;
@@ -325,6 +351,36 @@ impl Hub {
             }
         }
         self.activity.set_gateway_meta(id, name.map(|_| display), enabled);
+        Ok(())
+    }
+
+    /// Change a Claude Code connection's settings; it reconnects with them.
+    pub fn configure_claude(&self, id: &str, claude: ClaudeCodeConfig) -> Result<(), String> {
+        let entry = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.iter_mut().find(|e| e.id == id && e.kind == RuntimeKind::Claudecode).ok_or("unknown Claude Code connection")?;
+            entry.claude = Some(claude);
+            let entry = entry.clone();
+            self.store.save(&entries).map_err(|e| e.to_string())?;
+            entry
+        };
+        if let Some(client) = self.client(id) {
+            client.stop();
+            self.clients.lock().unwrap().retain(|c| c.id() != id);
+            self.activity.detach(id);
+            self.spawn(&entry);
+        }
+        Ok(())
+    }
+
+    /// Installs the littleguys plugin in Claude Code, then reconnects Claude Code.
+    pub async fn install_claude_plugin(&self) -> Result<(), String> {
+        crate::runtime::claudecode::install_plugin(&self.data_dir).await?;
+        for client in self.clients.lock().unwrap().iter() {
+            if matches!(client, Runtime::ClaudeCode(_)) {
+                client.reconnect_now();
+            }
+        }
         Ok(())
     }
 

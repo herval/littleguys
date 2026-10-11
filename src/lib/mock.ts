@@ -124,8 +124,44 @@ claude.status = {
   capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
 };
 
+// ?claudecode=1: Claude Code as its own kind (every session on this Mac is a thread) instead of an ACP agent.
+const ccKey = (id: string) => `agent:claude:dashboard:${id}`;
+const claudeCode = gateway("claude-5f2a9c1e7b", "Claude Code", "This Mac", "connected", {
+  defaultAgentId: "claude",
+  agents: [{ id: "claude", name: "Claude Code", identity: { name: "Claude Code", emoji: "✳️" }, workspace: "/Users/you" }] as never,
+  sessions: [
+    { key: ccKey("c1"), agentId: "claude", kind: "direct", derivedTitle: "Fix the flaky checkout test", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 20_000, lastMessagePreview: "Running the suite 20 times to catch the race…", hasActiveRun: true, status: "running" },
+    { key: ccKey("c2"), agentId: "claude", kind: "direct", derivedTitle: "Upgrade the Terraform providers", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 2 * min, lastMessagePreview: "The plan only touches the providers. Applying it next.", status: "done" },
+    { key: ccKey("c3"), agentId: "claude", kind: "direct", derivedTitle: "Add CSV export", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 40 * min, lastMessagePreview: "CSV export is in; 14 tests pass.", status: "done" },
+    { key: ccKey("c4"), agentId: "claude", kind: "direct", derivedTitle: "Weekly dependency bump", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 5 * 60 * min, lastMessagePreview: "Bumped 9 packages; nothing broke.", status: "done" },
+  ] as never,
+  running: [ccKey("c1")],
+  approvals: [
+    {
+      id: "ap-1",
+      agentId: "claude",
+      sessionKey: ccKey("c2"),
+      createdAtMs: now - 60_000,
+      presentation: { commandText: "terraform apply tfplan", allowedDecisions: ["allow-once", "allow-always", "deny"] },
+      request: { id: "ap-1", command: "terraform apply tfplan", agentId: "claude", sessionKey: ccKey("c2"), cwd: "/Users/you/dev/infra" },
+    },
+  ],
+});
+claudeCode.status = {
+  ...claudeCode.status,
+  kind: "claudecode",
+  mode: "local",
+  serverVersion: "2.1.296",
+  hello: { approvals: true },
+  capabilities: { manageGuys: false, routines: false, routinesLocal: false, approvals: true, threadActions: false, newThreads: false, attachments: false, models: false, files: false, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: false },
+};
+
 const roster: Roster = {
-  gateways: forcedPhase ? [attic] : params.get("single") ? [attic] : [attic, garage, shed, lab, hermes, claude],
+  gateways: forcedPhase
+    ? [attic]
+    : params.get("single")
+      ? [attic]
+      : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude],
   hidden: ["hermes-1/research"],
   updatedAt: now,
 };
@@ -150,6 +186,12 @@ const history: Record<string, ChatMessage[]> = {
       timestamp: now - 3 * min,
       ...oc("a3"),
     },
+  ],
+  "claude-5f2a9c1e7b|agent:claude:dashboard:c1": [
+    { role: "user", content: [{ type: "text", text: "the checkout test flakes on CI about once a day. find out why and fix it" }], timestamp: now - 9 * min, ...oc("k1") },
+    { role: "assistant", content: [{ type: "text", text: "I'll run it in a loop to reproduce it first." }, { type: "toolCall", id: "k2", name: "Bash", arguments: { command: "pnpm vitest run checkout --repeat 20" } }], timestamp: now - 8 * min, ...oc("k2") },
+    { role: "toolResult", toolCallId: "k2", toolName: "Bash", isError: false, content: [{ type: "text", text: "2 of 20 runs failed: expected total 41.80, got 41.79 (checkout.spec.ts:88)" }], ...oc("k3") },
+    { role: "assistant", content: [{ type: "text", text: "Found it: the tax is rounded per line on one path and on the total on the other, so some carts land a cent apart. Fixing the rounding in `totals.ts`, then running the suite 20 times to confirm." }], timestamp: now - 20_000, ...oc("k4") },
   ],
   "openclaw|agent:main:dashboard:a0": [
     { role: "user", content: "Find me 2-bedroom places near the park, under 3k.", timestamp: now - 12 * 24 * 60 * min - 90_000, ...oc("h1") },
@@ -563,8 +605,26 @@ export const mockBackend: Backend = {
       case "hermes_detect":
         await new Promise((r) => setTimeout(r, 600));
         return [{ url: "http://127.0.0.1:9119", version: "0.21.5", mode: "local", authRequired: false }] as T;
+      case "claude_code_detect":
+        await new Promise((r) => setTimeout(r, 400));
+        return { installed: true, version: "2.1.296", plugin: null } as T;
+      case "claude_code_install_plugin":
+        await new Promise((r) => setTimeout(r, 900));
+        return undefined as T;
+      case "claude_code_configure": {
+        const g = roster.gateways.find((g) => g.id === args?.id);
+        const approvals = Boolean((args?.claude as { approvals?: boolean })?.approvals);
+        if (g) g.status = { ...g.status, hello: { approvals }, capabilities: { ...g.status.capabilities, approvals } };
+        emit("lg:roster", { ...roster, gateways: [...roster.gateways] });
+        return undefined as T;
+      }
       case "bot_add": {
         const kind = String(args?.kind);
+        if (kind === "claudecode") {
+          if (!roster.gateways.includes(claudeCode)) roster.gateways.push(claudeCode);
+          emit("lg:roster", { ...roster, gateways: [...roster.gateways] });
+          return { id: claudeCode.id, name: "Claude Code", url: null, enabled: true, addedAtMs: Date.now(), kind } as T;
+        }
         const acp = args?.acp as { agentName?: string } | null;
         const name = (args?.name as string) || acp?.agentName || "Hermes";
         const id = `${kind}-${Date.now()}`;

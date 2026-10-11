@@ -165,8 +165,17 @@ function GuyHeader({ guy }: { guy: Guy }) {
   const multi = isMultiGateway(roster);
   const model = typeof guy.model === "object" && guy.model ? guy.model.primary : undefined;
   const isAcp = gateway?.status.kind === "acp";
+  const isClaudeCode = gateway?.status.kind === "claudecode";
   const subtitle = [
-    act.running ? "working…" : isAcp ? guy.gatewayName : model ? model.split("/").pop() : (runtime ?? "ready"),
+    act.running
+      ? "working…"
+      : isClaudeCode
+        ? "every session on this Mac"
+        : isAcp
+          ? guy.gatewayName
+          : model
+            ? model.split("/").pop()
+            : (runtime ?? "ready"),
     multi && !isAcp && guy.gatewayName !== guyName(guy) ? `on ${guy.gatewayName}` : null,
   ]
     .filter(Boolean)
@@ -245,6 +254,13 @@ function ThreadList({ guy }: { guy: Guy }) {
     return () => document.removeEventListener("lg:new-thread", handler);
   }, [newThread]);
 
+  // Claude Code: which sessions are waiting for your Allow or Deny (each is its own thread).
+  const waiting = useMemo(() => {
+    const g = gatewayOf(roster, guy.gatewayId);
+    if (g?.status.kind !== "claudecode") return new Set<string>();
+    return new Set(g.approvals.map((a) => a.sessionKey ?? a.request?.sessionKey ?? ""));
+  }, [roster, guy.gatewayId]);
+
   // Archiving or bringing back a thread, here or anywhere else, changes the guy's threads.
   const threadKeys = useMemo(
     () =>
@@ -313,6 +329,7 @@ function ThreadList({ guy }: { guy: Guy }) {
                   agentId={guy.id}
                   row={row}
                   running={isRunning(roster, guy.gatewayId, row.key)}
+                  needsYou={waiting.has(row.key)}
                   selected={selected === row.key}
                   onSelect={() => selectGuy(guy.uid, row.key)}
                 />
@@ -434,6 +451,7 @@ function ThreadRow({
   agentId,
   row,
   running,
+  needsYou = false,
   selected,
   onSelect,
 }: {
@@ -444,6 +462,8 @@ function ThreadRow({
   agentId: string;
   row: SessionRow;
   running: boolean;
+  /** Waiting for your Allow or Deny (Claude Code sessions). */
+  needsYou?: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -498,9 +518,13 @@ function ThreadRow({
               {channel}
             </span>
           )}
-          <p className={`truncate text-[12px] ${selected ? "text-white/80" : "text-[var(--color-ink-3)]"}`}>
-            {running ? "working…" : preview || (isMain ? "Your main chat" : isDraft ? "Say hi to start a thread" : "No messages yet")}
-          </p>
+          {needsYou ? (
+            <p className={`truncate text-[12px] font-medium ${selected ? "text-white" : "text-[var(--color-bad)]"}`}>needs your OK</p>
+          ) : (
+            <p className={`truncate text-[12px] ${selected ? "text-white/80" : "text-[var(--color-ink-3)]"}`}>
+              {running ? "working…" : preview || (isMain ? "Your main chat" : isDraft ? "Say hi to start a thread" : "No messages yet")}
+            </p>
+          )}
           {unread && <span className={`ml-auto h-2 w-2 shrink-0 rounded-full ${selected ? "bg-white" : "bg-[var(--color-accent)]"}`} />}
         </div>
       </div>

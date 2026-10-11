@@ -240,7 +240,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
           </button>
         </div>
       )}
-      <Approvals guy={guy} />
+      <Approvals guy={guy} sessionKey={sessionKey} />
       <div className="mx-auto w-full max-w-[900px]">
         {canPickFolder && unstarted && (pendingFolder ?? folder) && (
           <FolderPicker guy={guy} value={(pendingFolder ?? folder) as string} onChange={setPendingFolder} />
@@ -307,7 +307,7 @@ function ChatHeader({
   title: string;
   threadKey: string;
   sessionKey: string;
-  /** Shown for ACP threads, which each work in a folder. */
+  /** Shown for ACP and Claude Code threads, which each work in a folder. */
   folder: string | null;
   activity: string | null;
   browsing: boolean;
@@ -322,7 +322,7 @@ function ChatHeader({
   const channelLabel = channel ? channel.charAt(0).toUpperCase() + channel.slice(1) : null;
   // The main chat is just "talking to Jefe"; other threads say which one this is.
   const isMain = kind === "main" && gateway?.status.kind !== "acp";
-  const showFolder = gateway?.status.kind === "acp" && folder;
+  const showFolder = (gateway?.status.kind === "acp" || gateway?.status.kind === "claudecode") && folder;
   const threadLabel = isMain ? null : kind === "channel" ? `${title} on ${channelLabel}` : title;
 
   return (

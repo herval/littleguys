@@ -1,8 +1,8 @@
-// "Add a bot" tabs for runtimes other than OpenClaw: Hermes and ACP agents.
+// "Add a bot" tabs for runtimes other than OpenClaw: Hermes, Claude Code and ACP agents.
 import { Check, ChevronRight, Folder, Laptop, Network, RefreshCw, Terminal } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { core, errorMessage, isTauri } from "../lib/ipc";
-import type { HermesProbe, RegistryAgent } from "../lib/types";
+import type { ClaudeCodeProbe, HermesProbe, RegistryAgent } from "../lib/types";
 import { useApp } from "../stores/app";
 import { Button, Field, inputBase, inputClass, Spinner } from "../ui/kit";
 
@@ -154,6 +154,94 @@ export function HermesTab({ onAdded }: { onAdded: (id: string) => void }) {
       </div>
       {error && <p className="mt-3 text-[12.5px] text-[var(--color-bad)]">{error}</p>}
       <p className="mt-4 text-[11.5px] text-[var(--color-ink-3)]">Each Hermes profile shows up as its own little guy.</p>
+    </div>
+  );
+}
+
+// ---- Claude Code -----------------------------------------------------------------
+
+export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
+  const [probe, setProbe] = useState<ClaudeCodeProbe | null>(null);
+  const [approvals, setApprovals] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const added = useApp((s) => s.roster.gateways.find((g) => g.status.kind === "claudecode")?.id ?? null);
+
+  useEffect(() => {
+    core.bots
+      .claudeDetect()
+      .then(setProbe)
+      .catch(() => setProbe({ installed: false }));
+  }, []);
+
+  const add = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await core.bots.claudeInstallPlugin();
+      onAdded((await core.bots.addClaudeCode({ approvals })).id);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 rounded-xl border border-[var(--color-line)] px-3.5 py-3">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--color-chip)] text-[15px]">✳️</span>
+        <div className="min-w-0 flex-1">
+          <p className="font-medium">
+            Claude Code on this Mac
+            {probe?.version && <span className="ml-1.5 text-[11px] font-normal text-[var(--color-ink-3)]">v{probe.version}</span>}
+          </p>
+          <p className="text-[11.5px] text-[var(--color-ink-3)]">
+            {probe === null ? (
+              <span className="flex items-center gap-1.5">
+                <Spinner size={10} /> Looking for it…
+              </span>
+            ) : probe.installed ? (
+              "Every session, in a terminal or in the background, shows up as a thread you can follow and reply to."
+            ) : (
+              <>
+                Not installed. Get it at <span className="font-mono">claude.com/claude-code</span>, then come back.
+              </>
+            )}
+          </p>
+        </div>
+        {added ? (
+          <Button size="sm" onClick={() => onAdded(added)}>
+            <Check size={12} /> Added
+          </Button>
+        ) : (
+          <Button variant="primary" disabled={busy || !probe?.installed} onClick={add}>
+            {busy && <Spinner size={11} />} Add
+          </Button>
+        )}
+      </div>
+
+      {!added && (
+        <label className="mt-3 flex items-start gap-2.5 px-1 text-[12.5px]">
+          <input
+            type="checkbox"
+            className="mt-[3px] accent-[var(--color-accent)]"
+            checked={approvals}
+            onChange={(e) => setApprovals(e.target.checked)}
+          />
+          <span>
+            <span className="font-medium">Answer permission prompts here</span>
+            <span className="block text-[11.5px] text-[var(--color-ink-3)]">
+              Background sessions wait for your Allow or Deny in littleguys. Terminal sessions keep asking in their terminal.
+            </span>
+          </span>
+        </label>
+      )}
+      {error && <p className="mt-3 text-[12.5px] text-[var(--color-bad)]">{error}</p>}
+      <p className="mt-4 text-[11.5px] text-[var(--color-ink-3)]">
+        Adding it installs the littleguys plugin in Claude Code: a few hooks that tell littleguys when a session starts or finishes a turn,
+        and hand it your replies. They do nothing while littleguys isn't running.
+      </p>
     </div>
   );
 }

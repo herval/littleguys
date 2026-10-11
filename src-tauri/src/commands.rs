@@ -7,7 +7,7 @@ use tauri::{AppHandle, State};
 
 use crate::activity::{Activity, Roster};
 use crate::gateway::client::{ConnStatus, RpcError};
-use crate::gateways::{AcpConfig, GatewayEntry, HermesConfig};
+use crate::gateways::{AcpConfig, ClaudeCodeConfig, GatewayEntry, HermesConfig};
 use crate::runtime::RuntimeKind;
 use crate::updater::{UpdateState, Updates};
 use crate::hub::{DiscoveredGateway, Hub};
@@ -69,18 +69,37 @@ pub fn gateway_add(
     hub.add(&url, name, credential(kind, secret))
 }
 
-/// Add a Hermes install or an ACP agent (kind = "hermes" | "acp").
+/// Add a Hermes install, an ACP agent or Claude Code (kind = "hermes" | "acp" | "claudecode").
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn bot_add(
     hub: State<'_, Arc<Hub>>,
     kind: RuntimeKind,
     name: Option<String>,
     acp: Option<AcpConfig>,
     hermes: Option<HermesConfig>,
+    claude: Option<ClaudeCodeConfig>,
     secret_kind: Option<String>,
     secret: Option<String>,
 ) -> Result<GatewayEntry, String> {
-    hub.add_bot(kind, name, acp, hermes, credential(secret_kind, secret))
+    hub.add_bot(kind, name, acp, hermes, claude, credential(secret_kind, secret))
+}
+
+/// Claude Code on this Mac: `{installed, version, plugin: {enabled, folder} | null}`.
+#[tauri::command]
+pub async fn claude_code_detect() -> Result<Value, ()> {
+    Ok(crate::runtime::claudecode::detect().await)
+}
+
+/// Install (or repair) the littleguys plugin in Claude Code.
+#[tauri::command]
+pub async fn claude_code_install_plugin(hub: State<'_, Arc<Hub>>) -> Result<(), String> {
+    hub.install_claude_plugin().await
+}
+
+#[tauri::command]
+pub fn claude_code_configure(hub: State<'_, Arc<Hub>>, id: String, claude: ClaudeCodeConfig) -> Result<(), String> {
+    hub.configure_claude(&id, claude)
 }
 
 /// Launchable agents from the ACP registry (Claude Code, Codex, Gemini CLI, …).

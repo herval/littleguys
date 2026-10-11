@@ -81,6 +81,36 @@ export function ProxyFix({ status, compact = false }: { status: ConnStatus; comp
   );
 }
 
+/** Claude Code without the littleguys plugin (never installed, turned off, or installed by another littleguys). */
+export function needsClaudePlugin(status: ConnStatus): boolean {
+  return status.kind === "claudecode" && status.detailCode === "claude-plugin";
+}
+
+export function ClaudePluginFix({ status }: { status: ConnStatus }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const install = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await core.bots.claudeInstallPlugin();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      <p className="text-[12.5px]">{status.message}</p>
+      <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={install}>
+        {busy && <Spinner size={11} />} Install the plugin
+      </Button>
+      {error && <p className="mt-2 text-[11.5px] text-[var(--color-bad)]">{error}</p>}
+    </div>
+  );
+}
+
 export function CredentialFix({ status }: { status: ConnStatus }) {
   const [value, setValue] = useState("");
   const [kind, setKind] = useState<"token" | "password">("token");

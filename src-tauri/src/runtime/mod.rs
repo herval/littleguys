@@ -56,6 +56,7 @@
 //! - `cron {action:"finished", jobId, job:{name, agentId}, status: ok|error, summary?, sessionKey?}`
 
 pub mod acp;
+pub mod claudecode;
 pub mod hermes;
 pub mod scheduler;
 
@@ -74,6 +75,8 @@ pub enum RuntimeKind {
     Openclaw,
     Hermes,
     Acp,
+    /// Every Claude Code session on this Mac (`claudecode`).
+    Claudecode,
 }
 
 /// What a runtime can do; the UI hides everything else.
@@ -163,6 +166,7 @@ pub enum Runtime {
     OpenClaw(GatewayClient),
     Hermes(hermes::HermesClient),
     Acp(acp::AcpClient),
+    ClaudeCode(claudecode::ClaudeCodeClient),
 }
 
 macro_rules! each {
@@ -171,6 +175,7 @@ macro_rules! each {
             Runtime::OpenClaw($c) => $e,
             Runtime::Hermes($c) => $e,
             Runtime::Acp($c) => $e,
+            Runtime::ClaudeCode($c) => $e,
         }
     };
 }

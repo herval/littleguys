@@ -7,7 +7,7 @@ import { useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputClass, Modal } from "../ui/kit";
-import { CredentialFix, PairingFix, ProxyFix } from "./GatewayFix";
+import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix } from "./GatewayFix";
 import { GuyVisibility } from "./GuyVisibility";
 
 export function Settings() {
@@ -150,7 +150,9 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
             ? phase === "connected" && g.loaded
               ? g.status.kind === "acp"
                 ? "Ready"
-                : `${g.agents.length} ${g.agents.length === 1 ? "guy" : "guys"}`
+                : g.status.kind === "claudecode"
+                  ? `${g.sessions.length} ${g.sessions.length === 1 ? "session" : "sessions"}`
+                  : `${g.agents.length} ${g.agents.length === 1 ? "guy" : "guys"}`
               : statusLabel(g.status)
             : "Off"}
         </span>
@@ -174,7 +176,9 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
               const what =
                 g.status.kind === "acp"
                   ? `Remove ${g.name}? Its chat history in littleguys goes too.`
-                  : `Remove ${g.name}? Its little guys stay where they are; they just won't show up here.`;
+                  : g.status.kind === "claudecode"
+                    ? `Remove ${g.name}? Your sessions keep running; they just won't show up here.`
+                    : `Remove ${g.name}? Its little guys stay where they are; they just won't show up here.`;
               if (await confirmAction(what, "littleguys", "Remove"))
                 run(() => core.gateways.remove(g.id));
             }}
@@ -198,7 +202,17 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
           <ProxyFix status={g.status} compact />
         </div>
       )}
-      {g.enabled && (phase === "offline" || phase === "error" || phase === "no-config") && g.status.message && !needsProxyFix(g.status) && (
+      {g.enabled && needsClaudePlugin(g.status) && (
+        <div className="mt-3 border-t border-[var(--color-line)] pt-3">
+          <ClaudePluginFix status={g.status} />
+        </div>
+      )}
+      {g.status.kind === "claudecode" && <ClaudeApprovals gateway={g} onError={setError} />}
+      {g.enabled &&
+        (phase === "offline" || phase === "error" || phase === "no-config") &&
+        g.status.message &&
+        !needsProxyFix(g.status) &&
+        !needsClaudePlugin(g.status) && (
         <p className="mt-2 text-[11.5px] text-[var(--color-ink-3)]">{g.status.message}</p>
       )}
       {missingAdmin && (
@@ -208,6 +222,27 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
       )}
       {error && <p className="mt-2 text-[11.5px] text-[var(--color-bad)]">{error}</p>}
     </div>
+  );
+}
+
+/** Claude Code's one setting: whether littleguys answers background sessions' permission prompts. */
+function ClaudeApprovals({ gateway: g, onError }: { gateway: GatewayRoster; onError: (e: string) => void }) {
+  const on = g.status.capabilities.approvals;
+  return (
+    <label className="mt-3 flex items-start gap-2.5 border-t border-[var(--color-line)] pt-3 text-[12.5px]">
+      <input
+        type="checkbox"
+        className="mt-[3px] accent-[var(--color-accent)]"
+        checked={on}
+        onChange={(e) => core.bots.claudeConfigure(g.id, { approvals: e.target.checked }).catch((err) => onError(errorMessage(err)))}
+      />
+      <span>
+        <span className="font-medium">Answer permission prompts here</span>
+        <span className="block text-[11.5px] text-[var(--color-ink-3)]">
+          Background sessions wait for your Allow or Deny in littleguys. Terminal sessions keep asking in their terminal.
+        </span>
+      </span>
+    </label>
   );
 }
 

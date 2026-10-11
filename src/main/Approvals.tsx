@@ -23,10 +23,20 @@ function approvalAgent(a: ExecApproval): string | null {
   return a.agentId ?? a.request?.agentId ?? agentIdFromKey(a.sessionKey ?? a.request?.sessionKey ?? "");
 }
 
-/** Pending "can I run this?" requests from the selected guy, answered inline. */
-export function Approvals({ guy }: { guy: Guy }) {
+/**
+ * Pending "can I run this?" requests from the selected guy, answered inline.
+ * Claude Code's threads are separate sessions, so each shows only its own.
+ */
+export function Approvals({ guy, sessionKey }: { guy: Guy; sessionKey: string }) {
   const all = useApp((s) => gatewayOf(s.roster, guy.gatewayId)?.approvals);
-  const approvals = useMemo(() => (all ?? []).filter((a) => approvalAgent(a) === guy.id), [all, guy.id]);
+  const perSession = useApp((s) => gatewayOf(s.roster, guy.gatewayId)?.status.kind === "claudecode");
+  const approvals = useMemo(
+    () =>
+      (all ?? []).filter(
+        (a) => approvalAgent(a) === guy.id && (!perSession || (a.sessionKey ?? a.request?.sessionKey) === sessionKey),
+      ),
+    [all, guy.id, perSession, sessionKey],
+  );
   if (approvals.length === 0) return null;
   return (
     <div className="mx-auto w-full max-w-[900px] space-y-2 px-4 pb-1">

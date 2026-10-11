@@ -3,6 +3,8 @@
 // backend with fixture data is used so the UI can be iterated on directly.
 import type {
   AcpConfig,
+  ClaudeCodeConfig,
+  ClaudeCodeProbe,
   ConnStatus,
   DiscoveredGateway,
   DoctorReport,
@@ -116,11 +118,17 @@ export const core = {
   },
   bots: {
     addAcp: (acp: AcpConfig, name?: string, secret?: string) =>
-      invoke<GatewayEntry>("bot_add", { kind: "acp", name: name ?? null, acp, hermes: null, secretKind: secret ? "token" : null, secret: secret ?? null }),
+      invoke<GatewayEntry>("bot_add", { kind: "acp", name: name ?? null, acp, hermes: null, claude: null, secretKind: secret ? "token" : null, secret: secret ?? null }),
     addHermes: (hermes: HermesConfig, name?: string, apiKey?: string) =>
-      invoke<GatewayEntry>("bot_add", { kind: "hermes", name: name ?? null, acp: null, hermes, secretKind: apiKey ? "token" : null, secret: apiKey ?? null }),
+      invoke<GatewayEntry>("bot_add", { kind: "hermes", name: name ?? null, acp: null, hermes, claude: null, secretKind: apiKey ? "token" : null, secret: apiKey ?? null }),
     acpRegistry: () => invoke<RegistryAgent[]>("acp_registry"),
     hermesDetect: () => invoke<HermesProbe[]>("hermes_detect"),
+    addClaudeCode: (claude: ClaudeCodeConfig) =>
+      invoke<GatewayEntry>("bot_add", { kind: "claudecode", name: null, acp: null, hermes: null, claude, secretKind: null, secret: null }),
+    claudeDetect: () => invoke<ClaudeCodeProbe>("claude_code_detect"),
+    /** Installs (or repairs) the littleguys plugin in Claude Code. */
+    claudeInstallPlugin: () => invoke<void>("claude_code_install_plugin"),
+    claudeConfigure: (id: string, claude: ClaudeCodeConfig) => invoke<void>("claude_code_configure", { id, claude }),
   },
   hidePopover: () => invoke<void>("hide_popover"),
   fitPopover: (height: number) => invoke<void>("fit_popover", { height }),

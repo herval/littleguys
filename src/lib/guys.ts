@@ -52,7 +52,7 @@ export function isOnThisMac(g: GatewayRoster | undefined): boolean {
   return kind === "acp" && !(url ?? "").startsWith("ws");
 }
 
-export const RUNTIME_LABEL: Record<string, string> = { openclaw: "OpenClaw", hermes: "Hermes", acp: "ACP agent" };
+export const RUNTIME_LABEL: Record<string, string> = { openclaw: "OpenClaw", hermes: "Hermes", acp: "ACP agent", claudecode: "Claude Code" };
 
 export function liveGateways(roster: Roster): GatewayRoster[] {
   return roster.gateways.filter((g) => g.enabled && g.status.phase === "connected");
@@ -121,10 +121,12 @@ export function channelName(key: string): string | null {
 /**
  * OpenClaw (and Hermes, via its "Bot Chat") give every guy a real main chat.
  * ACP agents only have threads: their `agent:<id>:main` key is just a draft
- * that becomes a thread on the first message.
+ * that becomes a thread on the first message. Claude Code's threads are its
+ * sessions.
  */
 export function hasMainChat(roster: Roster, gatewayId: string): boolean {
-  return gatewayOf(roster, gatewayId)?.status.kind !== "acp";
+  const kind = gatewayOf(roster, gatewayId)?.status.kind;
+  return kind !== "acp" && kind !== "claudecode";
 }
 
 /** Where to land for a guy: their main chat, or (ACP) their latest thread / a new draft. */
