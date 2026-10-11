@@ -85,6 +85,12 @@ cd src-tauri && cargo run --example discover                  # what "Add gatewa
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds the universal app, signs it with a Developer ID and notarizes it. It then publishes the `.dmg` and the signed update bundle to GitHub Releases, along with the `latest.json` the in-app updater reads (`src-tauri/src/updater.rs`), and bumps the cask in [herval/homebrew-tap](https://github.com/herval/homebrew-tap).
 
+The workflow's credentials live in the repo's GitHub secrets. `make release-secrets` sets them up once: it gets a Developer ID certificate from Apple (keeping the key in your login keychain), checks an app-specific password for notarization, stores the updater key and adds a deploy key to the tap. To cut a release, set the version in `src-tauri/tauri.conf.json`, commit, and push a matching tag:
+
+```bash
+git tag v0.1.1 && git push origin main v0.1.1
+```
+
 ## How it's built
 
 ```

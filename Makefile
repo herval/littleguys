@@ -1,7 +1,7 @@
 # littleguys: everyday commands. Run `make` to list them.
 
 .DEFAULT_GOAL := help
-.PHONY: help install run mock build release install-app check test clean
+.PHONY: help install run mock build release release-secrets install-app check test clean
 
 # One universal binary: runs on Apple silicon and Intel Macs.
 TARGET := universal-apple-darwin
@@ -16,7 +16,7 @@ LOCAL_PROFILE := CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_U
 APPS ?= /Applications
 
 help: ## List the commands
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-12s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-16s %s\n", $$1, $$2}'
 
 install: ## Install dependencies (needs Node 22+, pnpm and Rust)
 	@command -v pnpm >/dev/null || { echo "pnpm not found: run 'corepack enable' or 'npm i -g pnpm'"; exit 1; }
@@ -39,6 +39,9 @@ release: ## Same as build, plus the signed update bundle (.app.tar.gz + .sig) th
 	@test -f $(UPDATER_KEY) || { echo "No updater key at $(UPDATER_KEY)"; exit 1; }
 	TAURI_SIGNING_PRIVATE_KEY=$(UPDATER_KEY) TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$$(cat $(UPDATER_KEY).password)" \
 		pnpm tauri build --target $(TARGET) --config src-tauri/tauri.release.conf.json
+
+release-secrets: ## One-time: put the signing, notarization and tap credentials in GitHub secrets
+	scripts/release-secrets.sh
 
 install-app: ## Build littleguys.app for this Mac and put it in /Applications, quitting a running copy first
 	$(LOCAL_PROFILE) pnpm tauri build --target $(NATIVE) --bundles app

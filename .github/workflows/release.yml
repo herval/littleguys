@@ -4,7 +4,7 @@
 # latest.json (what the in-app updater reads). It then bumps the cask in
 # herval/homebrew-tap.
 #
-# Secrets:
+# Secrets (`make release-secrets` sets them all):
 #   APPLE_CERTIFICATE           Developer ID Application cert + key, exported as .p12, base64
 #   APPLE_CERTIFICATE_PASSWORD  the .p12's password
 #   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Herval Freire (TEAMID)"
@@ -13,7 +13,7 @@
 #   APPLE_TEAM_ID               the 10-character team ID
 #   TAURI_SIGNING_PRIVATE_KEY           contents of ~/.tauri/littleguys-updater.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  contents of ~/.tauri/littleguys-updater.key.password
-#   HOMEBREW_TAP_TOKEN          fine-grained token with Contents: write on herval/homebrew-tap
+#   HOMEBREW_TAP_DEPLOY_KEY     private half of a write deploy key on herval/homebrew-tap
 
 name: Release
 
@@ -41,6 +41,45 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME doesn't match version $version in src-tauri/tauri.conf.json"
             exit 1
           fi
+
+      # Checked up front, so a missing or wrong credential fails here and not after the build.
+      - name: Signing and notarization credentials work
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          missing=""
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD \
+            APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD HOMEBREW_TAP_DEPLOY_KEY; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secrets:$missing. Run make release-secrets."
+            exit 1
+          fi
+
+          kc="$RUNNER_TEMP/check.keychain"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p check "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$APPLE_CERTIFICATE_PASSWORD" ||
+            { echo "::error::APPLE_CERTIFICATE doesn't open with APPLE_CERTIFICATE_PASSWORD"; exit 1; }
+          if ! security find-identity -p codesigning "$kc" | grep -qF "\"$APPLE_SIGNING_IDENTITY\""; then
+            security find-identity -p codesigning "$kc"
+            echo "::error::APPLE_CERTIFICATE has no \"$APPLE_SIGNING_IDENTITY\" identity"
+            exit 1
+          fi
+          security delete-keychain "$kc"
+          rm "$RUNNER_TEMP/cert.p12"
+
+          xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" >/dev/null ||
+            { echo "::error::Apple didn't accept APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID for notarization"; exit 1; }
 
       - uses: pnpm/action-setup@v4
         with:
@@ -99,6 +138,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: herval/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
 
       - name: Fill in the cask
         env:
@@ -116,11 +160,8 @@ jobs:
           cat "$RUNNER_TEMP/littleguys.rb"
 
       - name: Push it to herval/homebrew-tap
-        env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        working-directory: tap
         run: |
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/herval/homebrew-tap.git" "$RUNNER_TEMP/tap"
-          cd "$RUNNER_TEMP/tap"
           mkdir -p Casks
           cp "$RUNNER_TEMP/littleguys.rb" Casks/littleguys.rb
           git config user.name "github-actions[bot]"
