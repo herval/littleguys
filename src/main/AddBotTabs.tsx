@@ -3,9 +3,13 @@ import { Check, ChevronRight, Folder, Laptop, Network, RefreshCw, Terminal } fro
 import { useCallback, useEffect, useState } from "react";
 import { core, errorMessage, isTauri } from "../lib/ipc";
 import type { HermesProbe, RegistryAgent } from "../lib/types";
+import { useApp } from "../stores/app";
 import { Button, Field, inputBase, inputClass, Spinner } from "../ui/kit";
 
 const sectionTitle = "mb-2 block text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]";
+
+/** For addresses, commands and names the server matches exactly (Hermes profiles are case-sensitive). */
+const verbatim = { autoCapitalize: "off", autoCorrect: "off", spellCheck: false } as const;
 
 // ---- Hermes ------------------------------------------------------------------
 
@@ -16,7 +20,12 @@ export function HermesTab({ onAdded }: { onAdded: (id: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [mode, setMode] = useState<"local" | "api">("api");
-  const [url, setUrl] = useState("");
+  // Another profile usually lives on a server that's already added: start from its address.
+  const knownServer = useApp((s) => {
+    const g = s.roster.gateways.find((g) => g.status.kind === "hermes" && g.status.mode === "remote" && g.status.url);
+    return g?.status.url?.replace(/\/p\/.*$/, "") ?? "";
+  });
+  const [url, setUrl] = useState(knownServer);
   const [apiKey, setApiKey] = useState("");
   const [profile, setProfile] = useState("");
 
@@ -122,6 +131,7 @@ export function HermesTab({ onAdded }: { onAdded: (id: string) => void }) {
             </select>
             <input
               className={inputClass}
+              {...verbatim}
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder={mode === "api" ? "http://studio.your-tailnet.ts.net:8642" : "http://127.0.0.1:9119 (optional)"}
@@ -131,7 +141,7 @@ export function HermesTab({ onAdded }: { onAdded: (id: string) => void }) {
             {mode === "api" && (
               <input type="password" className={inputClass} value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API key" />
             )}
-            <input className={`${inputBase} w-40`} value={profile} onChange={(e) => setProfile(e.target.value)} placeholder="Profile (optional)" />
+            <input className={`${inputBase} w-40`} {...verbatim} value={profile} onChange={(e) => setProfile(e.target.value)} placeholder="Profile (optional)" />
           </div>
           <Button
             variant="primary"
@@ -326,9 +336,9 @@ function AcpForm({ agent, onBack, onAdded }: { agent: RegistryAgent | "custom"; 
               <option value="url">ACP server (WebSocket)</option>
             </select>
             {how === "command" ? (
-              <input className={`${inputClass} font-mono`} value={commandLine} onChange={(e) => setCommandLine(e.target.value)} placeholder="hermes acp" />
+              <input className={`${inputClass} font-mono`} {...verbatim} value={commandLine} onChange={(e) => setCommandLine(e.target.value)} placeholder="hermes acp" />
             ) : (
-              <input className={`${inputClass} font-mono`} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="ws://studio.local:3284/acp" />
+              <input className={`${inputClass} font-mono`} {...verbatim} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="ws://studio.local:3284/acp" />
             )}
           </div>
           {how === "url" && (
@@ -347,7 +357,7 @@ function AcpForm({ agent, onBack, onAdded }: { agent: RegistryAgent | "custom"; 
       {!(custom && how === "url") && (
         <Field label="Works in" hint="The folder this agent reads and edits. You can open it from the sidebar.">
           <div className="flex gap-2">
-            <input className={`${inputClass} font-mono`} value={cwd} onChange={(e) => setCwd(e.target.value)} />
+            <input className={`${inputClass} font-mono`} {...verbatim} value={cwd} onChange={(e) => setCwd(e.target.value)} />
             {isTauri && (
               <Button onClick={pickFolder}>
                 <Folder size={13} /> Choose…
