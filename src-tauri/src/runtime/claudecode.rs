@@ -1347,9 +1347,24 @@ fn user_messages(line: &Value, uuid: &str, ts: Option<u64>, tools: &HashMap<Stri
         Value::Array(blocks) => {
             let mut out = Vec::new();
             let mut mine = Vec::new();
+            // The line's `toolUseResult` belongs to its tool result, when it has just one.
+            let single = blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")).count() == 1;
+            let recorded = line.get("toolUseResult").filter(|_| single);
+            let diffs = recorded.and_then(edit_diffs);
+            // AskUserQuestion: question → what you picked (or typed).
+            let answers = recorded.and_then(|r| r.get("answers")).filter(|a| a.as_object().is_some_and(|m| !m.is_empty()));
             for (i, block) in blocks.iter().enumerate() {
                 match block.get("type").and_then(Value::as_str) {
-                    Some("tool_result") => out.push(tool_result(block, &format!("{uuid}:{i}"), ts, tools)),
+                    Some("tool_result") => {
+                        let mut result = tool_result(block, &format!("{uuid}:{i}"), ts, tools);
+                        if let Some(diffs) = &diffs {
+                            result["diffs"] = diffs.clone();
+                        }
+                        if let Some(answers) = answers {
+                            result["answers"] = answers.clone();
+                        }
+                        out.push(result);
+                    }
                     Some("text") => {
                         if let Some(t) = block.get("text").and_then(Value::as_str).and_then(visible_prompt) {
                             mine.push(json!({ "type": "text", "text": t }));
@@ -1366,6 +1381,35 @@ fn user_messages(line: &Value, uuid: &str, ts: Option<u64>, tools: &HashMap<Stri
         }
         _ => Vec::new(),
     }
+}
+
+/// Most diff lines a tool result carries; the transcript shows fewer until asked.
+const DIFF_MAX_LINES: usize = 2000;
+
+/// The file an Edit, MultiEdit or Write changed, from the patch Claude Code
+/// records with its result (a new file has no patch, just its content).
+fn edit_diffs(result: &Value) -> Option<Value> {
+    let path = result.get("filePath").and_then(Value::as_str)?;
+    let mut budget = DIFF_MAX_LINES;
+    let mut hunks = Vec::new();
+    for hunk in result.get("structuredPatch").and_then(Value::as_array).into_iter().flatten() {
+        let lines: Vec<&Value> = hunk.get("lines").and_then(Value::as_array).into_iter().flatten().take(budget).collect();
+        if lines.is_empty() {
+            continue;
+        }
+        budget -= lines.len();
+        hunks.push(json!({ "oldStart": hunk.get("oldStart"), "newStart": hunk.get("newStart"), "lines": lines }));
+    }
+    let diff = if !hunks.is_empty() {
+        json!({ "path": path, "hunks": hunks })
+    } else if result.get("type").and_then(Value::as_str) == Some("create") {
+        let content = result.get("content").and_then(Value::as_str).unwrap_or_default();
+        let head: Vec<&str> = content.lines().take(DIFF_MAX_LINES).collect();
+        json!({ "path": path, "oldText": null, "newText": head.join("\n") })
+    } else {
+        return None;
+    };
+    Some(json!([diff]))
 }
 
 fn tool_result(block: &Value, id: &str, ts: Option<u64>, tools: &HashMap<String, String>) -> Value {
@@ -1911,6 +1955,42 @@ mod tests {
         assert_eq!(out[0]["toolCallId"], "t1");
         assert_eq!(out[0]["content"][0]["text"], "a\nb");
         assert_eq!(out[0]["__openclaw"]["id"], "u1:0");
+    }
+
+    #[test]
+    fn tool_results_carry_what_claude_code_recorded() {
+        let mut tools = HashMap::new();
+        let edited = line(json!({
+            "type": "user", "uuid": "u2",
+            "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t2", "content": "The file /w/a.ts has been updated successfully." }] },
+            "toolUseResult": { "filePath": "/w/a.ts", "oldString": "x", "newString": "y", "originalFile": "…", "structuredPatch": [
+                { "oldStart": 4, "oldLines": 3, "newStart": 4, "newLines": 3, "lines": [" a", "-x", "+y", " b"] }
+            ]}
+        }));
+        let out = convert_line(&edited, &mut tools);
+        assert_eq!(out[0]["diffs"], json!([{ "path": "/w/a.ts", "hunks": [{ "oldStart": 4, "newStart": 4, "lines": [" a", "-x", "+y", " b"] }] }]));
+
+        let created = line(json!({
+            "type": "user", "uuid": "u3",
+            "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t3", "content": "File created successfully at: /w/b.ts" }] },
+            "toolUseResult": { "type": "create", "filePath": "/w/b.ts", "content": "one\ntwo\n", "structuredPatch": [] }
+        }));
+        let out = convert_line(&created, &mut tools);
+        assert_eq!(out[0]["diffs"], json!([{ "path": "/w/b.ts", "oldText": null, "newText": "one\ntwo" }]));
+
+        let ran = line(json!({
+            "type": "user", "uuid": "u4",
+            "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t4", "content": "ok" }] },
+            "toolUseResult": { "stdout": "ok", "stderr": "" }
+        }));
+        assert!(convert_line(&ran, &mut tools)[0].get("diffs").is_none());
+
+        let asked = line(json!({
+            "type": "user", "uuid": "u5",
+            "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t5", "content": "Your questions have been answered: \"Which?\"=\"A\"." }] },
+            "toolUseResult": { "questions": [], "answers": { "Which?": "A" }, "annotations": {} }
+        }));
+        assert_eq!(convert_line(&asked, &mut tools)[0]["answers"], json!({ "Which?": "A" }));
     }
 
     #[test]

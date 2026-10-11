@@ -3397,9 +3397,11 @@ impl TurnBuilder {
         if !self.replay {
             fx.push(self.tool_event(id, "end", if failed { "failed" } else { "completed" }, failed));
         }
+        let mut content = vec![json!({ "type": "text", "text": text })];
+        content.extend(tool_images(tool.content.as_ref()));
         let mut message = chat_message(
             "toolResult",
-            vec![json!({ "type": "text", "text": text })],
+            content,
             now_ms(),
             &uuid::Uuid::new_v4().to_string(),
             self.run_id.as_deref(),
@@ -3407,6 +3409,10 @@ impl TurnBuilder {
         message["toolCallId"] = json!(id);
         message["toolName"] = json!(tool.display_name());
         message["isError"] = json!(failed);
+        let diffs = tool_diffs(tool.content.as_ref());
+        if !diffs.is_empty() {
+            message["diffs"] = json!(diffs);
+        }
         fx.push(Effect::Message(message));
     }
 
@@ -3631,6 +3637,44 @@ fn raw_text(value: &Value) -> Option<String> {
         }
         other => Some(other.to_string()),
     }
+}
+
+/// Past this size (base64), an image a tool returned shows only as "[image]".
+const TOOL_IMAGE_MAX_BYTES: usize = 8 << 20;
+
+/// Images in a tool's ACP content (a screenshot, an image file it read), as transcript image blocks.
+fn tool_images(content: Option<&Value>) -> Vec<Value> {
+    content
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("content"))
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|block| {
+            let data = block.get("data").and_then(Value::as_str).filter(|d| !d.is_empty() && d.len() <= TOOL_IMAGE_MAX_BYTES)?;
+            let mime = block.get("mimeType").and_then(Value::as_str).unwrap_or("image/png");
+            Some(json!({ "type": "image", "data": data, "mimeType": mime }))
+        })
+        .collect()
+}
+
+/// Past this much text (before plus after), a `diff` shows only as text.
+const DIFF_MAX_BYTES: usize = 512 << 10;
+
+/// The files a tool changed, from its ACP `diff` content, for the transcript's diff view.
+fn tool_diffs(content: Option<&Value>) -> Vec<Value> {
+    content
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("diff"))
+        .filter_map(|item| {
+            let path = item.get("path").and_then(Value::as_str)?;
+            let new = item.get("newText").and_then(Value::as_str).unwrap_or_default();
+            let old = item.get("oldText").and_then(Value::as_str);
+            (new.len() + old.map_or(0, str::len) <= DIFF_MAX_BYTES).then(|| json!({ "path": path, "oldText": old, "newText": new }))
+        })
+        .collect()
 }
 
 /// A compact before/after for an ACP `diff` (common head/tail lines elided).
@@ -4205,6 +4249,41 @@ mod tests {
         let b_call = msgs.iter().position(|m| m["content"][0]["id"] == "b").unwrap();
         let b_result = msgs.iter().position(|m| m["toolCallId"] == "b").unwrap();
         assert!(b_call < b_result);
+    }
+
+    #[test]
+    fn edit_results_carry_their_diffs() {
+        let mut b = TurnBuilder::live("k", "r");
+        let mut fx = Vec::new();
+        fx.extend(b.apply(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "e", "title": "Edit a.txt", "kind": "edit", "status": "in_progress",
+            "content": [{ "type": "diff", "path": "/a.txt", "oldText": "x\ny", "newText": "x\nY" }, { "type": "diff", "path": "/b.txt", "newText": "new" }]
+        })));
+        fx.extend(b.apply(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "e", "status": "completed" })));
+        let msgs = messages(&fx);
+        let result = msgs.iter().find(|m| m["role"] == "toolResult").unwrap();
+        assert_eq!(
+            result["diffs"],
+            json!([{ "path": "/a.txt", "oldText": "x\ny", "newText": "x\nY" }, { "path": "/b.txt", "oldText": null, "newText": "new" }])
+        );
+        // Text stays for anything that only reads text.
+        assert!(result["content"][0]["text"].as_str().unwrap().starts_with("Edited /a.txt"));
+
+        let mut b = TurnBuilder::live("k", "r");
+        let fx = b.apply(&json!({ "sessionUpdate": "tool_call", "toolCallId": "r", "title": "ls", "kind": "execute", "status": "completed", "rawOutput": "a" }));
+        assert!(messages(&fx).iter().all(|m| m.get("diffs").is_none()));
+    }
+
+    #[test]
+    fn images_a_tool_returns_stay_images() {
+        let mut b = TurnBuilder::live("k", "r");
+        let fx = b.apply(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "i", "title": "Read shot.png", "kind": "read", "status": "completed",
+            "content": [{ "type": "content", "content": { "type": "image", "data": "iVBORw0K", "mimeType": "image/png" } }]
+        }));
+        let msgs = messages(&fx);
+        let result = msgs.iter().find(|m| m["role"] == "toolResult").unwrap();
+        assert_eq!(result["content"][1], json!({ "type": "image", "data": "iVBORw0K", "mimeType": "image/png" }));
     }
 
     #[test]

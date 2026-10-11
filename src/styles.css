@@ -22,6 +22,10 @@
   --color-bubble-me: #ff7a45;
   --color-bubble-them: #f2efed;
   --color-chip: rgb(0 0 0 / 0.05);
+  --color-diff-add: rgb(52 199 89 / 0.12);
+  --color-diff-add-mark: rgb(52 199 89 / 0.3);
+  --color-diff-del: rgb(255 69 58 / 0.1);
+  --color-diff-del-mark: rgb(255 69 58 / 0.26);
 
   --animate-breathe: breathe 2.4s ease-in-out infinite;
   --animate-spin-slow: spin 2.6s linear infinite;
@@ -42,6 +46,10 @@
     --color-bubble-them: #2f2c2a;
     --color-chip: rgb(255 255 255 / 0.07);
     --color-accent-soft: rgb(255 122 69 / 0.18);
+    --color-diff-add: rgb(52 199 89 / 0.15);
+    --color-diff-add-mark: rgb(52 199 89 / 0.34);
+    --color-diff-del: rgb(255 69 58 / 0.15);
+    --color-diff-del-mark: rgb(255 69 58 / 0.34);
   }
 }
 

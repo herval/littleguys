@@ -169,6 +169,11 @@ const roster: Roster = {
 
 const oc = (id: string, extra: object = {}) => ({ __openclaw: { id, ...extra } });
 
+/** What a guy sees when it reads a screenshot. */
+const BUTTON_SHOT = btoa(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="120"><rect width="320" height="120" fill="#f4f1ee"/><rect x="16" y="16" width="288" height="40" rx="8" fill="#fff" stroke="#ddd"/><rect x="28" y="24" width="72" height="24" rx="6" fill="#ff7a45"/><text x="64" y="40" font-family="sans-serif" font-size="12" fill="#fff" text-anchor="middle">Export</text><text x="16" y="96" font-family="sans-serif" font-size="12" fill="#948c86">Toolbar, before</text></svg>',
+);
+
 const history: Record<string, ChatMessage[]> = {
   "openclaw|agent:main:main": [
     { role: "user", content: "What's the weather looking like this weekend?", timestamp: now - 26 * 60 * min, ...oc("y1") },
@@ -193,6 +198,159 @@ const history: Record<string, ChatMessage[]> = {
     { role: "assistant", content: [{ type: "text", text: "I'll run it in a loop to reproduce it first." }, { type: "toolCall", id: "k2", name: "Bash", arguments: { command: "pnpm vitest run checkout --repeat 20" } }], timestamp: now - 8 * min, ...oc("k2") },
     { role: "toolResult", toolCallId: "k2", toolName: "Bash", isError: false, content: [{ type: "text", text: "2 of 20 runs failed: expected total 41.80, got 41.79 (checkout.spec.ts:88)" }], ...oc("k3") },
     { role: "assistant", content: [{ type: "text", text: "Found it: the tax is rounded per line on one path and on the total on the other, so some carts land a cent apart. Fixing the rounding in `totals.ts`, then running the suite 20 times to confirm." }], timestamp: now - 20_000, ...oc("k4") },
+    { role: "assistant", content: [{ type: "toolCall", id: "k5", name: "Edit", arguments: { file_path: "/Users/you/dev/shop-api/src/checkout/totals.ts", old_string: "  const tax = lines.reduce((sum, l) => sum + round(l.price * l.qty * rate), 0);", new_string: "  // Round once, on the total: rounding each line drifts a cent on some carts.\n  const tax = round(lines.reduce((sum, l) => sum + l.price * l.qty * rate, 0));" } }], timestamp: now - 15_000, ...oc("k5") },
+    {
+      role: "toolResult",
+      toolCallId: "k5",
+      toolName: "Edit",
+      isError: false,
+      content: [{ type: "text", text: "The file /Users/you/dev/shop-api/src/checkout/totals.ts has been updated successfully." }],
+      diffs: [
+        {
+          path: "/Users/you/dev/shop-api/src/checkout/totals.ts",
+          hunks: [
+            {
+              oldStart: 18,
+              newStart: 18,
+              lines: [
+                " export function totals(lines: Line[], rate: number): Totals {",
+                "   const subtotal = lines.reduce((sum, l) => sum + l.price * l.qty, 0);",
+                "-  const tax = lines.reduce((sum, l) => sum + round(l.price * l.qty * rate), 0);",
+                "+  // Round once, on the total: rounding each line drifts a cent on some carts.",
+                "+  const tax = round(lines.reduce((sum, l) => sum + l.price * l.qty * rate, 0));",
+                "   return { subtotal, tax, total: round(subtotal + tax) };",
+                " }",
+              ],
+            },
+          ],
+        },
+      ],
+      ...oc("k6"),
+    },
+  ],
+  "acp-claude|agent:bot:main": [
+    { role: "user", content: [{ type: "text", text: "the export button should say Export CSV, and add a test for it" }], timestamp: now - 7 * min, ...oc("p1") },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "p13",
+          name: "AskUserQuestion",
+          arguments: {
+            questions: [
+              {
+                question: "Where should the test live?",
+                header: "Test file",
+                multiSelect: false,
+                options: [
+                  { label: "Next to the component (Recommended)", description: "src/Export.test.tsx, like the other tests in src/." },
+                  { label: "In tests/", description: "A separate folder for UI tests." },
+                ],
+              },
+            ],
+          },
+        },
+        {
+          type: "toolCall",
+          id: "p14",
+          name: "TodoWrite",
+          arguments: {
+            todos: [
+              { content: "Rename the button to Export CSV", status: "completed", activeForm: "Renaming the button" },
+              { content: "Add a test for the label", status: "in_progress", activeForm: "Adding a test" },
+              { content: "Run the suite", status: "pending", activeForm: "Running the suite" },
+            ],
+          },
+        },
+      ],
+      timestamp: now - 6.8 * min,
+      ...oc("p13"),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "p13",
+      toolName: "AskUserQuestion",
+      isError: false,
+      content: [{ type: "text", text: 'Your questions have been answered: "Where should the test live?"="Next to the component (Recommended)". You can now continue with these answers in mind.' }],
+      ...oc("p15"),
+    },
+    { role: "toolResult", toolCallId: "p14", toolName: "TodoWrite", isError: false, content: [{ type: "text", text: "Todos have been modified successfully." }], ...oc("p16") },
+    {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "p7", name: "Read", arguments: { file_path: "/Users/you/dev/littleguy/src/Export.tsx" } },
+        { type: "toolCall", id: "p8", name: "Read", arguments: { file_path: "/Users/you/Desktop/export-button.png" } },
+      ],
+      timestamp: now - 6.5 * min,
+      ...oc("p7"),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "p7",
+      toolName: "Read",
+      isError: false,
+      content: [{ type: "text", text: 'import { useState } from "react";\n\nexport function Export({ onExport }: { onExport: () => void }) {\n  return (\n    <div className="toolbar">\n      <button onClick={onExport}>Export</button>\n    </div>\n  );\n}'.split("\n").map((l, i) => `${i + 1}\t${l}`).join("\n") }],
+      ...oc("p9"),
+    },
+    { role: "toolResult", toolCallId: "p8", toolName: "Read", isError: false, content: [{ type: "text", text: "[image]" }, { type: "image", data: BUTTON_SHOT, mimeType: "image/svg+xml" }] as never, ...oc("p10") },
+    {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "p2", name: "Edit", arguments: { file_path: "/Users/you/dev/littleguy/src/Export.tsx", old_string: "      <button onClick={onExport}>Export</button>", new_string: '      <button onClick={onExport} title="Download as CSV">\n        Export CSV\n      </button>' } },
+        { type: "toolCall", id: "p3", name: "Write", arguments: { file_path: "/Users/you/dev/littleguy/src/Export.test.tsx", content: "" } },
+      ],
+      timestamp: now - 6 * min,
+      ...oc("p2"),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "p2",
+      toolName: "Edit",
+      isError: false,
+      content: [{ type: "text", text: "Edited /Users/you/dev/littleguy/src/Export.tsx" }],
+      diffs: [{ path: "/Users/you/dev/littleguy/src/Export.tsx", oldText: "      <button onClick={onExport}>Export</button>", newText: '      <button onClick={onExport} title="Download as CSV">\n        Export CSV\n      </button>' }],
+      ...oc("p4"),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "p3",
+      toolName: "Write",
+      isError: false,
+      content: [{ type: "text", text: "Created /Users/you/dev/littleguy/src/Export.test.tsx" }],
+      diffs: [
+        {
+          path: "/Users/you/dev/littleguy/src/Export.test.tsx",
+          oldText: null,
+          newText: 'import { render, screen } from "@testing-library/react";\nimport { Export } from "./Export";\n\ntest("says what it exports", () => {\n  render(<Export onExport={() => {}} />);\n  expect(screen.getByRole("button")).toHaveTextContent("Export CSV");\n});\n',
+        },
+      ],
+      ...oc("p5"),
+    },
+    { role: "assistant", content: [{ type: "toolCall", id: "p11", name: "Bash", arguments: { command: "pnpm vitest run 2>&1 | tail -4", description: "Run the test suite" } }], timestamp: now - 5.5 * min, ...oc("p11") },
+    {
+      role: "toolResult",
+      toolCallId: "p11",
+      toolName: "Bash",
+      isError: false,
+      content: [{ type: "text", text: "\u001b[32m ✓\u001b[0m src/Export.test.tsx (1 test) 12ms\n\n Test Files  9 passed (9)\n      Tests  21 passed (21)\n   Duration  1.84s" }],
+      ...oc("p12"),
+    },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "p17",
+          name: "mcp__plugin_tracker_tracker__post_update",
+          arguments: { text: "Renamed the export button to `Export CSV` and added a test for its label; all 21 tests pass.", link: "https://tracker.example/t/412" },
+        },
+      ],
+      timestamp: now - 5.2 * min,
+      ...oc("p17"),
+    },
+    { role: "toolResult", toolCallId: "p17", toolName: "mcp__plugin_tracker_tracker__post_update", isError: false, content: [{ type: "text", text: "Posted to the ticket." }], ...oc("p18") },
+    { role: "assistant", content: [{ type: "text", text: "Tests pass — 21/21." }], timestamp: now - 5 * min, ...oc("p6") },
   ],
   "openclaw|agent:main:dashboard:a0": [
     { role: "user", content: "Find me 2-bedroom places near the park, under 3k.", timestamp: now - 12 * 24 * 60 * min - 90_000, ...oc("h1") },

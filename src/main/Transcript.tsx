@@ -2,6 +2,7 @@ import {
   Brain,
   Check,
   ChevronRight,
+  ClipboardList,
   Clock,
   File as FileIcon,
   FilePen,
@@ -10,7 +11,9 @@ import {
   Folder,
   Globe,
   ImageOff,
+  ListTodo,
   Maximize2,
+  MessageCircleQuestion,
   Music,
   Search,
   Send,
@@ -19,11 +22,13 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { memo, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { artifacts } from "../lib/gateway";
 import { gatewayOf } from "../lib/guys";
+import { type DiffLine, type FileDiff, fileDiffs, jsonField } from "../lib/diff";
 import { core, errorMessage } from "../lib/ipc";
-import { presentTense, summarizeSteps, type ToolKind, toolKind } from "../lib/toolPhrases";
+import { presentTense, summarizeSteps, type ToolKind, toolKind, toolLabel } from "../lib/toolPhrases";
+import { cleanOutput, commandOf, numberedLines, toolArgs } from "../lib/toolView";
 import { cleanDirectives, extractMediaLines, type Item, type MediaRef, type ToolCallBlock, type ToolResult } from "../lib/transcript";
 import type { AgentSummary } from "../lib/types";
 export { toItems } from "../lib/transcript";
@@ -33,6 +38,7 @@ import { Avatar } from "../ui/Avatar";
 import { Lightbox } from "../ui/Lightbox";
 import { TypingDots } from "../ui/kit";
 import { Markdown } from "../ui/Markdown";
+import { ArgList, toolCard } from "./ToolCards";
 import { type Save, saveIcon, saveLabel, saveTitle, useSave } from "../ui/useSave";
 
 // ---- rendering --------------------------------------------------------------
@@ -171,7 +177,7 @@ export function Transcript({
       }
       section.nodes.push(
         <GuyLine key={item.id} agent={agent} showAvatar={startsGroup}>
-          <WorkLog steps={steps} toolStatus={toolStatus} live={Boolean(live)} />
+          <WorkLog steps={steps} toolStatus={toolStatus} live={Boolean(live)} where={where} />
         </GuyLine>,
       );
     } else {
@@ -290,24 +296,30 @@ const KIND_ICON: Record<ToolKind, typeof Globe> = {
   memory: Brain,
   routine: Clock,
   message: Send,
+  ask: MessageCircleQuestion,
+  todo: ListTodo,
+  plan: ClipboardList,
   other: Wrench,
 };
 
-function toolSummary(call: ToolCallBlock): string {
+/** Keys whose values are code-ish (shown in mono), then prose ones, in the order a step's row looks for its subject. */
+const SUMMARY_CODE = ["url", "command", "cmd", "path", "file_path", "filePath", "pattern"];
+const SUMMARY_PROSE = ["query", "description", "skill", "name", "title", "question", "text"];
+
+/** What a step's row names after the tool: the URL, command or file, else a short line of prose. */
+function toolSummary(call: ToolCallBlock): { text: string; code: boolean } {
   let args = (call.arguments ?? {}) as Record<string, unknown>;
   if (typeof call.arguments === "string") {
     try {
       args = JSON.parse(call.arguments);
     } catch {
-      return call.arguments.slice(0, 80);
+      return { text: call.arguments.slice(0, 80), code: true };
     }
   }
-  const pick = ["url", "command", "cmd", "query", "path", "file_path", "filePath", "pattern", "description", "skill", "name", "text"]
-    .map((k) => args[k])
-    .find((v) => typeof v === "string" && v.trim()) as string | undefined;
-  const subject = pick ? (Array.isArray(args.command) ? (args.command as string[]).join(" ") : pick) : "";
+  const key = [...SUMMARY_CODE, ...SUMMARY_PROSE].find((k) => (typeof args[k] === "string" && (args[k] as string).trim()) || (k === "command" && Array.isArray(args[k])));
+  const subject = (key === "command" ? commandOf(args) : (args[key ?? ""] as string | undefined)) ?? "";
   const pretty = subject.replace(/^\/Users\/[^/]+/, "~").replace(/\s+/g, " ");
-  return pretty.length > 80 ? `${pretty.slice(0, 77)}…` : pretty;
+  return { text: pretty.length > 80 ? `${pretty.slice(0, 77)}…` : pretty, code: SUMMARY_CODE.includes(key ?? "") };
 }
 
 function stepState(step: Extract<Item, { kind: "tool" }>, toolStatus: Record<string, ToolState>, live: boolean): ToolState {
@@ -317,7 +329,7 @@ function stepState(step: Extract<Item, { kind: "tool" }>, toolStatus: Record<str
 }
 
 /** A run of tool calls (and thinking) as one quiet line: "Searched the web and browsed a.com". */
-function WorkLog({ steps, toolStatus, live }: { steps: Step[]; toolStatus: Record<string, ToolState>; live: boolean }) {
+function WorkLog({ steps, toolStatus, live, where }: { steps: Step[]; toolStatus: Record<string, ToolState>; live: boolean; where: Where }) {
   const [open, setOpen] = useState(false);
   const tools = steps.filter((s): s is Extract<Item, { kind: "tool" }> => s.kind === "tool");
   const states = tools.map((t) => stepState(t, toolStatus, live));
@@ -356,7 +368,7 @@ function WorkLog({ steps, toolStatus, live }: { steps: Step[]; toolStatus: Recor
             step.kind === "thinking" ? (
               <Thinking key={step.id} text={step.text} />
             ) : (
-              <ToolStep key={step.id} call={step.call} result={step.result} state={stepState(step, toolStatus, live)} />
+              <ToolStep key={step.id} call={step.call} result={step.result} state={stepState(step, toolStatus, live)} where={where} />
             ),
           )}
         </div>
@@ -365,10 +377,12 @@ function WorkLog({ steps, toolStatus, live }: { steps: Step[]; toolStatus: Recor
   );
 }
 
-function ToolStep({ call, result, state }: { call: ToolCallBlock; result?: ToolResult; state: ToolState }) {
+function ToolStep({ call, result, state, where }: { call: ToolCallBlock; result?: ToolResult; state: ToolState; where: Where }) {
   const [open, setOpen] = useState(false);
   const summary = toolSummary(call);
+  const label = toolLabel(call.name);
   const Icon = KIND_ICON[toolKind(call.name)];
+  const diffs = useMemo(() => fileDiffs(call.name, call.arguments, result?.diffs, result?.text), [call, result]);
   return (
     <div className="max-w-full">
       <button
@@ -376,8 +390,12 @@ function ToolStep({ call, result, state }: { call: ToolCallBlock; result?: ToolR
         className="flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[12px] text-[var(--color-ink-2)] hover:bg-[var(--color-chip)]"
       >
         <Icon size={12} className="shrink-0 text-[var(--color-ink-3)]" />
-        <span className="shrink-0 font-medium text-[var(--color-ink)]">{call.name}</span>
-        {summary && <span className="truncate font-mono text-[11px] text-[var(--color-ink-3)]">{summary}</span>}
+        {label.via && <span className="shrink-0 text-[var(--color-ink-3)]">{label.via}</span>}
+        <span className="shrink-0 font-medium text-[var(--color-ink)]">{label.name}</span>
+        {summary.text && (
+          <span className={`truncate text-[var(--color-ink-3)] ${summary.code ? "font-mono text-[11px]" : ""}`}>{summary.text}</span>
+        )}
+        {diffs.length > 0 && <DiffStat added={diffs.reduce((n, d) => n + d.added, 0)} removed={diffs.reduce((n, d) => n + d.removed, 0)} />}
         {state === "running" ? (
           <TypingDots className="ml-0.5 text-[var(--color-accent)]" />
         ) : state === "error" ? (
@@ -386,22 +404,184 @@ function ToolStep({ call, result, state }: { call: ToolCallBlock; result?: ToolR
           <Check size={12} className="shrink-0 text-[var(--color-ok)]" />
         )}
       </button>
-      {open && (
-        <div className="selectable mb-1 ml-1 mt-1 overflow-hidden rounded-lg border border-[var(--color-line)] text-[11.5px]">
-          <pre className="max-h-40 overflow-auto bg-[var(--color-chip)] p-2.5 font-mono text-[var(--color-ink-2)]">
-            {typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.arguments ?? {}, null, 2)}
-          </pre>
-          {result && (
-            <pre
-              className={`max-h-64 overflow-auto whitespace-pre-wrap border-t border-[var(--color-line)] p-2.5 font-mono ${
-                result.isError ? "text-[var(--color-bad)]" : "text-[var(--color-ink-2)]"
-              }`}
-            >
-              {result.text.slice(0, 20_000) || "(no output)"}
-            </pre>
-          )}
+      {open && <ToolBody call={call} result={result} diffs={diffs} where={where} />}
+    </div>
+  );
+}
+
+/** An opened step: an edit's diff, the command and what it printed, the file read, or else the call's arguments and result. */
+function ToolBody({ call, result, diffs, where }: { call: ToolCallBlock; result?: ToolResult; diffs: FileDiff[]; where: Where }) {
+  const args = useMemo(() => toolArgs(call.arguments), [call.arguments]);
+  const kind = toolKind(call.name);
+  const command = kind === "exec" ? commandOf(args) : undefined;
+  const media = result?.media ?? [];
+  let output = result ? cleanOutput(result.text) : "";
+  if (media.length) output = output.replace(/^\[image\]$/gm, "").trim();
+  if (kind === "read") output = jsonField(output, "content") ?? output; // e.g. Hermes: {"content": "…", "total_lines": …}
+  const lines = kind === "read" && result && !result.isError && output ? numberedLines(output) : null;
+  const detail = args && typeof args === "object" ? args : null;
+  const cwd = detail && [detail.workdir, detail.cwd].find((v): v is string => typeof v === "string" && Boolean(v));
+  const card = !diffs.length && !command && detail ? toolCard(call.name, detail, result) : null;
+
+  let head: React.ReactNode = null;
+  if (diffs.length) head = diffs.map((d, i) => <DiffView key={i} diff={d} header={diffs.length > 1} />);
+  else if (command) {
+    const about = [detail?.description, cwd && `in ${cwd.replace(/^\/Users\/[^/]+/, "~")}`].filter((v): v is string => typeof v === "string" && Boolean(v));
+    head = <CommandLine command={command} about={about.join(" · ")} />;
+  } else if (card) head = card.node;
+  else if (!(kind === "read" && result)) head = <ArgList args={args} />; // a read's row already names the file
+
+  let body: React.ReactNode = null;
+  if (result && (diffs.length || card?.showsResult)) {
+    // On success the result only says the file was changed (or what was answered): the view above shows it.
+    body = result.isError && <Output text={output || "(failed)"} error />;
+  } else if (result) {
+    body = (
+      <>
+        {media.length > 0 && (
+          <div className="flex flex-wrap gap-2 border-[var(--color-line)] p-2 [&:not(:first-child)]:border-t">
+            {media.map((m, i) => (
+              <MediaView key={i} media={m} where={where} />
+            ))}
+          </div>
+        )}
+        {lines ? <CodeView lines={lines} /> : (output || !media.length) && <Output text={output || "(no output)"} error={result.isError} />}
+      </>
+    );
+  }
+  if (!head && !body) return null;
+  return (
+    <div className="selectable mb-1 ml-1 mt-1 overflow-hidden rounded-lg border border-[var(--color-line)] text-[11.5px]">
+      {head}
+      {body}
+    </div>
+  );
+}
+
+function CommandLine({ command, about }: { command: string; about?: string }) {
+  return (
+    <div className="max-h-48 overflow-auto bg-[var(--color-chip)] px-2.5 py-2">
+      {about && <div className="mb-1 truncate text-[11px] text-[var(--color-ink-3)]">{about}</div>}
+      <div className="flex gap-2 font-mono">
+        <span className="select-none text-[var(--color-ink-3)]">$</span>
+        <span className="min-w-0 whitespace-pre-wrap text-[var(--color-ink)] [overflow-wrap:anywhere]">{command}</span>
+      </div>
+    </div>
+  );
+}
+
+function Output({ text, error }: { text: string; error?: boolean }) {
+  return (
+    <pre
+      className={`max-h-64 overflow-auto whitespace-pre-wrap border-[var(--color-line)] p-2.5 font-mono [overflow-wrap:anywhere] [&:not(:first-child)]:border-t ${
+        error ? "text-[var(--color-bad)]" : "text-[var(--color-ink-2)]"
+      }`}
+    >
+      {text.slice(0, 20_000)}
+    </pre>
+  );
+}
+
+const CODE_MAX_LINES = 2000;
+
+/** A file as a read tool returned it, with its line numbers in a gutter. */
+function CodeView({ lines }: { lines: Array<{ no?: number; text: string }> }) {
+  const shown = lines.slice(0, CODE_MAX_LINES);
+  const width = `${String(shown.reduce((n, l) => Math.max(n, l.no ?? 0), 0)).length}ch`;
+  return (
+    <div className="max-h-80 overflow-auto border-[var(--color-line)] py-1 font-mono text-[11px] leading-[1.6] [&:not(:first-child)]:border-t">
+      {shown.map((l, i) => (
+        <div key={i} className="flex min-h-[1.6em]">
+          <span style={{ width }} className="ml-2 mr-3 shrink-0 select-none text-right text-[var(--color-ink-3)] opacity-70">
+            {l.no}
+          </span>
+          <span className="min-w-0 flex-1 whitespace-pre-wrap pr-2.5 text-[var(--color-ink)] [overflow-wrap:anywhere]">{l.text}</span>
+        </div>
+      ))}
+      {lines.length > shown.length && <div className="px-2.5 pt-1 text-[var(--color-ink-3)]">… {lines.length - shown.length} more lines</div>}
+    </div>
+  );
+}
+
+function DiffStat({ added, removed }: { added: number; removed: number }) {
+  return (
+    <span className="shrink-0 font-mono text-[11px] tabular-nums">
+      {added > 0 && <span className="text-[var(--color-ok)]">+{added}</span>}
+      {added > 0 && removed > 0 && " "}
+      {removed > 0 && <span className="text-[var(--color-bad)]">−{removed}</span>}
+    </span>
+  );
+}
+
+const DIFF_MAX_LINES = 400;
+
+/** One file's changes, unified: removed lines in red, added in green, what changed within a line marked. */
+function DiffView({ diff, header }: { diff: FileDiff; header: boolean }) {
+  const [all, setAll] = useState(false);
+  const total = diff.hunks.reduce((n, h) => n + h.length, 0);
+  let budget = all ? Infinity : DIFF_MAX_LINES;
+  const hunks = diff.hunks.map((h) => {
+    const shown = h.slice(0, Math.max(0, budget));
+    budget -= shown.length;
+    return shown;
+  });
+  const lastNo = diff.hunks.flat().reduce((n, l) => Math.max(n, l.old ?? 0, l.new ?? 0), 0);
+  const gutter = diff.numbered ? `${String(lastNo).length + 1}ch` : undefined;
+  return (
+    <div className="font-mono text-[11px] leading-[1.6] [&+&]:border-t [&+&]:border-[var(--color-line)]">
+      {header && (
+        <div className="truncate border-b border-[var(--color-line)] bg-[var(--color-chip)] px-2.5 py-1 text-[var(--color-ink-2)]">
+          {diff.path.replace(/^\/Users\/[^/]+/, "~")}
+          {diff.created && <span className="text-[var(--color-ink-3)]"> · new</span>}
         </div>
       )}
+      <div className="max-h-80 overflow-auto py-1">
+        {hunks.map(
+          (lines, i) =>
+            lines.length > 0 && (
+              <Fragment key={i}>
+                {i > 0 && <div className="select-none px-2.5 text-[var(--color-ink-3)]">⋯</div>}
+                {lines.map((line, j) => (
+                  <DiffRow key={j} line={line} gutter={gutter} />
+                ))}
+              </Fragment>
+            ),
+        )}
+        {total > DIFF_MAX_LINES && !all && (
+          <button onClick={() => setAll(true)} className="px-2.5 pt-1 text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">
+            Show all {total} lines
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const DIFF_ROW = { " ": "", "-": "bg-[var(--color-diff-del)]", "+": "bg-[var(--color-diff-add)]" };
+const DIFF_MARK = { " ": "", "-": "bg-[var(--color-diff-del-mark)]", "+": "bg-[var(--color-diff-add-mark)]" };
+const DIFF_SIGN = { " ": "", "-": "text-[var(--color-bad)]", "+": "text-[var(--color-ok)]" };
+
+function DiffRow({ line, gutter }: { line: DiffLine; gutter?: string }) {
+  const { sign, text, mark } = line;
+  return (
+    <div className={`flex min-h-[1.6em] ${DIFF_ROW[sign]}`}>
+      {gutter && (
+        <span style={{ width: gutter }} className="shrink-0 select-none text-right text-[var(--color-ink-3)] opacity-70">
+          {sign === "-" ? line.old : line.new}
+        </span>
+      )}
+      <span className={`w-5 shrink-0 select-none text-center ${DIFF_SIGN[sign]}`}>{sign === " " ? "" : sign === "-" ? "−" : "+"}</span>
+      <span className="min-w-0 flex-1 whitespace-pre-wrap pr-2.5 text-[var(--color-ink)] [overflow-wrap:anywhere]">
+        {mark && mark[1] > mark[0] ? (
+          <>
+            {text.slice(0, mark[0])}
+            <span className={`rounded-[3px] ${DIFF_MARK[sign]}`}>{text.slice(mark[0], mark[1])}</span>
+            {text.slice(mark[1])}
+          </>
+        ) : (
+          text
+        )}
+      </span>
     </div>
   );
 }

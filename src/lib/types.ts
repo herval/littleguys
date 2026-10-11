@@ -225,7 +225,22 @@ export interface ChatMessage {
   isError?: boolean;
   stopReason?: string;
   model?: string;
+  /** On a tool result: the files that tool changed. */
+  diffs?: ToolDiff[];
+  /** On a question tool's result: each question → the answer given. */
+  answers?: Record<string, string>;
   __openclaw?: { id?: string; seq?: number; runId?: string; kind?: string };
+}
+
+/**
+ * A file a tool changed: unified-diff hunks (Claude Code's own patch) or the
+ * text before and after (ACP `diff` content; `oldText: null` for a new file).
+ */
+export interface ToolDiff {
+  path: string;
+  hunks?: Array<{ oldStart: number; newStart: number; lines: string[] }>;
+  oldText?: string | null;
+  newText?: string;
 }
 
 export type ContentBlock =

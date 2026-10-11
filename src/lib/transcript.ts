@@ -2,7 +2,7 @@
 // own block shapes with ones imported from CLI runtimes (e.g. Claude CLI
 // history: `toolcall`, `tool_result`); everything is normalized here.
 import { cleanPreview } from "./guys";
-import type { ChatMessage, ContentBlock } from "./types";
+import type { ChatMessage, ContentBlock, ToolDiff } from "./types";
 
 export interface ToolCallBlock {
   id: string;
@@ -13,6 +13,12 @@ export interface ToolCallBlock {
 export interface ToolResult {
   text: string;
   isError: boolean;
+  /** Files the tool changed, as the runtime recorded them. */
+  diffs?: ToolDiff[];
+  /** Images (and other media) the tool returned, e.g. a screenshot or a file it read. */
+  media?: MediaRef[];
+  /** A question tool's answers: question → answer. */
+  answers?: Record<string, string>;
 }
 
 export interface MediaRef {
@@ -58,13 +64,18 @@ function resultText(content: unknown): string {
         if (typeof c === "string") return c;
         const r = c as Rec;
         if (r?.type === "text" && typeof r.text === "string") return r.text;
-        if (r?.type === "image") return "[image]";
-        return "";
+        return ""; // images: see resultMedia
       })
       .filter(Boolean)
       .join("\n");
   }
   return "";
+}
+
+function resultMedia(content: unknown): MediaRef[] | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const media = content.map((c) => (c && typeof c === "object" ? mediaFrom(c as Rec) : null)).filter((m): m is MediaRef => Boolean(m));
+  return media.length ? media : undefined;
 }
 
 function mediaFrom(b: Rec): MediaRef | null {
@@ -132,12 +143,12 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
   const results = new Map<string, ToolResult>();
   for (const m of messages) {
     if (m.role === "toolResult" && m.toolCallId) {
-      results.set(m.toolCallId, { text: resultText(m.content), isError: Boolean(m.isError) });
+      results.set(m.toolCallId, { text: resultText(m.content), isError: Boolean(m.isError), diffs: m.diffs, media: resultMedia(m.content), answers: m.answers });
     }
     for (const b of rawBlocks(m)) {
       const r = b as Rec;
       if (r.type === "tool_result" && typeof r.tool_use_id === "string") {
-        results.set(r.tool_use_id, { text: resultText(r.content), isError: Boolean(r.is_error) });
+        results.set(r.tool_use_id, { text: resultText(r.content), isError: Boolean(r.is_error), media: resultMedia(r.content) });
       }
     }
   }

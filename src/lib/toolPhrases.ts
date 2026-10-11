@@ -2,7 +2,22 @@
 // "browsed nytimes.com and ran 2 commands" once it's done.
 import type { ToolCallBlock } from "./transcript";
 
-export type ToolKind = "browse" | "fetch" | "websearch" | "search" | "exec" | "edit" | "read" | "list" | "memory" | "routine" | "message" | "other";
+export type ToolKind =
+  | "browse"
+  | "fetch"
+  | "websearch"
+  | "search"
+  | "exec"
+  | "edit"
+  | "read"
+  | "list"
+  | "memory"
+  | "routine"
+  | "message"
+  | "ask"
+  | "todo"
+  | "plan"
+  | "other";
 
 function args(call: ToolCallBlock): Record<string, unknown> {
   if (typeof call.arguments === "string") {
@@ -15,8 +30,25 @@ function args(call: ToolCallBlock): Record<string, unknown> {
   return (call.arguments ?? {}) as Record<string, unknown>;
 }
 
+/**
+ * A tool's name as people read it: MCP tools (`mcp__<server>__<tool>`) by their
+ * tool name, with the server they come from, e.g. `ab_attach` via agentbook.
+ */
+export function toolLabel(name: string): { name: string; via?: string } {
+  const m = /^mcp__(.+?)__(.+)$/.exec(name);
+  if (!m) return { name };
+  // Plugin servers are `plugin_<plugin>_<server>`, often the same word twice; claude.ai connectors are `claude_ai_<App>`.
+  const parts = m[1].replace(/^plugin_|^claude_ai_/, "").split("_");
+  const half = parts.length / 2;
+  const twice = parts.length % 2 === 0 && parts.slice(0, half).join("_") === parts.slice(half).join("_");
+  return { name: m[2], via: (twice ? parts.slice(0, half) : parts).join(" ") };
+}
+
 export function toolKind(name: string): ToolKind {
   const n = name.toLowerCase();
+  if (/(askuserquestion|ask_user|^clarify$|^question$)/.test(n)) return "ask";
+  if (/^(todowrite|todo_write|todos?)$/.test(n)) return "todo";
+  if (/(exitplanmode|^plan$|update_plan)/.test(n)) return "plan";
   if (/(^browser|navigate|open_url|playwright|chrome)/.test(n)) return "browse";
   if (/(web_search|websearch|search_web|brave|google)/.test(n)) return "websearch";
   if (/(web_fetch|fetch|http|curl)/.test(n)) return "fetch";
@@ -94,8 +126,14 @@ export function presentTense(call: ToolCallBlock): string {
       return "setting up a routine";
     case "message":
       return "sending a message";
+    case "ask":
+      return "waiting for your answer";
+    case "todo":
+      return "updating the to-do list";
+    case "plan":
+      return "writing up a plan";
     default:
-      return `using ${call.name}`;
+      return `using ${toolLabel(call.name).via ?? call.name}`;
   }
 }
 
@@ -157,8 +195,18 @@ export function summarizeSteps(calls: ToolCallBlock[]): string {
       case "message":
         parts.push(n === 1 ? "sent a message" : `sent ${n} messages`);
         break;
+      case "ask":
+        parts.push(n === 1 ? "asked you a question" : `asked you ${n} times`);
+        break;
+      case "todo":
+        parts.push("updated the to-do list");
+        break;
+      case "plan":
+        parts.push("proposed a plan");
+        break;
       default: {
-        const names = [...new Set(cs.map((c) => c.name))];
+        // MCP tools go by their server: "used agentbook", not each of its tools.
+        const names = [...new Set(cs.map((c) => toolLabel(c.name).via ?? c.name))];
         parts.push(`used ${list(names.slice(0, 3))}${names.length > 3 ? ` and ${names.length - 3} more` : ""}`);
       }
     }
