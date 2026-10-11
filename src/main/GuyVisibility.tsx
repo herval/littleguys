@@ -29,7 +29,7 @@ export function GuyVisibility() {
   return (
     <section className="mt-5">
       <div className="mb-1.5 flex items-baseline justify-between">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">Little guys</h3>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">littleguys</h3>
         <span className="text-[11px] text-[var(--color-ink-3)]">
           {guys.length - hiddenCount} shown{hiddenCount ? ` · ${hiddenCount} hidden` : ""}
         </span>

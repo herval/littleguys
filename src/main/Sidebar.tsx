@@ -62,7 +62,7 @@ export function Sidebar() {
       <GatewayBanner />
       {!guy ? (
         <div key="guys" className="animate-push-back flex min-h-0 flex-1 flex-col">
-          <h1 className="px-4 pb-2 font-display text-[22px] font-bold tracking-tight">Little guys</h1>
+          <h1 className="px-4 pb-2 font-display text-[22px] font-bold tracking-tight">littleguys</h1>
           <GuyList />
         </div>
       ) : (
@@ -86,7 +86,7 @@ function SidebarTop({ back }: { back: boolean }) {
           className="-ml-1.5 flex items-center rounded-md py-1 pl-0.5 pr-2 text-[13px] font-medium text-[var(--color-accent-strong)] transition hover:bg-[var(--color-chip)]"
         >
           <ChevronLeft size={17} />
-          Little guys
+          littleguys
         </button>
       )}
       <div data-tauri-drag-region className="flex-1 self-stretch" />
