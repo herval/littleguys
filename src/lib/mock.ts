@@ -418,6 +418,13 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
       return streamReply(gateway, String(p.sessionKey), String(p.message));
     case "sessions.create":
       return { ok: true, key: `agent:${p.agentId}:dashboard:${crypto.randomUUID()}` };
+    case "sessions.patch": {
+      const g = roster.gateways.find((g) => g.id === gateway);
+      const flags = Object.fromEntries(Object.entries(p).filter(([k]) => ["label", "pinned", "archived", "unread"].includes(k)));
+      if (g) g.sessions = g.sessions.map((r) => (r.key === p.key ? { ...r, ...flags } : r));
+      emit("lg:roster", { ...roster, gateways: [...roster.gateways] });
+      return { ok: true, key: p.key };
+    }
     case "cron.list":
       return {
         jobs:

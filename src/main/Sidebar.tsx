@@ -6,6 +6,8 @@ import {
   Folder,
   History,
   MessageCircle,
+  MessageSquareCheck,
+  MessageSquareDot,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -39,6 +41,7 @@ import {
 import { core } from "../lib/ipc";
 import type { Guy, SessionRow } from "../lib/types";
 import { type MainView, mainSessionKey, useApp } from "../stores/app";
+import { threadId } from "../stores/chat";
 import { Avatar } from "../ui/Avatar";
 import { IconButton, inputClass, TypingDots } from "../ui/kit";
 import { FileTree } from "./Files";
@@ -377,6 +380,11 @@ function ThreadRow({
   const preview = cleanPreview(row.lastMessagePreview);
   const title = threadTitle(row, mainChat);
   const channel = kind === "channel" ? channelName(row.key) : null;
+  // The open thread reads itself, unless you marked it unread from here.
+  const kept = useApp((s) => s.keptUnread === threadId(gatewayId, row.key));
+  const unread = Boolean(row.unread) && (!selected || kept);
+  // The main chat can only be marked read or unread.
+  const hasMenu = !isDraft && actions;
 
   return (
     <div
@@ -385,7 +393,7 @@ function ThreadRow({
       onClick={onSelect}
       onKeyDown={(e) => e.key === "Enter" && onSelect()}
       onContextMenu={(e) => {
-        if (isMain || isDraft || !actions) return;
+        if (!hasMenu) return;
         e.preventDefault();
         setMenu(true);
       }}
@@ -399,7 +407,7 @@ function ThreadRow({
           {renaming ? (
             <RenameInput gatewayId={gatewayId} row={row} onDone={() => setRenaming(false)} />
           ) : (
-            <span className={`truncate ${row.unread && !selected ? "font-semibold" : "font-medium"}`}>{title}</span>
+            <span className={`truncate ${unread ? "font-semibold" : "font-medium"}`}>{title}</span>
           )}
           <span className={`ml-auto shrink-0 text-[10.5px] ${selected ? "text-white/75" : "text-[var(--color-ink-3)]"}`}>
             {running ? <TypingDots /> : row.updatedAt ? shortTime(row.updatedAt) : ""}
@@ -418,10 +426,10 @@ function ThreadRow({
           <p className={`truncate text-[12px] ${selected ? "text-white/80" : "text-[var(--color-ink-3)]"}`}>
             {running ? "working…" : preview || (isMain ? "Your main chat" : isDraft ? "Say hi to start a thread" : "No messages yet")}
           </p>
-          {row.unread && !selected && <span className="ml-auto h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)]" />}
+          {unread && <span className={`ml-auto h-2 w-2 shrink-0 rounded-full ${selected ? "bg-white" : "bg-[var(--color-accent)]"}`} />}
         </div>
       </div>
-      {!isMain && !isDraft && actions && (
+      {hasMenu && (
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -437,7 +445,7 @@ function ThreadRow({
       )}
       {menu && (
         <ThreadMenu
-          deletable={!isMain}
+          isMain={isMain}
           gatewayId={gatewayId}
           agentId={agentId}
           row={row}
@@ -477,14 +485,14 @@ function RenameInput({ gatewayId, row, onDone }: { gatewayId: string; row: Sessi
 }
 
 function ThreadMenu({
-  deletable,
+  isMain,
   gatewayId,
   agentId,
   row,
   onClose,
   onRename,
 }: {
-  deletable: boolean;
+  isMain: boolean;
   gatewayId: string;
   agentId: string;
   row: SessionRow;
@@ -514,6 +522,16 @@ function ThreadMenu({
     else if (selected === row.key) selectSession(mainSessionKey(agentId));
   };
   const kind = threadKind(row.key);
+  const setUnread = (unread: boolean) =>
+    act(async () => {
+      const s = useApp.getState();
+      // The open thread reads itself: marked unread, it waits until you open it again.
+      const open =
+        s.selectedUid === guyUid(gatewayId, agentId) &&
+        (s.view === "routines" ? s.routineRunByGuy[s.selectedUid] : s.selectedSessionKey) === row.key;
+      if (open) s.keepUnread(unread ? threadId(gatewayId, row.key) : null);
+      await sessionsApi.patch(gatewayId, row.key, { unread }).catch(() => open && s.keepUnread(null));
+    });
 
   return (
     <div
@@ -521,23 +539,32 @@ function ThreadMenu({
       onClick={(e) => e.stopPropagation()}
       className="animate-pop absolute right-1 top-8 z-20 w-44 rounded-lg border border-[var(--color-line)] bg-[var(--color-pane-solid)] p-1 text-[12.5px] text-[var(--color-ink)] shadow-xl"
     >
-      <MenuButton icon={<Pencil size={13} />} label="Rename" onClick={() => (onClose(), onRename())} />
       <MenuButton
-        icon={row.pinned ? <PinOff size={13} /> : <Pin size={13} />}
-        label={row.pinned ? "Unpin" : "Pin"}
-        onClick={() => act(() => sessionsApi.patch(gatewayId, row.key, { pinned: !row.pinned }))}
+        icon={row.unread ? <MessageSquareCheck size={13} /> : <MessageSquareDot size={13} />}
+        label={row.unread ? "Mark as read" : "Mark as unread"}
+        onClick={() => setUnread(!row.unread)}
       />
-      <MenuButton
-        icon={<Archive size={13} />}
-        label="Archive"
-        onClick={() =>
-          act(async () => {
-            await sessionsApi.patch(gatewayId, row.key, { archived: true }, row.sessionId ?? undefined);
-            leaveIfOpen();
-          })
-        }
-      />
-      {(kind === "chat" || kind === "routine" || (kind === "main" && deletable)) && (
+      {!isMain && (
+        <>
+          <MenuButton icon={<Pencil size={13} />} label="Rename" onClick={() => (onClose(), onRename())} />
+          <MenuButton
+            icon={row.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+            label={row.pinned ? "Unpin" : "Pin"}
+            onClick={() => act(() => sessionsApi.patch(gatewayId, row.key, { pinned: !row.pinned }))}
+          />
+          <MenuButton
+            icon={<Archive size={13} />}
+            label="Archive"
+            onClick={() =>
+              act(async () => {
+                await sessionsApi.patch(gatewayId, row.key, { archived: true }, row.sessionId ?? undefined);
+                leaveIfOpen();
+              })
+            }
+          />
+        </>
+      )}
+      {(kind === "chat" || kind === "routine" || (kind === "main" && !isMain)) && (
         <MenuButton
           icon={<Trash2 size={13} />}
           label="Delete"

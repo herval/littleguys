@@ -45,12 +45,14 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
     open(tid);
   }, [open, tid]);
 
-  // Opening a thread reads it.
+  // Opening a thread reads it, and so does a reply landing while it's open,
+  // unless you marked it unread here: then it waits until you open it again.
+  const keptUnread = useApp((s) => s.keptUnread === tid);
   useEffect(() => {
-    if (row?.unread) {
+    if (row?.unread && !keptUnread) {
       sessionsApi.patch(gw, sessionKey, { unread: false }).then(() => core.refreshRoster(gw)).catch(() => {});
     }
-  }, [row?.unread, gw, sessionKey]);
+  }, [row?.unread, keptUnread, gw, sessionKey]);
 
   const pendingMessages = useMemo(() => thread?.pending.map((p) => p.message) ?? [], [thread?.pending]);
   const items = useMemo(() => toItems(thread?.messages ?? [], pendingMessages), [thread?.messages, pendingMessages]);

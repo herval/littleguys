@@ -53,6 +53,11 @@ interface AppState {
   routineRunByGuy: Record<string, string | null>;
   /** Selected item in the Skills tab, per guy (see lib/abilities.ts ids). */
   abilityByGuy: Record<string, string>;
+  /**
+   * The open thread you marked unread (a `threadId`). Being on screen doesn't
+   * read it: it stays unread until you open a thread again.
+   */
+  keptUnread: string | null;
   browser: BrowserPanelPrefs;
   editor: { open: boolean; uid: string | null };
   settingsOpen: boolean;
@@ -70,6 +75,7 @@ interface AppState {
   selectRoutineRun(key: string | null, uid?: string): void;
   /** Pick a guy's skill or tool (and show it, unless `open` is false). */
   selectAbility(uid: string, id: string, open?: boolean): void;
+  keepUnread(id: string | null): void;
   /** Show the resume picker for a guy's past sessions. */
   openPast(uid: string): void;
   setBrowserOpen(uid: string, open: boolean): void;
@@ -100,6 +106,7 @@ export const useApp = create<AppState>((set, get) => ({
   fileByGuy: {},
   routineRunByGuy: {},
   abilityByGuy: {},
+  keptUnread: null,
   browser: readJson<BrowserPanelPrefs>(BROWSER_KEY, { open: {}, width: 520 }),
   editor: { open: false, uid: null },
   settingsOpen: false,
@@ -141,7 +148,7 @@ export const useApp = create<AppState>((set, get) => ({
       localStorage.setItem(LAST_THREAD_KEY, JSON.stringify(lastThreadByGuy));
       set({ lastThreadByGuy });
     }
-    set({ selectedSessionKey: key, view: "chat" });
+    set({ selectedSessionKey: key, view: "chat", keptUnread: null });
   },
   setView: (view) => set({ view }),
   // Back in a guy you're on, the sidebar shows what's open; anyone else starts at their chats.
@@ -150,7 +157,7 @@ export const useApp = create<AppState>((set, get) => ({
   selectRoutineRun: (key, uid = get().selectedUid ?? undefined) => {
     if (!uid) return;
     activate(uid);
-    set({ routineRunByGuy: { ...get().routineRunByGuy, [uid]: key }, view: "routines" });
+    set({ routineRunByGuy: { ...get().routineRunByGuy, [uid]: key }, view: "routines", keptUnread: null });
   },
   selectFile: (uid, path, open = true) => {
     set({ fileByGuy: { ...get().fileByGuy, [uid]: path } });
@@ -166,6 +173,7 @@ export const useApp = create<AppState>((set, get) => ({
       set({ view: "skills" });
     }
   },
+  keepUnread: (keptUnread) => set({ keptUnread }),
   openPast: (uid) => {
     activate(uid);
     set({ view: "past" });
