@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
 use crate::gateway::client::{ConnStatus, Phase};
@@ -17,6 +18,7 @@ use crate::runtime::Runtime;
 use crate::gateway::identity::now_ms;
 use crate::gateways::OPENCLAW_GATEWAY_ID;
 use crate::tray::{Mood, TrayAnimator};
+use crate::windows::Navigate;
 
 /// One gateway's slice of the roster.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -533,7 +535,9 @@ impl Activity {
                 .and_then(Value::as_str)
                 .map(|s| truncate(s, 180))
                 .unwrap_or_else(|| "Finished working.".into());
-            this.show_notification(&this.agent_label(&gateway, &agent_id), &preview);
+            let label = this.agent_label(&gateway, &agent_id);
+            let nav = Navigate { gateway_id: Some(gateway), agent_id: Some(agent_id), session_key: Some(key), view: None };
+            this.show_notification(&label, &preview, nav);
         });
     }
 
@@ -557,7 +561,13 @@ impl Activity {
             (_, Some(summary)) => format!("Routine failed: {summary}"),
             (other, None) => format!("Routine {other}."),
         };
-        self.show_notification(&title, &body);
+        let nav = Navigate {
+            gateway_id: Some(gateway.to_string()),
+            agent_id: Some(agent_id.to_string()).filter(|a| !a.is_empty()),
+            session_key: payload.get("sessionKey").and_then(Value::as_str).map(str::to_string),
+            view: Some("routines".into()),
+        };
+        self.show_notification(&title, &body, nav);
     }
 
     fn notify_approval(&self, gateway: &str, payload: &Value) {
@@ -574,12 +584,43 @@ impl Activity {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let who = if agent_id.is_empty() { "A little guy".to_string() } else { self.agent_label(gateway, agent_id) };
-        self.show_notification(&format!("{who} needs your OK"), &format!("Wants to run: {command}"));
+        let nav = Navigate {
+            gateway_id: Some(gateway.to_string()),
+            agent_id: Some(agent_id.to_string()).filter(|a| !a.is_empty()),
+            session_key: payload.pointer("/request/sessionKey").or_else(|| payload.get("sessionKey")).and_then(Value::as_str).map(str::to_string),
+            view: None,
+        };
+        self.show_notification(&format!("{who} needs your OK"), &format!("Wants to run: {command}"), nav);
     }
 
-    fn show_notification(&self, title: &str, body: &str) {
-        if let Err(e) = self.app.notification().builder().title(title).body(body).show() {
-            log::warn!("notification failed: {e}");
+    /// Shows a notification; clicking it opens `nav` (macOS only — the notification
+    /// plugin ignores clicks on desktop, so there it goes through mac-notification-sys).
+    fn show_notification(&self, title: &str, body: &str, nav: Navigate) {
+        #[cfg(target_os = "macos")]
+        {
+            static APP_SET: std::sync::Once = std::sync::Once::new();
+            let identifier = self.app.config().identifier.clone();
+            APP_SET.call_once(|| {
+                // Same as the plugin: unbundled dev builds borrow Terminal's identity.
+                let _ = mac_notification_sys::set_application(if tauri::is_dev() { "com.apple.Terminal" } else { &identifier });
+            });
+            let (app, title, body) = (self.app.clone(), title.to_string(), body.to_string());
+            // Blocks until the notification is clicked, closed or cleared from Notification Center.
+            std::thread::spawn(move || match mac_notification_sys::Notification::new().title(&title).message(&body).wait_for_click(true).send() {
+                Ok(mac_notification_sys::NotificationResponse::Click) => {
+                    let handle = app.clone();
+                    let _ = app.run_on_main_thread(move || crate::windows::open_main(&handle, Some(nav)));
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("notification failed: {e}"),
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = nav;
+            if let Err(e) = self.app.notification().builder().title(title).body(body).show() {
+                log::warn!("notification failed: {e}");
+            }
         }
     }
 }
