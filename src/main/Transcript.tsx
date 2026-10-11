@@ -28,7 +28,7 @@ import { gatewayOf } from "../lib/guys";
 import { type DiffLine, type FileDiff, fileDiffs, jsonField } from "../lib/diff";
 import { core, errorMessage } from "../lib/ipc";
 import { presentTense, summarizeSteps, type ToolKind, toolKind, toolLabel } from "../lib/toolPhrases";
-import { cleanOutput, commandOf, numberedLines, toolArgs } from "../lib/toolView";
+import { cleanOutput, commandOf, numberedLines, shellLines, toolArgs } from "../lib/toolView";
 import { cleanDirectives, extractMediaLines, type Item, type MediaRef, type ToolCallBlock, type ToolResult } from "../lib/transcript";
 import type { AgentSummary } from "../lib/types";
 export { toItems } from "../lib/transcript";
@@ -316,6 +316,10 @@ function toolSummary(call: ToolCallBlock): { text: string; code: boolean } {
       return { text: call.arguments.slice(0, 80), code: true };
     }
   }
+  // A command that says what it's for (Claude Code's `description`) goes by that; opening it shows the command.
+  if (typeof args.description === "string" && args.description.trim() && commandOf(args)) {
+    return { text: args.description.trim().replace(/\s+/g, " "), code: false };
+  }
   const key = [...SUMMARY_CODE, ...SUMMARY_PROSE].find((k) => (typeof args[k] === "string" && (args[k] as string).trim()) || (k === "command" && Array.isArray(args[k])));
   const subject = (key === "command" ? commandOf(args) : (args[key ?? ""] as string | undefined)) ?? "";
   const pretty = subject.replace(/^\/Users\/[^/]+/, "~").replace(/\s+/g, " ");
@@ -425,10 +429,8 @@ function ToolBody({ call, result, diffs, where }: { call: ToolCallBlock; result?
 
   let head: React.ReactNode = null;
   if (diffs.length) head = diffs.map((d, i) => <DiffView key={i} diff={d} header={diffs.length > 1} />);
-  else if (command) {
-    const about = [detail?.description, cwd && `in ${cwd.replace(/^\/Users\/[^/]+/, "~")}`].filter((v): v is string => typeof v === "string" && Boolean(v));
-    head = <CommandLine command={command} about={about.join(" · ")} />;
-  } else if (card) head = card.node;
+  else if (command) head = <CommandRun command={command} cwd={cwd || undefined} result={result} output={output} />;
+  else if (card) head = card.node;
   else if (!(kind === "read" && result)) head = <ArgList args={args} />; // a read's row already names the file
 
   let body: React.ReactNode = null;
@@ -445,7 +447,7 @@ function ToolBody({ call, result, diffs, where }: { call: ToolCallBlock; result?
             ))}
           </div>
         )}
-        {lines ? <CodeView lines={lines} /> : (output || !media.length) && <Output text={output || "(no output)"} error={result.isError} />}
+        {command ? null : lines ? <CodeView lines={lines} /> : (output || !media.length) && <Output text={output || "(no output)"} error={result.isError} />}
       </>
     );
   }
@@ -458,27 +460,49 @@ function ToolBody({ call, result, diffs, where }: { call: ToolCallBlock; result?
   );
 }
 
-function CommandLine({ command, about }: { command: string; about?: string }) {
+/** Long output shows its first lines; the rest is a click away (no box scrolling inside the thread). */
+function useClamp<T>(items: T[], limit: number): [T[], React.ReactNode] {
+  const [all, setAll] = useState(false);
+  if (items.length <= limit + 3) return [items, null];
+  const toggle = (
+    <button onClick={() => setAll(!all)} className="mt-1 font-sans text-[11px] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">
+      {all ? "Show less" : `Show all ${items.length} lines`}
+    </button>
+  );
+  return [all ? items : items.slice(0, limit), toggle];
+}
+
+/** A command and what it printed, as in a terminal: one step per line, then the output. */
+function CommandRun({ command, cwd, result, output }: { command: string; cwd?: string; result?: ToolResult; output: string }) {
+  const [steps, moreSteps] = useClamp(shellLines(command).flatMap((step) => step.split("\n")), 8);
+  const [printed, morePrinted] = useClamp(output ? output.split("\n") : [], 12);
   return (
-    <div className="max-h-48 overflow-auto bg-[var(--color-chip)] px-2.5 py-2">
-      {about && <div className="mb-1 truncate text-[11px] text-[var(--color-ink-3)]">{about}</div>}
-      <div className="flex gap-2 font-mono">
-        <span className="select-none text-[var(--color-ink-3)]">$</span>
-        <span className="min-w-0 whitespace-pre-wrap text-[var(--color-ink)] [overflow-wrap:anywhere]">{command}</span>
-      </div>
+    <div className="bg-[var(--color-chip)] px-3 py-2 font-mono text-[11px] leading-[1.6]">
+      {cwd && <div className="mb-0.5 font-sans text-[var(--color-ink-3)]">in {cwd.replace(/^\/Users\/[^/]+/, "~")}</div>}
+      {steps.map((line, i) => (
+        <div key={i} className="flex">
+          <span className="w-4 shrink-0 select-none text-[var(--color-ink-3)]">{i === 0 ? "$" : ""}</span>
+          <span className="min-w-0 whitespace-pre-wrap font-medium text-[var(--color-ink)] [overflow-wrap:anywhere]">{line}</span>
+        </div>
+      ))}
+      {moreSteps}
+      {result && (
+        <div className={`mt-2 whitespace-pre-wrap [overflow-wrap:anywhere] ${result.isError ? "text-[var(--color-bad)]" : "text-[var(--color-ink-2)]"}`}>
+          {printed.length ? printed.join("\n") : <span className="font-sans text-[var(--color-ink-3)]">{result.isError ? "(failed)" : "(no output)"}</span>}
+        </div>
+      )}
+      {morePrinted}
     </div>
   );
 }
 
 function Output({ text, error }: { text: string; error?: boolean }) {
+  const [lines, more] = useClamp(text.slice(0, 50_000).split("\n"), 12);
   return (
-    <pre
-      className={`max-h-64 overflow-auto whitespace-pre-wrap border-[var(--color-line)] p-2.5 font-mono [overflow-wrap:anywhere] [&:not(:first-child)]:border-t ${
-        error ? "text-[var(--color-bad)]" : "text-[var(--color-ink-2)]"
-      }`}
-    >
-      {text.slice(0, 20_000)}
-    </pre>
+    <div className="border-[var(--color-line)] p-2.5 [&:not(:first-child)]:border-t">
+      <pre className={`whitespace-pre-wrap font-mono [overflow-wrap:anywhere] ${error ? "text-[var(--color-bad)]" : "text-[var(--color-ink-2)]"}`}>{lines.join("\n")}</pre>
+      {more}
+    </div>
   );
 }
 
@@ -486,10 +510,10 @@ const CODE_MAX_LINES = 2000;
 
 /** A file as a read tool returned it, with its line numbers in a gutter. */
 function CodeView({ lines }: { lines: Array<{ no?: number; text: string }> }) {
-  const shown = lines.slice(0, CODE_MAX_LINES);
+  const [shown, more] = useClamp(lines.slice(0, CODE_MAX_LINES), 20);
   const width = `${String(shown.reduce((n, l) => Math.max(n, l.no ?? 0), 0)).length}ch`;
   return (
-    <div className="max-h-80 overflow-auto border-[var(--color-line)] py-1 font-mono text-[11px] leading-[1.6] [&:not(:first-child)]:border-t">
+    <div className="border-[var(--color-line)] py-1 font-mono text-[11px] leading-[1.6] [&:not(:first-child)]:border-t">
       {shown.map((l, i) => (
         <div key={i} className="flex min-h-[1.6em]">
           <span style={{ width }} className="ml-2 mr-3 shrink-0 select-none text-right text-[var(--color-ink-3)] opacity-70">
@@ -498,7 +522,8 @@ function CodeView({ lines }: { lines: Array<{ no?: number; text: string }> }) {
           <span className="min-w-0 flex-1 whitespace-pre-wrap pr-2.5 text-[var(--color-ink)] [overflow-wrap:anywhere]">{l.text}</span>
         </div>
       ))}
-      {lines.length > shown.length && <div className="px-2.5 pt-1 text-[var(--color-ink-3)]">… {lines.length - shown.length} more lines</div>}
+      {more && <div className="px-2.5">{more}</div>}
+      {lines.length > CODE_MAX_LINES && <div className="px-2.5 pt-1 text-[var(--color-ink-3)]">… {lines.length - CODE_MAX_LINES} more lines</div>}
     </div>
   );
 }
@@ -513,13 +538,14 @@ function DiffStat({ added, removed }: { added: number; removed: number }) {
   );
 }
 
-const DIFF_MAX_LINES = 400;
+const DIFF_LINES = 40;
 
 /** One file's changes, unified: removed lines in red, added in green, what changed within a line marked. */
 function DiffView({ diff, header }: { diff: FileDiff; header: boolean }) {
   const [all, setAll] = useState(false);
   const total = diff.hunks.reduce((n, h) => n + h.length, 0);
-  let budget = all ? Infinity : DIFF_MAX_LINES;
+  const clamped = total > DIFF_LINES + 3;
+  let budget = all || !clamped ? Infinity : DIFF_LINES;
   const hunks = diff.hunks.map((h) => {
     const shown = h.slice(0, Math.max(0, budget));
     budget -= shown.length;
@@ -535,7 +561,7 @@ function DiffView({ diff, header }: { diff: FileDiff; header: boolean }) {
           {diff.created && <span className="text-[var(--color-ink-3)]"> · new</span>}
         </div>
       )}
-      <div className="max-h-80 overflow-auto py-1">
+      <div className="py-1">
         {hunks.map(
           (lines, i) =>
             lines.length > 0 && (
@@ -547,9 +573,9 @@ function DiffView({ diff, header }: { diff: FileDiff; header: boolean }) {
               </Fragment>
             ),
         )}
-        {total > DIFF_MAX_LINES && !all && (
-          <button onClick={() => setAll(true)} className="px-2.5 pt-1 text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">
-            Show all {total} lines
+        {clamped && (
+          <button onClick={() => setAll(!all)} className="px-2.5 pt-1 font-sans text-[11px] text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">
+            {all ? "Show less" : `Show all ${total} lines`}
           </button>
         )}
       </div>

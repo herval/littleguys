@@ -54,3 +54,42 @@ export function numberedLines(text: string): Array<{ no?: number; text: string }
   });
   return out.length && misses <= out.length / 10 ? out : null;
 }
+
+/**
+ * A long one-line command as the steps it chains, one per line, each keeping
+ * its `&&` / `||` / `;` (operators inside quotes, `$( )` or `( )` don't count).
+ * Scripts that already span lines, and short commands, stay as they are.
+ */
+export function shellLines(command: string): string[] {
+  if (command.includes("\n") || command.length <= 60) return [command];
+  const lines: string[] = [];
+  let quote = "";
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (quote) {
+      if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")") depth = Math.max(0, depth - 1);
+    else if (c === ";" && command[i + 1] === ";") i++; // `;;` ends a case branch, not a step
+    else if (depth === 0) {
+      const op = command.startsWith("&&", i) || command.startsWith("||", i) ? 2 : c === ";" ? 1 : 0;
+      if (op) {
+        lines.push(command.slice(start, i + op).trim());
+        start = i + op;
+        i += op - 1;
+      }
+    }
+  }
+  const rest = command.slice(start).trim();
+  if (rest) lines.push(rest);
+  return lines.length > 1 ? lines : [command];
+}
