@@ -9,10 +9,11 @@
 # Needs gh logged in as an admin of both repos, and a paid Apple Developer account.
 #
 # Developer ID certificate: with none in the login keychain, it makes a key and a signing
-# request, opens developer.apple.com for you to turn that into a certificate, and picks the
-# certificate up from ~/Downloads. The key stays in your login keychain (the GitHub secret
-# can't be read back), so local builds can sign with it too. Already have a Developer ID
-# certificate exported as a .p12? P12=path/to/it.p12 make release-secrets
+# request, opens developer.apple.com for you to turn that into a G2 certificate, and picks
+# the certificate up from ~/Downloads. The key ends up in your login keychain (the GitHub
+# secret can't be read back), so local builds can sign with it too. Until then it waits in
+# ~/.tauri, so a run that stops halfway picks up where it left off. Already have a Developer
+# ID certificate exported as a .p12? P12=path/to/it.p12 make release-secrets
 
 set -euo pipefail
 
@@ -22,6 +23,9 @@ DEPLOY_KEY_TITLE="littleguys release workflow"
 UPDATER_KEY="$HOME/.tauri/littleguys-updater.key"
 OPENSSL=/usr/bin/openssl # LibreSSL: the .p12 files it writes are ones `security import` reads
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+KEY="$HOME/.tauri/littleguys-developer-id.key" # only until it's in the keychain
+CSR="$HOME/Downloads/littleguys.certSigningRequest"
+G2_CA=https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
 
 if [ -t 1 ]; then B=$'\033[1m' P=$'\033[1;35m' R=$'\033[1;31m' X=$'\033[0m'; else B="" P="" R="" X=""; fi
 say() { printf '\n%s==>%s %s%s%s\n' "$P" "$X" "$B" "$*" "$X"; }
@@ -53,13 +57,28 @@ subject_field() { $OPENSSL x509 -in "$1" -noout -subject -nameopt multiline | se
 
 # --- Developer ID certificate ------------------------------------------------------------
 
-# Waits for the certificate Apple hands out to land in ~/Downloads, or for a path typed in.
+# cer_pem FILE: a certificate file (DER or PEM) as PEM.
+cer_pem() { $OPENSSL x509 -inform DER -in "$1" 2>/dev/null || $OPENSSL x509 -in "$1" 2>/dev/null; }
+
+# The newest certificate in ~/Downloads made from $KEY.
+find_cer() {
+  local want
+  want="$($OPENSSL rsa -in "$KEY" -noout -modulus 2>/dev/null)"
+  ls -t "$HOME"/Downloads/*.cer 2>/dev/null | while IFS= read -r f; do
+    [ "$(cer_pem "$f" | $OPENSSL x509 -noout -modulus 2>/dev/null)" = "$want" ] && { printf '%s' "$f"; break; }
+  done || true
+}
+
+# Waits for a certificate made from $KEY (other than $1) to land in ~/Downloads, or for a
+# path typed in.
 wait_for_cer() {
-  local since="$1" found typed
+  local found typed
   while :; do
-    found="$(find "$HOME/Downloads" -maxdepth 1 -name 'developerID_application*.cer' -newer "$since" 2>/dev/null | head -1)"
-    [ -n "$found" ] && { printf '%s' "$found"; return; }
-    if read -r -t 2 typed && [ -n "$typed" ]; then
+    found="$(find_cer)"
+    [ -n "$found" ] && [ "$found" != "$1" ] && { printf '%s' "$found"; return; }
+    typed=""
+    read -r -t 2 typed || [ $? -gt 128 ] || sleep 2 # timed out, or no terminal to read
+    if [ -n "$typed" ]; then
       typed="${typed% }" typed="${typed//\\ / }" typed="${typed%\'}" typed="${typed#\'}" # as dragged in
       [ -f "$typed" ] && { printf '%s' "$typed"; return; }
       note "No file at $typed" >&2
@@ -67,13 +86,14 @@ wait_for_cer() {
   done
 }
 
-# Fills $WORK/cert.p12, $P12_PASSWORD and $CERT_PEM, from $P12 or a new certificate.
+# Fills $WORK/cert.p12, $P12_PASSWORD and $CERT_PEM, from $P12 or a new certificate. A new
+# one leaves $CER set to the downloaded file, which goes once the secrets are stored.
 make_p12() {
+  CERT_PEM="$WORK/cert.pem"
   if [ -n "${P12:-}" ]; then
     [ -f "$P12" ] || die "No file at $P12"
     read -r -s -p "    Password for $P12: " P12_PASSWORD && echo
     cp "$P12" "$WORK/cert.p12"
-    CERT_PEM="$WORK/cert.pem"
     $OPENSSL pkcs12 -in "$WORK/cert.p12" -passin env:P12_PASSWORD -nokeys -clcerts 2>/dev/null |
       $OPENSSL x509 -out "$CERT_PEM" 2>/dev/null || die "Couldn't open $P12 with that password."
     return
@@ -81,7 +101,7 @@ make_p12() {
 
   local existing
   existing="$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)"
-  if [ -n "$existing" ]; then
+  if [ -n "$existing" ] && [ ! -f "$KEY" ]; then
     note "The login keychain already has \"$existing\"."
     note "Export it from Keychain Access (My Certificates, right-click, Export) as a .p12 and run"
     note "  P12=path/to/it.p12 make release-secrets"
@@ -89,40 +109,64 @@ make_p12() {
     read -r
   fi
 
-  local csr="$HOME/Downloads/littleguys.certSigningRequest" cer issuer
-  $OPENSSL req -new -newkey rsa:2048 -nodes -keyout "$WORK/key.pem" -out "$csr" \
-    -subj "/CN=littleguys release" 2>/dev/null
-  say "Get a Developer ID Application certificate from Apple"
-  note "1. On the page that just opened, pick \"Developer ID Application\" (G2 Sub-CA), Continue."
-  note "2. Upload ~/Downloads/littleguys.certSigningRequest, Continue."
-  note "3. Download. This picks up developerID_application.cer from ~/Downloads by itself"
-  note "   (or drag the .cer here and press Enter)."
-  note "Only the Account Holder can make Developer ID certificates."
-  open "https://developer.apple.com/account/resources/certificates/add"
-  cer="$(wait_for_cer "$csr")"
-  note "Got $cer"
+  # The key lives in a file until it's safely in the keychain and the secrets are stored, so
+  # a run that stops halfway can pick up the certificate Apple already issued for it.
+  if [ -f "$KEY" ]; then
+    note "Using the key from the last run ($KEY)"
+  else
+    (umask 077 && $OPENSSL genrsa -out "$KEY" 2048 2>/dev/null)
+  fi
+  $OPENSSL req -new -key "$KEY" -out "$CSR" -subj "/CN=littleguys release"
 
-  CERT_PEM="$WORK/cert.pem"
-  $OPENSSL x509 -inform DER -in "$cer" -out "$CERT_PEM" 2>/dev/null ||
-    $OPENSSL x509 -in "$cer" -out "$CERT_PEM" 2>/dev/null || die "$cer isn't a certificate."
-  [ "$($OPENSSL x509 -in "$CERT_PEM" -noout -modulus)" = "$($OPENSSL rsa -in "$WORK/key.pem" -noout -modulus 2>/dev/null)" ] ||
-    die "$cer wasn't made from littleguys.certSigningRequest. Upload that one."
+  # The G2 intermediate rides along in the .p12, so CI can build the chain without Xcode's copy.
+  curl -fsSL "$G2_CA" | $OPENSSL x509 -inform DER -out "$WORK/ca.pem" || die "Couldn't fetch $G2_CA"
+  local g2 want rejected="" shown=""
+  g2="$($OPENSSL x509 -in "$WORK/ca.pem" -noout -subject_hash)"
+  want="$($OPENSSL rsa -in "$KEY" -noout -modulus 2>/dev/null)"
 
-  # The intermediate CA rides along in the .p12, so CI can build the chain without Xcode's copy.
-  issuer="$($OPENSSL x509 -in "$CERT_PEM" -noout -text | sed -n 's/.*CA Issuers - URI:\(http[^ ]*\).*/\1/p' | head -1)"
-  [ -n "$issuer" ] || die "$cer doesn't say who issued it."
-  curl -fsSL "$issuer" | $OPENSSL x509 -inform DER -out "$WORK/ca.pem" || die "Couldn't fetch $issuer"
+  CER="$(find_cer)"
+  while :; do
+    if [ -n "$CER" ]; then
+      cer_pem "$CER" >"$CERT_PEM" || true
+      if [ "$($OPENSSL x509 -in "$CERT_PEM" -noout -modulus 2>/dev/null)" != "$want" ]; then
+        note "$CER wasn't made from littleguys.certSigningRequest. Upload that one."
+      elif [ "$($OPENSSL x509 -in "$CERT_PEM" -noout -issuer_hash)" != "$g2" ]; then
+        note "$CER is from the Previous Sub-CA, which expires in February 2027."
+        note "Make another from the same request, and pick G2 Sub-CA this time."
+      else
+        break
+      fi
+      rejected="$CER"
+    fi
+    if [ -z "$shown" ]; then
+      say "Get a Developer ID Application certificate from Apple"
+      note "1. On the page that just opened, pick \"Developer ID Application\", Continue."
+      note "2. Pick \"G2 Sub-CA\" (not Previous Sub-CA), and upload"
+      note "   ~/Downloads/littleguys.certSigningRequest. Continue."
+      note "3. Download. This picks the certificate up from ~/Downloads by itself"
+      note "   (or drag the .cer here and press Enter)."
+      note "Only the Account Holder can make Developer ID certificates."
+      open "https://developer.apple.com/account/resources/certificates/add"
+      shown=1
+    fi
+    CER="$(wait_for_cer "$rejected")"
+  done
+  note "Got $CER"
 
   P12_PASSWORD="$($OPENSSL rand -base64 24)"
   export P12_PASSWORD
-  $OPENSSL pkcs12 -export -inkey "$WORK/key.pem" -in "$CERT_PEM" -certfile "$WORK/ca.pem" \
+  $OPENSSL pkcs12 -export -inkey "$KEY" -in "$CERT_PEM" -certfile "$WORK/ca.pem" \
     -name "$(subject_field "$CERT_PEM" commonName)" -passout env:P12_PASSWORD -out "$WORK/cert.p12"
-  security import "$WORK/cert.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign >/dev/null
-  note "Added it to your login keychain"
-  rm -f "$csr" "$cer"
+  if security import "$WORK/cert.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign >/dev/null 2>&1; then
+    note "Added it to your login keychain"
+  else
+    security find-identity -p codesigning | grep -qF "$(subject_field "$CERT_PEM" commonName)" ||
+      die "Couldn't add it to your login keychain."
+    note "It's already in your login keychain"
+  fi
 }
 
-TEAM_ID=""
+TEAM_ID="" CER=""
 say "Developer ID certificate"
 if wanted APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_TEAM_ID; then
   export P12_PASSWORD=""
@@ -136,6 +180,7 @@ if wanted APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY AP
   printf '%s' "$P12_PASSWORD" | put APPLE_CERTIFICATE_PASSWORD
   printf '%s' "$identity" | put APPLE_SIGNING_IDENTITY
   printf '%s' "$TEAM_ID" | put APPLE_TEAM_ID
+  if [ -n "$CER" ]; then rm -f "$KEY" "$CSR" "$CER"; fi
 else
   TEAM_ID="$(security find-identity -v -p codesigning | sed -n 's/.*"Developer ID Application: .*(\([A-Z0-9]\{10\}\))"$/\1/p' | head -1)"
 fi
