@@ -145,6 +145,11 @@ struct Session {
     /// It reports through the plugin's hooks.
     hooked: bool,
     last_hook: Option<Instant>,
+    /// Claude Code is done with it: a background session that's done, or a terminal session
+    /// that's exited. Its thread is archived.
+    finished: bool,
+    /// Your Archive or Unarchive, over `finished` until its next turn.
+    archived: Option<bool>,
     busy: bool,
     busy_changed: Option<Instant>,
     turn: u64,
@@ -173,6 +178,11 @@ impl Session {
 
     fn listable(&self, now: u64) -> bool {
         self.running || self.busy || now.saturating_sub(self.updated_at.max(self.started_at)) < LIST_WINDOW_MS
+    }
+
+    /// In the archive rather than the thread list. Never while it runs.
+    fn archived(&self) -> bool {
+        !self.running && !self.busy && self.archived.unwrap_or(self.finished)
     }
 
     fn followed(&self, now: u64) -> bool {
@@ -207,6 +217,8 @@ impl Session {
         if busy {
             self.turn += 1;
             self.waiting_for = None;
+            // At work again: whether it's archived is Claude Code's say once more.
+            self.archived = None;
             emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "start" })));
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "status", "phase": "thinking" })));
         } else {
@@ -314,6 +326,7 @@ impl ClaudeCodeClient {
         match method {
             "agents.list" => Ok(agents_list(inner)),
             "sessions.list" => Ok(sessions_list(inner, &params)),
+            "sessions.patch" => sessions_patch(inner, &params),
             "chat.history" => chat_history(inner, &params).await,
             "chat.send" => chat_send(inner, &params),
             "chat.abort" => Err(RpcError::new("UNSUPPORTED", "Press Esc in the session's terminal (claude attach) to stop it.")),
@@ -845,8 +858,18 @@ struct Listed {
     name: Option<String>,
     pid: Option<u64>,
     status: Option<String>,
+    /// A background session's `working|blocked|done|stopped`.
+    state: Option<String>,
     waiting_for: Option<String>,
     started_at: u64,
+}
+
+impl Listed {
+    /// A background session that's done, with no process left. Not one that was stopped: that
+    /// can be mid-turn, or with a message it never got to.
+    fn finished(&self) -> bool {
+        self.pid.is_none() && self.state.as_deref() == Some("done")
+    }
 }
 
 /// `claude agents --json --all`: a JSON array (after anything printed before it).
@@ -864,6 +887,7 @@ fn parse_agents(stdout: &str) -> Vec<Listed> {
                 name: text(row, "name"),
                 pid: row.get("pid").and_then(Value::as_u64),
                 status: text(row, "status"),
+                state: text(row, "state"),
                 waiting_for: text(row, "waitingFor"),
                 started_at: row.get("startedAt").and_then(Value::as_u64).unwrap_or(0),
             })
@@ -893,7 +917,12 @@ async fn poll_agents(inner: &Arc<Inner>) {
                 continue;
             }
             let s = st.sessions.entry(l.session_id.clone()).or_insert_with(|| Session::new(&l.session_id));
-            changed |= !known || s.running != running || s.name != l.name || (s.waiting_for != l.waiting_for && !s.hooked);
+            changed |= !known
+                || s.running != running
+                || s.finished != l.finished()
+                || s.name != l.name
+                || (s.waiting_for != l.waiting_for && !s.hooked);
+            s.finished = l.finished();
             s.background = l.background;
             s.short_id = l.short_id.clone().filter(|_| l.background);
             if !s.hooked || s.cwd.is_empty() {
@@ -919,10 +948,14 @@ async fn poll_agents(inner: &Arc<Inner>) {
             }
         }
         // Terminal sessions drop off the list when they exit.
-        for s in st.sessions.values_mut() {
-            if s.running && !ids.contains(s.id.as_str()) && s.last_hook.is_none_or(|t| t.elapsed() > HOOK_SETTLE) {
+        for s in st.sessions.values_mut().filter(|s| !ids.contains(s.id.as_str())) {
+            if s.running && s.last_hook.is_none_or(|t| t.elapsed() > HOOK_SETTLE) {
                 s.running = false;
                 s.set_busy(false, &mut emits);
+                changed = true;
+            }
+            if !s.running && !s.finished {
+                s.finished = true;
                 changed = true;
             }
         }
@@ -1523,40 +1556,54 @@ fn agents_list(inner: &Inner) -> Value {
 
 fn sessions_list(inner: &Inner, params: &Value) -> Value {
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(500) as usize;
-    if super::archived_filter(params) == Some(true) {
-        return json!({ "count": 0, "sessions": [] });
-    }
+    let archived = super::archived_filter(params);
     let now = now_ms();
     let st = inner.st.lock().unwrap();
     let mut sessions: Vec<&Session> = st
         .sessions
         .values()
-        .filter(|s| s.listable(now) && (s.running || s.transcript.is_some()))
+        .filter(|s| s.listable(now) && (s.running || s.transcript.is_some()) && archived.is_none_or(|a| a == s.archived()))
         .collect();
     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at.max(s.started_at)));
     sessions.truncate(limit);
-    let rows: Vec<Value> = sessions
-        .iter()
-        .map(|s| {
-            json!({
-                "key": s.key(),
-                "agentId": AGENT_ID,
-                "kind": "direct",
-                "sessionId": s.id,
-                "workspaceDir": s.cwd,
-                "derivedTitle": s.title(),
-                "lastMessagePreview": s.preview(),
-                "createdAt": s.started_at,
-                "updatedAt": s.updated_at.max(s.started_at),
-                "unread": false,
-                "pinned": false,
-                "archived": false,
-                "hasActiveRun": s.busy,
-                "status": if s.busy { "running" } else { "done" },
-            })
-        })
-        .collect();
+    let rows: Vec<Value> = sessions.iter().map(|s| session_row(s)).collect();
     json!({ "count": rows.len(), "sessions": rows })
+}
+
+fn session_row(s: &Session) -> Value {
+    json!({
+        "key": s.key(),
+        "agentId": AGENT_ID,
+        "kind": "direct",
+        "sessionId": s.id,
+        "workspaceDir": s.cwd,
+        "derivedTitle": s.title(),
+        "lastMessagePreview": s.preview(),
+        "createdAt": s.started_at,
+        "updatedAt": s.updated_at.max(s.started_at),
+        "unread": false,
+        "pinned": false,
+        "archived": s.archived(),
+        "hasActiveRun": s.busy,
+        "status": if s.busy { "running" } else { "done" },
+    })
+}
+
+/// Archive or Unarchive a session's thread, over what Claude Code says until its next turn.
+/// (Sending in an archived thread unarchives it first.)
+fn sessions_patch(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
+    let Some(archived) = params.get("archived").and_then(Value::as_bool) else {
+        return Err(unsupported("sessions.patch"));
+    };
+    let (key, sid) = session_of(params)?;
+    let row = {
+        let mut st = inner.st.lock().unwrap();
+        let s = st.sessions.get_mut(&sid).ok_or_else(|| RpcError::new("NOT_FOUND", "Not a Claude Code session."))?;
+        s.archived = Some(archived);
+        session_row(s)
+    };
+    emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "patch" }));
+    Ok(row)
 }
 
 fn session_of(params: &Value) -> Result<(String, String), RpcError> {
@@ -2057,6 +2104,64 @@ mod tests {
         assert!(!listed[1].background);
         assert_eq!(listed[1].pid, Some(7));
         assert!(parse_agents("no sessions").is_empty());
+    }
+
+    #[test]
+    fn only_done_background_sessions_are_finished() {
+        let listed = parse_agents(
+            r#"[{"kind":"background","sessionId":"done","state":"done"},
+ {"kind":"background","sessionId":"stopped","state":"stopped"},
+ {"kind":"background","sessionId":"blocked","state":"blocked"},
+ {"kind":"background","sessionId":"resumed","state":"done","status":"busy","pid":9},
+ {"kind":"interactive","sessionId":"terminal","status":"idle","pid":7}]"#,
+        );
+        let finished: Vec<&str> = listed.iter().filter(|l| l.finished()).map(|l| l.session_id.as_str()).collect();
+        assert_eq!(finished, ["done"]);
+    }
+
+    #[tokio::test]
+    async fn finished_sessions_are_archived_until_you_bring_them_back() {
+        let dir = std::env::temp_dir().join(format!("lg-archive-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hooks = Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks);
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            for (sid, finished) in [("done", true), ("blocked", false)] {
+                let s = st.sessions.entry(sid.to_string()).or_insert_with(|| Session::new(sid));
+                s.finished = finished;
+                s.started_at = now_ms();
+                s.transcript = Some(dir.join(format!("{sid}.jsonl")));
+            }
+        }
+        let keys_of = |listed: Value| -> Vec<String> {
+            let mut keys: Vec<String> = listed["sessions"].as_array().unwrap().iter().map(|r| r["key"].as_str().unwrap().to_string()).collect();
+            keys.sort();
+            keys
+        };
+        let done = keys::thread(AGENT_ID, "done");
+        let blocked = keys::thread(AGENT_ID, "blocked");
+        assert_eq!(keys_of(client.call("sessions.list", json!({})).await.unwrap()), [blocked.clone()]);
+        let archived = client.call("sessions.list", json!({ "archived": true })).await.unwrap();
+        assert_eq!(keys_of(archived.clone()), [done.clone()]);
+        assert_eq!(archived["sessions"][0]["archived"], true);
+        assert_eq!(keys_of(client.call("sessions.list", json!({ "archived": "all" })).await.unwrap()).len(), 2);
+
+        let row = client.call("sessions.patch", json!({ "key": done, "archived": false })).await.unwrap();
+        assert_eq!(row["archived"], false);
+        assert!(keys_of(client.call("sessions.list", json!({})).await.unwrap()).contains(&done));
+
+        // Its next turn hands it back to Claude Code: archived again once it's done.
+        let mut emits = Vec::new();
+        let mut st = client.inner.st.lock().unwrap();
+        let s = st.sessions.get_mut("done").unwrap();
+        s.set_busy(true, &mut emits);
+        assert!(!s.archived());
+        s.set_busy(false, &mut emits);
+        assert!(s.archived());
+        drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -272,9 +272,10 @@ function ThreadList({ guy }: { guy: Guy }) {
     [roster, guy],
   );
   const { uid, gatewayId, id } = guy;
+  // Even without thread actions: Claude Code archives the sessions it's done with.
   useEffect(() => {
-    if (caps.threadActions) useArchive.getState().load({ uid, gatewayId, id });
-  }, [threadKeys, caps.threadActions, uid, gatewayId, id]);
+    useArchive.getState().load({ uid, gatewayId, id });
+  }, [threadKeys, uid, gatewayId, id]);
   // Back to the threads once the last archived one is gone.
   useEffect(() => {
     if (showArchived && archived?.length === 0) setShowArchived(false);
