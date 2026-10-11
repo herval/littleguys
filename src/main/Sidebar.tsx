@@ -1,6 +1,7 @@
 import {
   AlarmClock,
   Archive,
+  ArchiveRestore,
   ChevronLeft,
   ChevronRight,
   Folder,
@@ -41,6 +42,7 @@ import {
 import { core } from "../lib/ipc";
 import type { Guy, SessionRow } from "../lib/types";
 import { type MainView, mainSessionKey, useApp } from "../stores/app";
+import { useArchive } from "../stores/archive";
 import { threadId } from "../stores/chat";
 import { Avatar } from "../ui/Avatar";
 import { IconButton, inputClass, TypingDots } from "../ui/kit";
@@ -202,6 +204,9 @@ function ThreadList({ guy }: { guy: Guy }) {
   const openPast = useApp((s) => s.openPast);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ routine: true, helper: true });
   const [creating, setCreating] = useState(false);
+  // Archived threads open in place of the list (null: never opened, so nothing slides).
+  const archived = useArchive((s) => s.byGuy[guy.uid]);
+  const [showArchived, setShowArchived] = useState<boolean | null>(null);
 
   const withMain = hasMainChat(roster, guy.gatewayId);
   const groups = useMemo<Group[]>(() => {
@@ -240,8 +245,31 @@ function ThreadList({ guy }: { guy: Guy }) {
     return () => document.removeEventListener("lg:new-thread", handler);
   }, [newThread]);
 
+  // Archiving or bringing back a thread, here or anywhere else, changes the guy's threads.
+  const threadKeys = useMemo(
+    () =>
+      sessionsFor(roster, guy)
+        .filter((r) => !r.archived)
+        .map((r) => r.key)
+        .sort()
+        .join(" "),
+    [roster, guy],
+  );
+  const { uid, gatewayId, id } = guy;
+  useEffect(() => {
+    if (caps.threadActions) useArchive.getState().load({ uid, gatewayId, id });
+  }, [threadKeys, caps.threadActions, uid, gatewayId, id]);
+  // Back to the threads once the last archived one is gone.
+  useEffect(() => {
+    if (showArchived && archived?.length === 0) setShowArchived(false);
+  }, [showArchived, archived?.length]);
+
+  if (showArchived && archived?.length) {
+    return <ArchivedList guy={guy} rows={archived} onBack={() => setShowArchived(false)} />;
+  }
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className={`flex min-h-0 flex-1 flex-col ${showArchived === false ? "animate-push-back" : ""}`}>
       <div className="flex items-center justify-between pb-1 pl-4 pr-2.5">
         <h3 className="font-display text-[13px] font-semibold">Threads</h3>
         {caps.newThreads && (
@@ -290,6 +318,53 @@ function ThreadList({ guy }: { guy: Guy }) {
                 />
               ))}
           </div>
+        ))}
+      </div>
+      {archived && archived.length > 0 && (
+        <div className="shrink-0 border-t border-[var(--color-line)] px-2 py-1.5">
+          <button
+            onClick={() => setShowArchived(true)}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] text-[var(--color-ink-3)] transition hover:bg-[var(--color-chip)] hover:text-[var(--color-ink-2)]"
+          >
+            <Archive size={13} className="shrink-0" />
+            <span className="font-medium">Archived</span>
+            <span className="ml-auto text-[11px] tabular-nums">{archived.length}</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A guy's archived threads, in place of their threads. Opening one shows it in the chat. */
+function ArchivedList({ guy, rows, onBack }: { guy: Guy; rows: SessionRow[]; onBack: () => void }) {
+  const roster = useApp((s) => s.roster);
+  const caps = capsOf(roster, guy.gatewayId);
+  const selected = useApp((s) => (s.selectedUid === guy.uid && s.view === "chat" ? s.selectedSessionKey : null));
+  const selectGuy = useApp((s) => s.selectGuy);
+  const withMain = hasMainChat(roster, guy.gatewayId);
+  return (
+    <div className="animate-push flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center gap-1 pb-1 pl-1.5 pr-2.5">
+        <IconButton label="Back to threads" onClick={onBack}>
+          <ChevronLeft size={16} />
+        </IconButton>
+        <h3 className="font-display text-[13px] font-semibold">Archived</h3>
+        <span className="rounded-full bg-[var(--color-chip)] px-1.5 text-[10.5px] tabular-nums text-[var(--color-ink-3)]">{rows.length}</span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        {rows.map((row) => (
+          <ThreadRow
+            key={row.key}
+            mainChat={withMain}
+            actions={caps.threadActions}
+            gatewayId={guy.gatewayId}
+            agentId={guy.id}
+            row={row}
+            running={false}
+            selected={selected === row.key}
+            onSelect={() => selectGuy(guy.uid, row.key)}
+          />
         ))}
       </div>
     </div>
@@ -513,7 +588,9 @@ function ThreadMenu({
   const act = async (fn: () => Promise<unknown>) => {
     onClose();
     await fn().catch(() => {});
-    core.refreshRoster(gatewayId).catch(() => {});
+    const refreshed = core.refreshRoster(gatewayId).catch(() => {});
+    // Archived threads aren't in the roster: look at the archive again too.
+    if (row.archived) refreshed.then(() => useArchive.getState().load({ uid: guyUid(gatewayId, agentId), gatewayId, id: agentId }));
   };
   const leaveIfOpen = () => {
     const s = useApp.getState();
@@ -547,21 +624,31 @@ function ThreadMenu({
       {!isMain && (
         <>
           <MenuButton icon={<Pencil size={13} />} label="Rename" onClick={() => (onClose(), onRename())} />
-          <MenuButton
-            icon={row.pinned ? <PinOff size={13} /> : <Pin size={13} />}
-            label={row.pinned ? "Unpin" : "Pin"}
-            onClick={() => act(() => sessionsApi.patch(gatewayId, row.key, { pinned: !row.pinned }))}
-          />
-          <MenuButton
-            icon={<Archive size={13} />}
-            label="Archive"
-            onClick={() =>
-              act(async () => {
-                await sessionsApi.patch(gatewayId, row.key, { archived: true }, row.sessionId ?? undefined);
-                leaveIfOpen();
-              })
-            }
-          />
+          {row.archived ? (
+            <MenuButton
+              icon={<ArchiveRestore size={13} />}
+              label="Unarchive"
+              onClick={() => act(() => sessionsApi.patch(gatewayId, row.key, { archived: false }, row.sessionId ?? undefined))}
+            />
+          ) : (
+            <>
+              <MenuButton
+                icon={row.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+                label={row.pinned ? "Unpin" : "Pin"}
+                onClick={() => act(() => sessionsApi.patch(gatewayId, row.key, { pinned: !row.pinned }))}
+              />
+              <MenuButton
+                icon={<Archive size={13} />}
+                label="Archive"
+                onClick={() =>
+                  act(async () => {
+                    await sessionsApi.patch(gatewayId, row.key, { archived: true }, row.sessionId ?? undefined);
+                    leaveIfOpen();
+                  })
+                }
+              />
+            </>
+          )}
         </>
       )}
       {(kind === "chat" || kind === "routine" || (kind === "main" && !isMain)) && (

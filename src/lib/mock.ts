@@ -71,6 +71,8 @@ const attic = gateway("openclaw", "attic", "wss://attic.tail1234.ts.net", forced
   sessions: [
     { key: "agent:main:main", agentId: "main", kind: "direct", updatedAt: now - 3 * min, lastMessagePreview: "Booked! Table for 2 at 8pm, confirmation in your inbox.", unread: true },
     { key: "agent:main:dashboard:a1", agentId: "main", kind: "direct", label: "Japan trip", updatedAt: now - 2 * 60 * min, lastMessagePreview: "Here's a 10-day itinerary that keeps travel under 3h/day." },
+    { key: "agent:main:dashboard:a0", agentId: "main", kind: "direct", label: "Apartment hunt", updatedAt: now - 12 * 24 * 60 * min, lastMessagePreview: "Shortlisted 4 places near the park.", archived: true },
+    { key: "agent:main:dashboard:a9", agentId: "main", kind: "direct", label: "Tax receipts", updatedAt: now - 41 * 24 * 60 * min, lastMessagePreview: "All 37 receipts are filed.", archived: true },
     { key: "agent:main:slack:channel:C123", agentId: "main", kind: "group", displayName: "#eng-standup", updatedAt: now - 40 * min, lastMessagePreview: "Posted the daily summary." },
     { key: "agent:main:cron:job1:run:r1", agentId: "main", kind: "direct", label: "Morning briefing", updatedAt: now - 9 * 60 * min, lastMessagePreview: "Sunny, 24°. 3 meetings today." },
     { key: "agent:fox:main", agentId: "fox", kind: "direct", updatedAt: now - 1 * min, lastMessagePreview: "Pulling flight prices from 3 airlines…" },
@@ -148,6 +150,10 @@ const history: Record<string, ChatMessage[]> = {
       timestamp: now - 3 * min,
       ...oc("a3"),
     },
+  ],
+  "openclaw|agent:main:dashboard:a0": [
+    { role: "user", content: "Find me 2-bedroom places near the park, under 3k.", timestamp: now - 12 * 24 * 60 * min - 90_000, ...oc("h1") },
+    { role: "assistant", content: [{ type: "text", text: "Shortlisted 4 places near the park. Two have a balcony; one allows dogs." }], timestamp: now - 12 * 24 * 60 * min, ...oc("h2") },
   ],
   "openclaw|agent:main:dashboard:a1": [
     { role: "user", content: "Can you read me the itinerary out loud?", timestamp: now - 2 * 60 * min - 60_000, ...oc("j1") },
@@ -416,6 +422,12 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
     }
     case "chat.send":
       return streamReply(gateway, String(p.sessionKey), String(p.message));
+    case "sessions.list": {
+      // Like the runtimes: archived threads only when asked for.
+      const want = p.archived === "all" ? null : p.archived === true;
+      const rows = roster.gateways.find((g) => g.id === gateway)?.sessions ?? [];
+      return { sessions: rows.filter((r) => (!p.agentId || r.agentId === p.agentId) && (want === null || Boolean(r.archived) === want)) };
+    }
     case "sessions.create":
       return { ok: true, key: `agent:${p.agentId}:dashboard:${crypto.randomUUID()}` };
     case "sessions.patch": {

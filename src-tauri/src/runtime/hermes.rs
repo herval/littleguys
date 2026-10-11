@@ -1442,6 +1442,12 @@ fn truncate(s: &str, max: usize) -> String {
 
 async fn sessions_list(inner: &Inner, params: &Value, timeout: Duration) -> Result<Value, RpcError> {
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(200).clamp(1, 500);
+    let archived = super::archived_filter(params);
+    let only_archived = archived == Some(true);
+    if only_archived && inner.config.mode == HermesMode::Api {
+        // The API server only lists sessions that aren't archived.
+        return Ok(json!({ "sessions": [], "count": 0, "ts": now_ms() }));
+    }
     if inner.config.mode == HermesMode::Local && !inner.st.lock().unwrap().profiles_loaded {
         // Main chats resolve through profiles.list; the app may ask for sessions first.
         let _ = agents_list(inner, timeout).await;
@@ -1450,7 +1456,12 @@ async fn sessions_list(inner: &Inner, params: &Value, timeout: Duration) -> Resu
         HermesMode::Local => {
             let scope = inner.config.profile.clone().filter(|p| !p.trim().is_empty());
             let path = format!(
-                "/api/profiles/sessions?limit={limit}&order=recent&archived=exclude&profile={}",
+                "/api/profiles/sessions?limit={limit}&order=recent&archived={}&profile={}",
+                match archived {
+                    Some(true) => "only",
+                    Some(false) => "exclude",
+                    None => "include",
+                },
                 enc(scope.as_deref().unwrap_or("all"))
             );
             let v = rest(inner, reqwest::Method::GET, &path, None, timeout).await?;
@@ -1511,7 +1522,7 @@ async fn sessions_list(inner: &Inner, params: &Value, timeout: Duration) -> Resu
         let id = row.get("sessionId").and_then(Value::as_str).unwrap_or_default().to_string();
         if seen_ids.contains(&id) {
             stale_drafts.push(key);
-        } else if !out.iter().any(|r| r["key"] == key.as_str()) {
+        } else if !only_archived && !out.iter().any(|r| r["key"] == key.as_str()) {
             let mut row = row.clone();
             row["hasActiveRun"] = json!(running_keys.contains(&key));
             out.push(row);
@@ -1524,7 +1535,7 @@ async fn sessions_list(inner: &Inner, params: &Value, timeout: Duration) -> Resu
         }
     }
     // Every guy has a main chat, even before its first message.
-    for profile in &profiles {
+    for profile in profiles.iter().filter(|_| !only_archived) {
         let key = keys::main(profile);
         if !out.iter().any(|r| r["key"] == key.as_str()) {
             out.push(json!({

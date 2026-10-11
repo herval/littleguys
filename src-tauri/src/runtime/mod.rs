@@ -5,8 +5,9 @@
 //!
 //! Calls (`Runtime::call(method, params)`):
 //! - `agents.list` → `{defaultId, agents:[{id, name, identity:{name, emoji}, workspace?, model?:{primary}}]}`
-//! - `sessions.list {limit?}` → `{sessions:[SessionRow-ish: {key, agentId, label?, derivedTitle?,
-//!   displayName?, lastMessagePreview?, updatedAt, unread?, hasActiveRun?, status?, sessionId?}]}`
+//! - `sessions.list {limit?, archived?}` → `{sessions:[SessionRow-ish: {key, agentId, label?, derivedTitle?,
+//!   displayName?, lastMessagePreview?, updatedAt, unread?, archived?, hasActiveRun?, status?, sessionId?}]}`:
+//!   the threads that aren't archived; `archived: true` lists only archived ones, `"all"` both ([`archived_filter`])
 //! - `sessions.subscribe`, `sessions.messages.subscribe {key}` → `{subscribed:true}`
 //! - `sessions.create {agentId, label?}` → `{ok:true, key}`
 //! - `sessions.patch {key, label?, pinned?, archived?, unread?}`, `sessions.delete {key}` (if `thread_actions`)
@@ -273,4 +274,29 @@ pub mod keys {
 
 pub fn unsupported(method: &str) -> RpcError {
     RpcError::new("UNSUPPORTED", format!("{method} isn't supported by this bot"))
+}
+
+/// Which threads `sessions.list` wants, from its `archived` param (read the way OpenClaw
+/// reads it): `Some(true)` only archived ones, `None` all of them (`"all"`), and
+/// `Some(false)`, the default, only the ones that aren't.
+pub fn archived_filter(params: &Value) -> Option<bool> {
+    match params.get("archived") {
+        Some(Value::Bool(true)) => Some(true),
+        Some(Value::String(s)) if s == "all" => None,
+        _ => Some(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn archived_filter_reads_openclaws_param() {
+        assert_eq!(archived_filter(&json!({})), Some(false));
+        assert_eq!(archived_filter(&json!({ "archived": false })), Some(false));
+        assert_eq!(archived_filter(&json!({ "archived": true })), Some(true));
+        assert_eq!(archived_filter(&json!({ "archived": "all" })), None);
+    }
 }

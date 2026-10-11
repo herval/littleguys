@@ -1469,7 +1469,9 @@ impl Inner {
 
     async fn sessions_list(self: &Arc<Self>, params: &Value) -> Value {
         let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(500) as usize;
-        let listed = self.agent_sessions().await;
+        let archived = super::archived_filter(params);
+        // Sessions littleguys hasn't touched are never archived.
+        let listed = if archived == Some(true) { Vec::new() } else { self.agent_sessions().await };
         let running: HashSet<String> = self.runs.lock().unwrap().keys().cloned().collect();
         let cwd = self.cwd_string();
         let store = self.store.lock().unwrap();
@@ -1479,7 +1481,9 @@ impl Inner {
             known.extend(meta.session_id.iter().cloned());
             known.extend(meta.aliases.iter().cloned());
             known.extend(implied_session_id(&meta.key));
-            rows.push(session_row(meta, running.contains(&meta.key), &cwd));
+            if archived.is_none_or(|a| a == meta.archived) {
+                rows.push(session_row(meta, running.contains(&meta.key), &cwd));
+            }
         }
         drop(store);
         for info in &listed {

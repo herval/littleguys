@@ -61,6 +61,15 @@ export const sessions = {
       deleteTranscript: true,
       ...(expectedSessionId ? { expectedSessionId } : {}),
     }),
+  /** A guy's archived threads; the roster only has the ones that aren't. */
+  archived: (gw: string, agentId: string) =>
+    gwCall<{ sessions: SessionRow[] }>(gw, "sessions.list", {
+      agentId,
+      archived: true,
+      limit: 200,
+      includeDerivedTitles: true,
+      includeLastMessage: true,
+    }),
   subscribeMessages: (gw: string, key: string) => gwCall<{ subscribed: boolean }>(gw, "sessions.messages.subscribe", { key }),
   /** Every session the agent can resume, from every folder, newest first (ACP). */
   past: (gw: string) => gwCall<{ sessions: PastSession[] }>(gw, "sessions.past", {}, 60_000),

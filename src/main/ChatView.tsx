@@ -1,11 +1,12 @@
-import { ArrowDown, Globe, RotateCw } from "lucide-react";
+import { Archive, ArrowDown, Globe, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { sessions as sessionsApi } from "../lib/gateway";
 import { channelName, gatewayOf, guyName, hasMainChat, isOnThisMac, isRunning, phaseLabel, sessionRow, threadKind, threadTitle } from "../lib/guys";
 import { core } from "../lib/ipc";
 import { presentTense, toolKind } from "../lib/toolPhrases";
-import type { Guy } from "../lib/types";
+import type { Guy, SessionRow } from "../lib/types";
 import { useApp } from "../stores/app";
+import { useArchive, useArchivedRow } from "../stores/archive";
 import { threadId, useChat, waitingCount } from "../stores/chat";
 import { Avatar, GuyMark } from "../ui/Avatar";
 import { Button, IconButton, Spinner } from "../ui/kit";
@@ -18,7 +19,15 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   const agent = guy;
   const gw = guy.gatewayId;
   const tid = threadId(gw, sessionKey);
-  const row = useApp((s) => sessionRow(s.roster, gw, sessionKey));
+  const rosterRow = useApp((s) => sessionRow(s.roster, gw, sessionKey));
+  // Archived threads aren't in the roster; look in the archive if it hasn't been yet.
+  const archivedRow = useArchivedRow(guy, sessionKey);
+  const row = rosterRow ?? archivedRow;
+  const archiveLoaded = useArchive((s) => guy.uid in s.byGuy);
+  const inRoster = Boolean(rosterRow);
+  useEffect(() => {
+    if (!inRoster && !archiveLoaded) useArchive.getState().load({ uid: guy.uid, gatewayId: gw, id: guy.id });
+  }, [inRoster, archiveLoaded, guy.uid, gw, guy.id]);
   const rosterRunning = useApp((s) => isRunning(s.roster, gw, sessionKey));
   const thread = useChat((s) => s.threads[tid]);
   const { open, send, abort, reload } = useChat.getState();
@@ -200,6 +209,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
         {canPickFolder && unstarted && (pendingFolder ?? folder) && (
           <FolderPicker guy={guy} value={(pendingFolder ?? folder) as string} onChange={setPendingFolder} />
         )}
+        {row?.archived && <ArchivedNote guy={guy} row={row} />}
         <Composer
           gatewayId={gw}
           agentId={guy.id}
@@ -208,6 +218,8 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
           placeholder={kind === "channel" ? `Reply in ${channelName(sessionKey) ?? "channel"} as ${guyName(agent)}…` : `Message ${guyName(agent)}…`}
           running={running}
           onSend={async (text, attachments) => {
+            // Writing in an archived thread brings it back (OpenClaw won't start work in one that's archived).
+            if (row?.archived) await useArchive.getState().unarchive(guy, row);
             setFollow(true);
             const cwd = canPickFolder && unstarted && pendingFolder !== folder ? (pendingFolder ?? undefined) : undefined;
             await send(tid, text, attachments, cwd);
@@ -216,6 +228,28 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
           onStop={() => abort(tid)}
         />
       </div>
+    </div>
+  );
+}
+
+/** Over an archived thread's composer: writing in it brings it back. */
+function ArchivedNote({ guy, row }: { guy: Guy; row: SessionRow }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="flex items-center gap-1.5 px-7 pb-0.5 text-[12px] text-[var(--color-ink-3)]">
+      <Archive size={12} className="shrink-0" />
+      <span className="truncate">Archived. Sending a message brings it back.</span>
+      <button
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          await useArchive.getState().unarchive(guy, row).catch(() => {});
+          setBusy(false);
+        }}
+        className="shrink-0 rounded-full px-2 py-0.5 font-medium text-[var(--color-accent-strong)] transition hover:bg-[var(--color-chip)] disabled:opacity-50"
+      >
+        Unarchive
+      </button>
     </div>
   );
 }
