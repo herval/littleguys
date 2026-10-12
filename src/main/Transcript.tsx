@@ -152,7 +152,7 @@ export function Transcript({
       prevKind = null;
     }
     if (ts) lastTs = ts;
-    const side = item.kind === "user" ? `user:${item.sender ?? ""}` : item.kind === "note" ? null : "guy";
+    const side = item.kind === "user" ? `user:${item.sender ?? ""}:${item.via ?? ""}` : item.kind === "note" ? null : "guy";
     const startsGroup = side !== prevKind;
     prevKind = side;
 
@@ -254,7 +254,9 @@ const UserBubble = memo(function UserBubble({ item, first, where }: { item: Extr
   return (
     <div className={`flex justify-end pl-16 ${first ? "mt-3" : "mt-1"} ${item.pending ? "opacity-60" : ""}`}>
       <div className="flex min-w-0 max-w-[640px] flex-col items-end gap-1">
-        {first && item.sender && <span className="px-1 text-[11px] text-[var(--color-ink-3)]">{item.sender}</span>}
+        {first && (item.sender || item.via) && (
+          <span className="px-1 text-[11px] text-[var(--color-ink-3)]">{[item.sender, item.via].filter(Boolean).join(" · ")}</span>
+        )}
         {item.media.map((m, i) => (
           <MediaView key={i} media={m} where={where} />
         ))}

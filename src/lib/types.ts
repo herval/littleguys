@@ -225,6 +225,8 @@ export interface ChatMessage {
   isError?: boolean;
   stopReason?: string;
   model?: string;
+  /** Who sent a user message that came in from a channel (Slack, Teams…). */
+  senderLabel?: string;
   /** On a tool result: the files that tool changed. */
   diffs?: ToolDiff[];
   /** On a question tool's result: each question → the answer given. */

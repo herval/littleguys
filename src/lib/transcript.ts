@@ -2,6 +2,7 @@
 // own block shapes with ones imported from CLI runtimes (e.g. Claude CLI
 // history: `toolcall`, `tool_result`); everything is normalized here.
 import { cleanPreview } from "./guys";
+import { parseInbound } from "./inbound";
 import type { ChatMessage, ContentBlock, ToolDiff } from "./types";
 
 export interface ToolCallBlock {
@@ -36,7 +37,7 @@ export interface MediaRef {
 }
 
 export type Item =
-  | { kind: "user"; id: string; text: string; media: MediaRef[]; sender?: string; ts?: number; pending?: boolean }
+  | { kind: "user"; id: string; text: string; media: MediaRef[]; sender?: string; via?: string; ts?: number; pending?: boolean }
   | { kind: "text"; id: string; text: string; ts?: number }
   | { kind: "thinking"; id: string; text: string; ts?: number }
   | { kind: "tool"; id: string; call: ToolCallBlock; result?: ToolResult; ts?: number }
@@ -172,9 +173,18 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
       if (bs.length > 0 && bs.every((b) => b.type === "tool_result")) return;
       const texts: string[] = [];
       const media: MediaRef[] = [];
+      const events: string[] = [];
+      let sender = str(m.senderLabel);
+      let via: string | undefined;
       for (const b of bs) {
         if (b.type === "text") {
-          const { text, files } = extractMediaLines((b as { text: string }).text);
+          // Channel messages carry the events OpenClaw queued for the guy;
+          // those show as notes, and the one announcing this message as its sender.
+          const inbound = parseInbound((b as { text: string }).text);
+          sender ??= inbound.sender;
+          via ??= inbound.via;
+          events.push(...inbound.events.filter((e) => !events.includes(e)));
+          const { text, files } = extractMediaLines(inbound.body);
           if (text) texts.push(text);
           media.push(...files);
         } else {
@@ -182,9 +192,9 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
           if (ref) media.push(ref);
         }
       }
-      const sender = str((m as unknown as Rec).senderLabel);
+      events.forEach((text, k) => items.push({ kind: "note", id: `${id}:e${k}`, text, tone: "muted", ts: m.timestamp }));
       if (!texts.length && !media.length) return;
-      items.push({ kind: "user", id, text: texts.join("\n"), media, sender, ts: m.timestamp });
+      items.push({ kind: "user", id, text: texts.join("\n"), media, sender, via, ts: m.timestamp });
       return;
     }
 

@@ -1505,12 +1505,95 @@ fn visible_prompt(raw: &str) -> Option<String> {
     if let Some(input) = between(raw, "<bash-input>", "</bash-input>") {
         return Some(format!("! {}", input.trim()));
     }
+    let text = strip_hidden(raw);
+    let text = strip_image_marks(split_attached(&text).0);
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn strip_hidden(raw: &str) -> String {
     let mut text = raw.to_string();
     for tag in HIDDEN_TAGS {
         text = strip_blocks(&text, tag);
     }
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    text
+}
+
+/// Without the `[Image #N]` marks Claude Code leaves where you pasted an image
+/// (the image itself is a block of its own).
+fn strip_image_marks(text: &str) -> String {
+    const MARK: &str = "[Image #";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(MARK) {
+        let after = &rest[at + MARK.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 || !after[digits..].starts_with(']') {
+            out.push_str(&rest[..at + MARK.len()]);
+            rest = after;
+            continue;
+        }
+        out.push_str(&rest[..at]);
+        rest = &after[digits + 1..];
+        if out.ends_with(' ') && rest.starts_with(' ') {
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The list agentbook (and the like) end a message with: "Attached files:", then
+/// `- name: /path` lines.
+const ATTACHED: &str = "Attached files:";
+/// Bigger attached images show as a file instead.
+const ATTACHED_IMAGE_MAX: u64 = 10 << 20;
+
+/// `text` without its attached-files list, and the `(name, path)`s on it.
+fn split_attached(text: &str) -> (&str, Vec<(&str, &str)>) {
+    let Some(at) = text.rfind(ATTACHED).filter(|&at| at == 0 || text[..at].ends_with('\n')) else {
+        return (text, Vec::new());
+    };
+    let files: Option<Vec<(&str, &str)>> = text[at + ATTACHED.len()..]
+        .trim()
+        .lines()
+        .map(|line| {
+            let entry = line.trim().strip_prefix("- ")?;
+            let sep = entry.find(": /")?;
+            Some((&entry[..sep], &entry[sep + 2..]))
+        })
+        .collect();
+    match files {
+        Some(files) if !files.is_empty() => (&text[..at], files),
+        _ => (text, Vec::new()),
+    }
+}
+
+/// The files a prompt has attached, as content blocks: images inline, anything
+/// else (or an image that's gone or too big) as a file.
+fn attached_blocks(raw: &str) -> Vec<Value> {
+    let text = strip_hidden(raw);
+    split_attached(&text).1.into_iter().map(|(name, path)| attached_block(name, Path::new(path))).collect()
+}
+
+fn attached_block(name: &str, path: &Path) -> Value {
+    let size = std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len());
+    let by_ext = crate::localfs::image_mime_for(&path.to_string_lossy());
+    if let (Some(by_ext), Some(size)) = (by_ext, size.filter(|&s| s <= ATTACHED_IMAGE_MAX)) {
+        let mut bytes = Vec::with_capacity(size as usize);
+        let read = std::fs::File::open(path).and_then(|f| f.take(ATTACHED_IMAGE_MAX + 1).read_to_end(&mut bytes));
+        if read.is_ok() && bytes.len() as u64 <= ATTACHED_IMAGE_MAX {
+            use base64::Engine;
+            let mime = crate::localfs::sniff_image(&bytes).unwrap_or(by_ext);
+            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            return json!({ "type": "image", "alt": name, "source": { "type": "base64", "media_type": mime, "data": data } });
+        }
+    }
+    let mut attachment = json!({ "label": name });
+    if let Some(size) = size {
+        attachment["sizeBytes"] = json!(size);
+    }
+    json!({ "type": "attachment", "attachment": attachment })
 }
 
 /// Your message, when a line is littleguys handing it over (Stop hook feedback, or
@@ -1571,10 +1654,15 @@ fn user_messages(line: &Value, uuid: &str, ts: Option<u64>, tools: &HashMap<Stri
             .collect();
     }
     match content {
-        Value::String(s) => visible_prompt(s)
-            .map(|t| chat_message("user", vec![json!({ "type": "text", "text": t })], ts, uuid))
-            .into_iter()
-            .collect(),
+        Value::String(s) => {
+            let mut mine: Vec<Value> = visible_prompt(s).map(|t| json!({ "type": "text", "text": t })).into_iter().collect();
+            mine.extend(attached_blocks(s));
+            if mine.is_empty() {
+                Vec::new()
+            } else {
+                vec![chat_message("user", mine, ts, uuid)]
+            }
+        }
         Value::Array(blocks) => {
             let mut out = Vec::new();
             let mut mine = Vec::new();
@@ -1597,9 +1685,11 @@ fn user_messages(line: &Value, uuid: &str, ts: Option<u64>, tools: &HashMap<Stri
                         out.push(result);
                     }
                     Some("text") => {
-                        if let Some(t) = block.get("text").and_then(Value::as_str).and_then(visible_prompt) {
+                        let raw = block.get("text").and_then(Value::as_str).unwrap_or_default();
+                        if let Some(t) = visible_prompt(raw) {
                             mine.push(json!({ "type": "text", "text": t }));
                         }
+                        mine.extend(attached_blocks(raw));
                     }
                     Some("image") => mine.push(block.clone()),
                     _ => {}
@@ -2813,6 +2903,46 @@ mod tests {
         assert_eq!(visible_prompt("<channel source=\"x\">hi</channel>"), None);
         // Not one of the tags: kept.
         assert_eq!(visible_prompt("use <channels> here").as_deref(), Some("use <channels> here"));
+    }
+
+    #[test]
+    fn pasted_and_attached_images_leave_no_text_behind() {
+        assert_eq!(visible_prompt("[Image #1] audios dont load").as_deref(), Some("audios dont load"));
+        assert_eq!(visible_prompt("click the card, [Image #3] then the list").as_deref(), Some("click the card, then the list"));
+        assert_eq!(visible_prompt("[Image #2]"), None);
+        assert_eq!(visible_prompt("see [Image #x] and [Image #]").as_deref(), Some("see [Image #x] and [Image #]"));
+        assert_eq!(
+            visible_prompt("is this a problem?\n\nAttached files:\n- image.png: /tmp/a-image.png\n- notes.txt: /tmp/b notes.txt").as_deref(),
+            Some("is this a problem?")
+        );
+        assert_eq!(visible_prompt("Attached files:\n- image.png: /tmp/a.png"), None);
+        // Not a list of files: kept.
+        let prose = "Attached files: none of them\n- really: /none";
+        assert_eq!(visible_prompt(prose).as_deref(), Some(prose));
+    }
+
+    #[test]
+    fn attached_images_show_inline() {
+        let dir = std::env::temp_dir().join(format!("littleguys-attached-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("x-image.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let prompt = format!(
+            "look\n\nAttached files:\n- image.png: {}\n- gone.png: {}",
+            image.display(),
+            dir.join("gone.png").display()
+        );
+        let out = convert_line(&json!({ "type": "user", "uuid": "u1", "message": { "content": prompt } }), &mut HashMap::new());
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let content = out[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0], json!({ "type": "text", "text": "look" }));
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["alt"], "image.png");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBORw0KGgpyZXN0");
+        assert_eq!(content[2], json!({ "type": "attachment", "attachment": { "label": "gone.png" } }));
     }
 
     #[test]

@@ -229,14 +229,14 @@ fn updated_at_ms(meta: &std::fs::Metadata) -> Option<u64> {
 }
 
 /// The image mime type implied by a file name (SVG is text).
-fn image_mime_for(name: &str) -> Option<&'static str> {
+pub(crate) fn image_mime_for(name: &str) -> Option<&'static str> {
     let (_, ext) = name.rsplit_once('.')?;
     let ext = ext.to_ascii_lowercase();
     IMAGE_EXTENSIONS.iter().find(|(e, _)| *e == ext).map(|(_, mime)| *mime)
 }
 
 /// The image type from its magic bytes.
-fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {

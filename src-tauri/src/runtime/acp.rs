@@ -39,7 +39,7 @@ use crate::gateways::{AcpConfig, AcpTransport};
 use crate::openclaw::config::{Credential, GatewayMode};
 use crate::openclaw::runtime::login_path;
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
-use crate::runtime::{keys, unsupported, Capabilities, RuntimeKind};
+use crate::runtime::{blocking, home, is_executable, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
 
 /// Every ACP entry is exactly one guy.
 const AGENT_ID: &str = "bot";
@@ -1009,11 +1009,6 @@ fn exit_message(name: &str, status: Option<std::process::ExitStatus>, tail: &str
     }
 }
 
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-}
-
 /// Absolute path for `command`, searching the login-shell PATH.
 fn resolve_program(command: &str) -> Option<PathBuf> {
     let expanded = expand_tilde(command);
@@ -1485,7 +1480,7 @@ impl Inner {
             known.extend(meta.session_id.iter().cloned());
             known.extend(meta.aliases.iter().cloned());
             known.extend(implied_session_id(&meta.key));
-            if archived.is_none_or(|a| a == meta.archived) {
+            if archived.is_none_or(|a| a == meta.flags.archived.unwrap_or(false)) {
                 rows.push(session_row(meta, running.contains(&meta.key), &cwd));
             }
         }
@@ -1689,7 +1684,7 @@ impl Inner {
                 store.index.sessions.push(SessionMeta {
                     key: key.clone(),
                     session_id: Some(sid.clone()),
-                    label,
+                    flags: ThreadFlags { label, ..Default::default() },
                     created_at: now,
                     updated_at: now,
                     ..Default::default()
@@ -1709,21 +1704,7 @@ impl Inner {
         let cwd = self.cwd_string();
         let mut store = self.store.lock().unwrap();
         let meta = store.get_mut(&key).ok_or_else(|| RpcError::new("NOT_FOUND", "no such thread"))?;
-        if let Some(label) = params.get("label") {
-            meta.label = label.as_str().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string);
-        }
-        if let Some(v) = params.get("unread").and_then(Value::as_bool) {
-            meta.unread = v;
-            if !v {
-                meta.last_read_at = Some(now_ms());
-            }
-        }
-        if let Some(v) = params.get("pinned").and_then(Value::as_bool) {
-            meta.pinned = v;
-        }
-        if let Some(v) = params.get("archived").and_then(Value::as_bool) {
-            meta.archived = v;
-        }
+        meta.flags.patch(params);
         let row = session_row(meta, running, &cwd);
         store.save();
         Ok(row)
@@ -2126,7 +2107,7 @@ impl Inner {
         }
         self.store.lock().unwrap().update(&key, |m| {
             m.updated_at = now_ms();
-            m.unread = true;
+            m.flags.unread = true;
             if let Some(text) = final_text.as_deref().map(clean_preview).filter(|t| !t.is_empty()) {
                 m.last_preview = Some(truncate(&text, 200));
             }
@@ -2218,24 +2199,22 @@ impl Drop for ReplayGuard {
 
 /// `cwd`: the guy's folder, for threads without their own.
 fn session_row(meta: &SessionMeta, running: bool, cwd: &str) -> Value {
-    json!({
+    let mut row = json!({
         "key": meta.key,
         "agentId": AGENT_ID,
         "kind": "direct",
         "sessionId": meta.session_id,
         "workspaceDir": meta.cwd.as_deref().unwrap_or(cwd),
-        "label": meta.label,
         "derivedTitle": meta.title,
         "lastMessagePreview": meta.last_preview,
         "createdAt": meta.created_at,
         "updatedAt": meta.updated_at,
-        "unread": meta.unread,
-        "lastReadAt": meta.last_read_at,
-        "pinned": meta.pinned,
-        "archived": meta.archived,
+        "archived": meta.flags.archived.unwrap_or(false),
         "hasActiveRun": running,
         "status": if running { "running" } else { "done" },
-    })
+    });
+    meta.flags.add_to(&mut row);
+    row
 }
 
 /// A session the agent knows about but littleguys hasn't touched yet.
@@ -2263,10 +2242,6 @@ fn listed_row(info: &Value, cwd: &str) -> Value {
 fn same_dir(a: &str, b: &str) -> bool {
     let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p.trim_end_matches('/')));
     a.trim_end_matches('/') == b.trim_end_matches('/') || canonical(a) == canonical(b)
-}
-
-fn parse_iso_ms(s: &str) -> Option<u64> {
-    chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis().max(0) as u64)
 }
 
 /// ACP prompt blocks + what the transcript shows for the user's message.
@@ -2359,15 +2334,6 @@ impl Flavor {
             Self::Other
         }
     }
-}
-
-fn home() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/var/empty"))
-}
-
-/// Run file work off the async runtime.
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, RpcError> + Send + 'static) -> Result<T, RpcError> {
-    tokio::task::spawn_blocking(work).await.map_err(|e| RpcError::new("INTERNAL", e.to_string()))?
 }
 
 /// `agentId`, when given, must be this bot's.
@@ -3805,7 +3771,7 @@ impl RoutineRunner for Runner {
                     store.index.sessions.push(SessionMeta {
                         key: key.clone(),
                         session_id: Some(sid),
-                        label: job_name,
+                        flags: ThreadFlags { label: job_name, ..Default::default() },
                         created_at: now,
                         updated_at: now,
                         ..Default::default()
@@ -3857,9 +3823,6 @@ struct SessionMeta {
     title: Option<String>,
     #[serde(default)]
     title_from_agent: bool,
-    /// User-given name.
-    #[serde(default)]
-    label: Option<String>,
     /// The thread's own folder (absolute); None: the guy's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
@@ -3869,15 +3832,9 @@ struct SessionMeta {
     updated_at: u64,
     #[serde(default)]
     last_preview: Option<String>,
-    #[serde(default)]
-    unread: bool,
-    /// When it was last marked read (ms): what came after is new.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_read_at: Option<u64>,
-    #[serde(default)]
-    pinned: bool,
-    #[serde(default)]
-    archived: bool,
+    /// Your name for it, read or unread, pinned, archived.
+    #[serde(flatten)]
+    flags: ThreadFlags,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -4039,15 +3996,6 @@ fn transcript_name(key: &str) -> String {
         .take(80)
         .collect();
     format!("{safe}-{short}.jsonl")
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let cut: String = s.chars().take(max).collect();
-    format!("{}…", cut.trim_end())
 }
 
 fn clean_preview(text: &str) -> String {

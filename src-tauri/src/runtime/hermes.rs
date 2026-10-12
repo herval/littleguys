@@ -42,7 +42,7 @@ use crate::gateway::client::{ConnStatus, Hooks, Phase, RpcError};
 use crate::gateway::identity::{now_ms, write_private};
 use crate::gateways::{HermesConfig, HermesMode};
 use crate::openclaw::config::{Credential, GatewayMode};
-use crate::runtime::{keys, unsupported, Capabilities, RuntimeKind};
+use crate::runtime::{keys, truncate, unsupported, Capabilities, RuntimeKind};
 
 const DEFAULT_LOCAL_PORT: u16 = 9119;
 const DEFAULT_API_PORT: u16 = 8642;
@@ -1429,15 +1429,6 @@ fn session_row(profile: &str, row: &Value, main_id: Option<&str>, running: bool)
         out["lastMessagePreview"] = json!(p);
     }
     Some(out)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let cut: String = s.chars().take(max).collect();
-    format!("{}…", cut.trim_end())
 }
 
 async fn sessions_list(inner: &Inner, params: &Value, timeout: Duration) -> Result<Value, RpcError> {

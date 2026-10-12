@@ -375,6 +375,14 @@ const history: Record<string, ChatMessage[]> = {
     { role: "assistant", content: [{ type: "toolCall", id: "x1", name: "exec", arguments: { command: "pnpm test auth --repeat 20" } }], timestamp: now - 45 * min, ...oc("a1") },
     { role: "toolResult", toolCallId: "x1", toolName: "exec", isError: false, content: [{ type: "text", text: "3 of 20 runs failed: token expiry race in session.spec.ts:42" }], ...oc("r1") },
     { role: "assistant", content: [{ type: "text", text: "Found it — the test creates a token with a **1s expiry** and then awaits a network call, so it races on slow CI boxes.\n\n```ts\n// before\nconst token = sign(user, { expiresIn: '1s' })\n// after\nconst token = sign(user, { expiresIn: '1m' })\nvi.useFakeTimers()\n```\n\nDone — PR is up: _fix flaky auth test_." }], timestamp: now - 26 * min, ...oc("a2") },
+    {
+      role: "user",
+      content: "System: [2026-10-11 17:00:26 GMT-3] Slack message edited in #eng-ci.\nSystem: [2026-10-11 17:00:26 GMT-3] Slack message edited in #eng-ci.\n\nSystem: [2026-10-11 17:03:12 GMT-3] Slack message in #eng-ci from Maya Lindqvist\n\n<@U0OCTO0001> (Octo) nice, merge it once CI is green\n[slack message id: 1791000000.000100 channel: C0ENGCI001]",
+      senderLabel: "Maya Lindqvist",
+      timestamp: now - 20 * min,
+      ...oc("s1"),
+    },
+    { role: "assistant", content: [{ type: "text", text: "Will do — I'll merge as soon as the run passes." }], timestamp: now - 19 * min, ...oc("s2") },
   ],
 };
 

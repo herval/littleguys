@@ -60,6 +60,7 @@ pub mod claudecode;
 pub mod hermes;
 pub mod scheduler;
 
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -294,6 +295,87 @@ pub fn archived_filter(params: &Value) -> Option<bool> {
     }
 }
 
+/// What you set on a thread from littleguys (`sessions.patch`), kept by littleguys for
+/// runtimes that don't keep it themselves (ACP, Claude Code).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadFlags {
+    /// Your name for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub unread: bool,
+    /// When it was last marked read (ms): what came after is new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_read_at: Option<u64>,
+    #[serde(default)]
+    pub pinned: bool,
+    /// Your Archive (`true`) or Unarchive (`false`). `None`: you haven't said, so the
+    /// runtime decides (ACP: not archived; Claude Code: archived once it's done).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+}
+
+impl ThreadFlags {
+    /// Applies `sessions.patch {label?, unread?, pinned?, archived?}`; returns whether anything changed.
+    pub fn patch(&mut self, params: &Value) -> bool {
+        let before = self.clone();
+        if let Some(label) = params.get("label") {
+            self.label = label.as_str().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string);
+        }
+        if let Some(unread) = params.get("unread").and_then(Value::as_bool) {
+            self.unread = unread;
+            if !unread {
+                self.last_read_at = Some(crate::gateway::identity::now_ms());
+            }
+        }
+        if let Some(pinned) = params.get("pinned").and_then(Value::as_bool) {
+            self.pinned = pinned;
+        }
+        if let Some(archived) = params.get("archived").and_then(Value::as_bool) {
+            self.archived = Some(archived);
+        }
+        *self != before
+    }
+
+    /// Adds the session-row fields they show as: `label`, `unread`, `lastReadAt` and `pinned`
+    /// (`archived` is the runtime's to work out).
+    pub fn add_to(&self, row: &mut Value) {
+        row["label"] = serde_json::json!(self.label);
+        row["unread"] = Value::Bool(self.unread);
+        row["lastReadAt"] = serde_json::json!(self.last_read_at);
+        row["pinned"] = Value::Bool(self.pinned);
+    }
+}
+
+pub fn home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/var/empty"))
+}
+
+/// Runs file-reading work off the async runtime.
+pub async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, RpcError> + Send + 'static) -> Result<T, RpcError> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| RpcError::new("INTERNAL", e.to_string()))?
+}
+
+pub fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+pub fn parse_iso_ms(s: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis().max(0) as u64)
+}
+
+/// `text`, trimmed, cut to at most `max` characters (an ellipsis included).
+pub fn truncate(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
 /// Claude's face, the Claude Code mascot, as a data URL for `identity.avatarUrl`.
 pub fn claude_face() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
@@ -307,6 +389,33 @@ pub fn claude_face() -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn thread_flags_patch_and_show() {
+        let mut flags = ThreadFlags::default();
+        assert!(!flags.patch(&json!({ "key": "k" })));
+        assert!(flags.patch(&json!({ "label": "  Taxes ", "pinned": true, "unread": true })));
+        assert_eq!(flags.label.as_deref(), Some("Taxes"));
+        assert!(flags.patch(&json!({ "unread": false, "archived": true })));
+        assert!(flags.last_read_at.is_some());
+        assert_eq!(flags.archived, Some(true));
+        assert!(flags.patch(&json!({ "label": null })));
+        assert_eq!(flags.label, None);
+
+        let mut row = json!({ "key": "k", "archived": true });
+        flags.add_to(&mut row);
+        assert_eq!(row["pinned"], true);
+        assert_eq!(row["unread"], false);
+        assert_eq!(row["label"], Value::Null);
+        assert_eq!(row["archived"], true);
+    }
+
+    #[test]
+    fn truncate_keeps_to_max_characters() {
+        assert_eq!(truncate("  short  ", 10), "short");
+        assert_eq!(truncate("abcdefghij", 5), "abcd…");
+        assert_eq!(truncate("ab cdefg", 4), "ab…");
+    }
 
     #[test]
     fn archived_filter_reads_openclaws_param() {

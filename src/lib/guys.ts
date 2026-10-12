@@ -1,5 +1,6 @@
 // Derived, display-level facts about little guys and their threads, across
 // every connected gateway.
+import { parseInbound } from "./inbound";
 import type { AgentSummary, Capabilities, ConnStatus, GatewayRoster, Guy, Roster, SessionRow } from "./types";
 
 export interface GuyActivity {
@@ -226,7 +227,8 @@ export function shortTime(ms: number): string {
 /** Strip OpenClaw reply directives and system noise from preview text. */
 export function cleanPreview(text: string | null | undefined): string {
   if (!text) return "";
-  return text
+  const { body, events } = parseInbound(text);
+  return (body || events.join(" · "))
     .replace(/\[\[[a-z_]+\]\]\s*/gi, "")
     .replace(/\s+/g, " ")
     .trim();
