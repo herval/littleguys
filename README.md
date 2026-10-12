@@ -1,6 +1,6 @@
 # littleguys
 
-littleguys is a small, free, open-source Mac menu bar app that puts your AI agents ([OpenClaw](https://openclaw.ai), [Hermes](https://github.com/NousResearch/hermes-agent), Claude Code, Codex and any [ACP](https://agentclientprotocol.com) agent) on every machine in one calm place: one glance shows who needs you, one click answers. Each agent gets a little guy in your menu bar. See it in action at [littleguys.dev](https://littleguys.dev), or watch the [51-second intro](https://www.youtube.com/watch?v=5LiTutHng-k).
+littleguys is a small, free, open-source Mac app for talking to your AI agents, WhatsApp-style: [OpenClaw](https://openclaw.ai), [Hermes](https://github.com/NousResearch/hermes-agent), Claude Code, Codex and any [ACP](https://agentclientprotocol.com) agent, on every machine, are contacts with their own chats, and a little guy in the menu bar shows who needs you. See it in action at [littleguys.dev](https://www.littleguys.dev), or watch the [51-second intro](https://www.youtube.com/watch?v=5LiTutHng-k).
 
 <p align="center">
   <img src="docs/littleguys.gif" width="800" alt="The littleguys menu-bar popover listing guys with a quick reply, then the chat window with a guy at work">
@@ -14,9 +14,9 @@ Or grab the `.dmg` from [Releases](https://github.com/herval/littleguys/releases
 
 ## What you get
 
-- **Menu bar:** each agent is a "little guy". The menu-bar sprite shows what they're up to: idle, working, new replies, needs you, or offline.
+- **Chats:** a WhatsApp-style window where each agent is a contact (a "little guy"). The sidebar lists every guy as a card; clicking one opens their threads. It has streaming replies, tool-call chips, attachments, and approve/deny for commands.
+- **Menu bar:** the menu-bar sprite shows what your guys are up to: idle, working, new replies, needs you, or offline.
 - **Popover:** clicking the guy opens a dropdown listing every guy with a live status ring, a last-message preview and quick reply.
-- **Main window:** a WhatsApp-style chat app. The sidebar lists every guy as a card; clicking one opens their threads. It has streaming replies, tool-call chips, attachments, and approve/deny for commands.
 - **Routines:** cron jobs with friendly schedules, run-now and run history. Results land in a thread.
 
 For OpenClaw it's a UX layer over your existing `~/.openclaw`, not a separate install. New guys use the workspaces OpenClaw gives each agent, and the UI links to their folder. With no OpenClaw on the Mac yet, littleguys can install and set it up for you.
