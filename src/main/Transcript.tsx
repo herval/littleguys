@@ -63,6 +63,50 @@ function dayLabel(ts: number): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
+/** "2:32 PM" (or "14:32"), as the clock is set. */
+function clockTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+/** When a message was sent; hovering shows the full date. */
+function MessageTime({ ts, className = "" }: { ts: number; className?: string }) {
+  const d = new Date(ts);
+  return (
+    <time
+      dateTime={d.toISOString()}
+      title={d.toLocaleString([], { dateStyle: "full", timeStyle: "short" })}
+      className={`whitespace-nowrap text-[10.5px] tabular-nums leading-none ${className}`}
+    >
+      {clockTime(ts)}
+    </time>
+  );
+}
+
+/**
+ * A message bubble, with its time in the bottom-right corner as in WhatsApp:
+ * the text ends in a hidden copy of the time (see `.timed` in styles.css), so
+ * the time shares the last line when it fits and gets one of its own when not.
+ */
+function Bubble({ ts, mine, children }: { ts?: number; mine?: boolean; children: React.ReactNode }) {
+  return (
+    <div
+      style={ts ? ({ "--time": `"${clockTime(ts)}"` } as React.CSSProperties) : undefined}
+      className={`relative max-w-full rounded-2xl px-3.5 py-2 ${ts ? "timed" : ""} ${
+        mine ? "bubble-me rounded-tr-md bg-[var(--color-bubble-me)] text-white" : "rounded-tl-md bg-[var(--color-bubble-them)]"
+      }`}
+    >
+      {children}
+      {ts ? <MessageTime ts={ts} className={`absolute bottom-[7px] right-3 ${mine ? "text-white/75" : "text-[var(--color-ink-3)]"}`} /> : null}
+    </div>
+  );
+}
+
+/** A file right under a reply (or file) from the same minute: the time above covers it. */
+function timeShownAbove(prev: Item | undefined, ts: number): boolean {
+  const above = prev?.kind === "text" || prev?.kind === "media" ? prev.ts : undefined;
+  return Boolean(above) && clockTime(above ?? 0) === clockTime(ts);
+}
+
 /** Sticks to the top of the conversation while its day scrolls past. */
 function DayChip({ label }: { label: string }) {
   return (
@@ -110,7 +154,6 @@ export function Transcript({
 }) {
   const sections: Section[] = [];
   let prevKind: string | null = null;
-  let lastTs = 0;
   const where = { gatewayId, sessionKey };
   // Paths to media in the text open it.
   const linkMedia = useMemo<MediaLinker>(
@@ -152,15 +195,6 @@ export function Transcript({
       section.nodes.push(<NewDivider key="new" />);
       prevKind = null;
     }
-    if (ts && lastTs && ts - lastTs > 30 * 60_000 && dayKey(ts) === dayKey(lastTs)) {
-      section.nodes.push(
-        <div key={`ts-${item.id}`} className="py-2 text-center text-[11px] text-[var(--color-ink-3)]">
-          {new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-        </div>,
-      );
-      prevKind = null;
-    }
-    if (ts) lastTs = ts;
     const side = item.kind === "user" ? `user:${item.sender ?? ""}:${item.via ?? ""}` : item.kind === "note" ? null : "guy";
     const startsGroup = side !== prevKind;
     prevKind = side;
@@ -192,8 +226,11 @@ export function Transcript({
     } else {
       section.nodes.push(
         <GuyLine key={item.id} agent={agent} showAvatar={startsGroup}>
-          {item.kind === "text" && <TextBubble text={item.text} media={item.media} where={where} />}
+          {item.kind === "text" && <TextBubble text={item.text} ts={item.ts} media={item.media} where={where} />}
           {item.kind === "media" && <MediaView media={item.media} where={where} />}
+          {item.kind === "media" && ts > 0 && !timeShownAbove(items[i - 1], ts) && (
+            <MessageTime ts={ts} className="mt-1 block px-1 text-[var(--color-ink-3)]" />
+          )}
         </GuyLine>,
       );
     }
@@ -245,11 +282,11 @@ export function phaseLabel(phase: string): string {
 }
 
 /** A reply, with the images, videos and audio it mentions below it. */
-function TextBubble({ text, media, where }: { text: string; media?: MediaRef[]; where: Where }) {
+function TextBubble({ text, ts, media, where }: { text: string; ts?: number; media?: MediaRef[]; where: Where }) {
   const bubble = (
-    <div className="max-w-full rounded-2xl rounded-tl-md bg-[var(--color-bubble-them)] px-3.5 py-2">
+    <Bubble ts={ts}>
       <Markdown text={text} />
-    </div>
+    </Bubble>
   );
   if (!media?.length) return bubble;
   return (
@@ -283,11 +320,13 @@ const UserBubble = memo(function UserBubble({ item, first, where }: { item: Extr
         {item.media.map((m, i) => (
           <MediaView key={i} media={m} where={where} />
         ))}
-        {item.text && (
-          <div className="bubble-me max-w-full rounded-2xl rounded-tr-md bg-[var(--color-bubble-me)] px-3.5 py-2 text-white">
+        {item.text ? (
+          <Bubble ts={item.ts} mine>
             <Markdown text={item.text} />
-          </div>
-        )}
+          </Bubble>
+        ) : item.ts ? (
+          <MessageTime ts={item.ts} className="px-1 text-[var(--color-ink-3)]" />
+        ) : null}
       </div>
     </div>
   );

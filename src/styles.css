@@ -134,6 +134,23 @@ button { cursor: default; }
 .prose-chat table { border-collapse: collapse; margin: 0.5em 0; font-size: 0.95em; }
 .prose-chat th, .prose-chat td { border: 1px solid var(--color-line); padding: 4px 8px; }
 .prose-chat hr { border: 0; border-top: 1px solid var(--color-line); margin: 0.8em 0; }
+/* A bubble's time (Transcript's Bubble) sits in its bottom-right corner. The
+   last line of text ends in a hidden copy of it, so the time shares that line
+   when it fits and wraps to a line of its own when it doesn't. */
+.timed .prose-chat > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
+.timed .prose-chat > :is(ul, ol):last-child > li:last-child::after,
+.timed .prose-chat > blockquote:last-child > :last-child::after {
+  content: var(--time);
+  display: inline-block;
+  visibility: hidden;
+  margin-left: 10px;
+  font-size: 10.5px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Ends in a box (code, a table): the time goes under it. */
+.timed:has(> .prose-chat > :is(pre, table, hr):last-child) { padding-bottom: 22px; }
 .bubble-me .prose-chat a { color: white; }
 .bubble-me .prose-chat code { background: rgb(255 255 255 / 0.2); }
 
