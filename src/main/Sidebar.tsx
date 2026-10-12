@@ -254,10 +254,10 @@ function ThreadList({ guy }: { guy: Guy }) {
     return () => document.removeEventListener("lg:new-thread", handler);
   }, [newThread]);
 
-  // Claude Code: which sessions are waiting for your Allow or Deny (each is its own thread).
+  // Which threads are waiting for your Allow or Deny, when each is its own session (ACP, Claude Code).
   const waiting = useMemo(() => {
     const g = gatewayOf(roster, guy.gatewayId);
-    if (g?.status.kind !== "claudecode") return new Set<string>();
+    if (!g || hasMainChat(roster, guy.gatewayId)) return new Set<string>();
     return new Set(g.approvals.map((a) => a.sessionKey ?? a.request?.sessionKey ?? ""));
   }, [roster, guy.gatewayId]);
 
@@ -272,7 +272,7 @@ function ThreadList({ guy }: { guy: Guy }) {
     [roster, guy],
   );
   const { uid, gatewayId, id } = guy;
-  // Even without thread actions: Claude Code archives the sessions it's done with.
+  // Claude Code also archives the sessions it's done with, on its own.
   useEffect(() => {
     useArchive.getState().load({ uid, gatewayId, id });
   }, [threadKeys, uid, gatewayId, id]);

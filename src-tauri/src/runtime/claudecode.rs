@@ -47,7 +47,7 @@ use crate::openclaw::config::{Credential, GatewayMode};
 use crate::openclaw::runtime as cli;
 use crate::runtime::acp;
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
-use crate::runtime::{keys, unsupported, Capabilities, RuntimeKind};
+use crate::runtime::{blocking, home, is_executable, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
 
 const AGENT_ID: &str = "claude";
 pub const PLUGIN_ID: &str = "littleguys@littleguys";
@@ -107,7 +107,7 @@ fn capabilities(config: &ClaudeCodeConfig) -> Capabilities {
         routines: true,
         routines_local: true,
         approvals: config.approvals,
-        thread_actions: false,
+        thread_actions: true,
         new_threads: true,
         attachments: true,
         models: false,
@@ -154,7 +154,8 @@ struct State {
     transcripts: TranscriptIndex,
     /// New threads whose session hasn't started yet, by key.
     drafts: HashMap<String, Draft>,
-    /// Sessions littleguys started, by session id: the thread key each one has.
+    /// Threads littleguys keeps, by session id: the ones it started or you opened (under
+    /// the key it gave them), and the ones you've renamed, pinned, read or deleted.
     started: HashMap<String, Started>,
     /// Sessions `claude --bg` just started (by the short id it printed) → their key,
     /// until their session id is known.
@@ -170,12 +171,14 @@ impl State {
                 s.key = Some(t.key.clone());
                 s.kept = t.keep;
                 s.cwd = t.cwd.clone().unwrap_or_default();
+                s.flags = t.flags.clone();
+                s.hidden = t.hidden;
             }
             if let Some(short) = self.pending.keys().find(|short| s.key.is_none() && sid.starts_with(short.as_str())).cloned() {
                 // The session `claude --bg` just started for a thread: the thread is that session now.
                 let key = self.pending.remove(&short).unwrap_or_default();
                 let keep = self.drafts.contains_key(&key);
-                self.started.insert(sid.to_string(), Started { key: key.clone(), at: now_ms(), cwd: None, keep });
+                self.started.insert(sid.to_string(), Started { key: key.clone(), at: now_ms(), keep, ..Default::default() });
                 s.kept = keep;
                 if let Some(d) = self.drafts.remove(&key) {
                     s.outbox = d.outbox;
@@ -244,17 +247,23 @@ struct Started {
     /// Listed however long ago it last ran: threads you started or opened (not routine runs).
     #[serde(default)]
     keep: bool,
+    #[serde(flatten)]
+    flags: ThreadFlags,
+    /// You deleted it: littleguys doesn't list it anymore.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hidden: bool,
 }
 
 fn load_started(path: &Path) -> HashMap<String, Started> {
     let mut started: HashMap<String, Started> =
         std::fs::read_to_string(path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
     let now = now_ms();
-    started.retain(|_, t| now.saturating_sub(t.at) < STARTED_KEEP_MS);
+    started.retain(|_, t| t.flags.pinned || now.saturating_sub(t.at) < STARTED_KEEP_MS);
     started
 }
 
-/// Remembers `sid` as `thread` and saves; routine runs past the newest `STARTED_MAX` are forgotten.
+/// Remembers `sid` as `thread` and saves; the oldest past the newest `STARTED_MAX` that
+/// aren't kept (routine runs, threads you've only read) are forgotten.
 fn remember(path: &Path, started: &mut HashMap<String, Started>, sid: &str, thread: Started) {
     started.insert(sid.to_string(), thread);
     let runs = started.values().filter(|t| !t.keep).count();
@@ -302,8 +311,13 @@ struct Session {
     /// Claude Code is done with it: a background session that's done, or a terminal session
     /// that's exited. Its thread is archived.
     finished: bool,
-    /// Your Archive or Unarchive, over `finished` until its next turn.
-    archived: Option<bool>,
+    /// What you set on its thread. Your Archive or Unarchive stands over `finished` until its
+    /// next turn.
+    flags: ThreadFlags,
+    /// `flags` (or `hidden`) changed since they were saved.
+    unsaved: bool,
+    /// You deleted its thread.
+    hidden: bool,
     busy: bool,
     busy_changed: Option<Instant>,
     turn: u64,
@@ -339,14 +353,19 @@ impl Session {
     }
 
     fn listable(&self, now: u64) -> bool {
-        self.running || self.busy || self.kept || now.saturating_sub(self.updated_at.max(self.started_at)) < LIST_WINDOW_MS
+        !self.hidden
+            && (self.running
+                || self.busy
+                || self.kept
+                || self.flags.pinned
+                || now.saturating_sub(self.updated_at.max(self.started_at)) < LIST_WINDOW_MS)
     }
 
     /// In the archive rather than the thread list. Never while it runs, and never a routine's
     /// run (those stay with their routine).
     fn archived(&self) -> bool {
         let routine_run = self.key.as_deref().and_then(keys::split).is_some_and(|(_, rest)| rest.starts_with("cron:"));
-        !self.running && !self.busy && !routine_run && self.archived.unwrap_or(self.finished)
+        !self.running && !self.busy && !routine_run && self.flags.archived.unwrap_or(self.finished)
     }
 
     fn followed(&self, now: u64) -> bool {
@@ -382,10 +401,15 @@ impl Session {
             self.turn += 1;
             self.waiting_for = None;
             // At work again: whether it's archived is Claude Code's say once more.
-            self.archived = None;
+            self.unsaved |= self.flags.archived.take().is_some();
             emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "start" })));
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "status", "phase": "thinking" })));
         } else {
+            // A reply you haven't read (in littleguys).
+            if !self.flags.unread {
+                self.flags.unread = true;
+                self.unsaved = true;
+            }
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "final" })));
             emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "end" })));
         }
@@ -504,6 +528,7 @@ impl ClaudeCodeClient {
             "sessions.list" => Ok(sessions_list(inner, &params)),
             "sessions.create" => sessions_create(inner, &params),
             "sessions.patch" => sessions_patch(inner, &params),
+            "sessions.delete" => sessions_delete(inner, &params).await,
             "chat.history" => chat_history(inner, &params).await,
             "chat.send" => chat_send(inner, &params),
             "chat.abort" => chat_abort(inner, &params).await,
@@ -718,6 +743,7 @@ async fn serve(inner: &Arc<Inner>, listener: UnixListener) {
             deliver_due(inner);
         }
         follow_transcripts(inner).await;
+        save_flags(inner);
         tick = tick.wrapping_add(1);
     }
     acceptor.abort();
@@ -1436,10 +1462,6 @@ fn line_meta(line: &Value) -> LineMeta {
     meta
 }
 
-fn parse_iso_ms(s: &str) -> Option<u64> {
-    chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis().max(0) as u64)
-}
-
 fn chat_message(role: &str, content: Vec<Value>, ts: Option<u64>, id: &str) -> Value {
     let mut m = json!({ "role": role, "content": content, "__openclaw": { "id": id } });
     if let Some(ts) = ts {
@@ -1877,7 +1899,7 @@ fn sessions_list(inner: &Inner, params: &Value) -> Value {
 }
 
 fn session_row(s: &Session) -> Value {
-    json!({
+    let mut row = json!({
         "key": s.key(),
         "agentId": AGENT_ID,
         "kind": "direct",
@@ -1887,34 +1909,82 @@ fn session_row(s: &Session) -> Value {
         "lastMessagePreview": s.preview(),
         "createdAt": s.started_at,
         "updatedAt": s.updated_at.max(s.started_at),
-        "unread": false,
-        "pinned": false,
         "archived": s.archived(),
         "hasActiveRun": s.busy,
         "status": if s.busy { "running" } else { "done" },
-    })
+    });
+    s.flags.add_to(&mut row);
+    row
 }
 
-/// Archive or Unarchive a session's thread, over what Claude Code says until its next turn.
-/// (Sending in an archived thread unarchives it first.)
+/// Rename, pin, read or unread, archive or unarchive a thread. Archive and Unarchive stand
+/// over what Claude Code says until the session's next turn. (Sending in an archived thread
+/// unarchives it first.) Archiving a thread that hasn't started drops it.
 fn sessions_patch(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
-    let Some(archived) = params.get("archived").and_then(Value::as_bool) else {
-        return Err(unsupported("sessions.patch"));
-    };
     let (key, thread) = thread_of(inner, params)?;
     let row = {
         let mut st = inner.st.lock().unwrap();
         match thread {
+            Thread::Draft if params.get("archived").and_then(Value::as_bool) == Some(true) => {
+                st.drafts.remove(&key);
+                json!({ "key": key, "agentId": AGENT_ID, "archived": true })
+            }
             Thread::Draft => return Err(RpcError::new("INVALID_REQUEST", "This thread hasn't started yet.")),
             Thread::Session(sid) => {
                 let s = st.sessions.get_mut(&sid).ok_or_else(|| RpcError::new("NOT_FOUND", "Not a Claude Code session."))?;
-                s.archived = Some(archived);
+                s.unsaved |= s.flags.patch(params);
                 session_row(s)
             }
         }
     };
+    save_flags(inner);
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "patch" }));
     Ok(row)
+}
+
+/// Delete a thread: littleguys stops listing its session (and stops it, if it runs in the
+/// background). Its transcript stays, for `claude --resume`.
+async fn sessions_delete(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    let (key, thread) = thread_of(inner, params)?;
+    if let Thread::Session(_) = thread {
+        // A terminal session keeps running in its terminal.
+        let _ = chat_abort(inner, params).await;
+    }
+    {
+        let mut st = inner.st.lock().unwrap();
+        match thread {
+            Thread::Draft => {
+                st.drafts.remove(&key);
+            }
+            Thread::Session(sid) => {
+                if let Some(s) = st.sessions.get_mut(&sid) {
+                    s.hidden = true;
+                    s.unsaved = true;
+                }
+            }
+        }
+    }
+    save_flags(inner);
+    emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "deleted" }));
+    Ok(json!({ "ok": true, "deleted": true, "key": key }))
+}
+
+/// Saves what changed on threads (your flags, a delete) with the threads littleguys keeps.
+fn save_flags(inner: &Inner) {
+    let mut st = inner.st.lock().unwrap();
+    let st = &mut *st;
+    let mut changed = false;
+    for s in st.sessions.values_mut().filter(|s| s.unsaved) {
+        s.unsaved = false;
+        let cwd = (!s.cwd.is_empty()).then(|| s.cwd.clone());
+        let thread = st.started.entry(s.id.clone()).or_insert_with(|| Started { key: s.key(), at: now_ms(), cwd, ..Default::default() });
+        thread.flags = s.flags.clone();
+        thread.hidden = s.hidden;
+        changed = true;
+    }
+    if changed {
+        save_started(&inner.started_path, &st.started);
+    }
 }
 
 /// The thread a call is about.
@@ -2189,7 +2259,8 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
             None => Err("it started, but hasn't shown up in `claude agents` yet.".to_string()),
             Some(sid) => {
                 st.pending.remove(&short);
-                let thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep };
+                let known = st.started.remove(&sid).unwrap_or_default();
+                let thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep, ..known };
                 remember(&inner.started_path, &mut st.started, &sid, thread);
                 let s = st.session(&sid);
                 s.kept = keep;
@@ -2374,6 +2445,7 @@ async fn sessions_past(inner: &Arc<Inner>) -> Result<Value, RpcError> {
     let now = now_ms();
     let rows: Vec<Value> = found
         .into_iter()
+        .filter(|p| !st.sessions.get(&p.session_id).is_some_and(|s| s.hidden))
         .map(|p| {
             let known = st.sessions.get(&p.session_id);
             let key = known.map_or_else(|| keys::thread(AGENT_ID, &p.session_id), Session::key);
@@ -2408,11 +2480,15 @@ fn sessions_open(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
             s.cwd = cwd.clone().unwrap_or_default();
         }
         s.kept = true;
+        s.hidden = false;
         let updated = params.get("updatedAt").and_then(Value::as_u64).unwrap_or_default();
         s.updated_at = s.updated_at.max(updated);
         let (key, cwd) = (s.key(), (!s.cwd.is_empty()).then(|| s.cwd.clone()));
         let at = now_ms();
-        let thread = st.started.get(&sid).cloned().map_or(Started { key: key.clone(), at, cwd: cwd.clone(), keep: true }, |t| Started { keep: true, ..t });
+        let thread = match st.started.get(&sid).cloned() {
+            Some(t) => Started { keep: true, hidden: false, ..t },
+            None => Started { key: key.clone(), at, cwd: cwd.clone(), keep: true, ..Default::default() },
+        };
         remember(&inner.started_path, &mut st.started, &sid, thread);
         key
     };
@@ -2511,15 +2587,6 @@ fn safe_file_name(name: &str) -> String {
 }
 
 // ---- the folder you work in: skills, commands, MCP servers, plugins -----------------------
-
-fn home() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/var/empty"))
-}
-
-/// Run file work off the async runtime.
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, RpcError> + Send + 'static) -> Result<T, RpcError> {
-    tokio::task::spawn_blocking(work).await.map_err(|e| RpcError::new("INTERNAL", e.to_string()))?
-}
 
 /// `agentId`, when given, must be this guy's.
 fn check_agent(params: &Value) -> Result<(), RpcError> {
@@ -2711,11 +2778,6 @@ fn mcp_servers(cwd: &Path, home: &Path) -> Vec<Value> {
 
 // ---- the claude CLI -----------------------------------------------------------------------
 
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-}
-
 /// The `claude` CLI: on the login shell's PATH, or where its installers put it.
 pub fn find_claude() -> Option<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
@@ -2857,15 +2919,6 @@ pub async fn detect() -> Value {
 
 fn first_line(text: &str) -> &str {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    let text = text.trim();
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
-    format!("{}…", cut.trim_end())
 }
 
 #[cfg(test)]
@@ -3138,6 +3191,59 @@ mod tests {
         s.set_busy(false, &mut emits);
         assert!(s.archived());
         drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn what_you_set_on_threads_is_kept_across_restarts() {
+        let dir = std::env::temp_dir().join(format!("lg-flags-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hooks = || Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let open = || {
+            let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks());
+            {
+                let mut st = client.inner.st.lock().unwrap();
+                st.connected = true;
+                for sid in ["kept", "gone", "done"] {
+                    let s = st.session(sid);
+                    s.started_at = now_ms();
+                    s.finished = sid == "done";
+                    s.transcript = Some(dir.join(format!("{sid}.jsonl")));
+                }
+            }
+            client
+        };
+        let row = |listed: &Value, key: &str| listed["sessions"].as_array().unwrap().iter().find(|r| r["key"] == key).cloned();
+        let (kept, gone, done) = (keys::thread(AGENT_ID, "kept"), keys::thread(AGENT_ID, "gone"), keys::thread(AGENT_ID, "done"));
+
+        let client = open();
+        client.call("sessions.patch", json!({ "key": kept, "label": "Taxes", "pinned": true })).await.unwrap();
+        client.call("sessions.patch", json!({ "key": done, "archived": false })).await.unwrap();
+        client.call("sessions.delete", json!({ "key": gone })).await.unwrap();
+        // A turn's end leaves its thread unread.
+        {
+            let mut emits = Vec::new();
+            let mut st = client.inner.st.lock().unwrap();
+            let s = st.sessions.get_mut("kept").unwrap();
+            s.set_busy(true, &mut emits);
+            s.set_busy(false, &mut emits);
+        }
+        save_flags(&client.inner);
+
+        let again = open();
+        let listed = again.call("sessions.list", json!({ "archived": "all" })).await.unwrap();
+        let k = row(&listed, &kept).expect("listed");
+        assert_eq!((k["label"].as_str(), k["pinned"].as_bool(), k["unread"].as_bool()), (Some("Taxes"), Some(true), Some(true)));
+        assert_eq!(row(&listed, &done).unwrap()["archived"], false, "your Unarchive stands until its next turn");
+        assert!(row(&listed, &gone).is_none(), "deleted");
+
+        let read = again.call("sessions.patch", json!({ "key": kept, "unread": false })).await.unwrap();
+        assert_eq!(read["unread"], false);
+        assert!(read["lastReadAt"].as_u64().is_some());
+        // Opening a deleted session from the past brings it back.
+        again.call("sessions.open", json!({ "sessionId": "gone" })).await.unwrap();
+        let listed = again.call("sessions.list", json!({})).await.unwrap();
+        assert!(row(&listed, &gone).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

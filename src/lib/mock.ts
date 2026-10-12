@@ -155,7 +155,7 @@ claudeCode.status = {
   mode: "local",
   serverVersion: "2.1.296",
   hello: { approvals: true },
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: false, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
 };
 
 const roster: Roster = {

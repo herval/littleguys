@@ -4708,4 +4708,26 @@ enabled = false
         assert!(!same_dir("/tmp", "/usr"));
         assert!(!same_dir("/Users/x/dev", "/Users/x/dev2"));
     }
+
+    #[test]
+    fn thread_index_keeps_its_format() {
+        let saved = json!({
+            "key": "agent:bot:dashboard:a", "sessionId": "a", "aliases": [], "title": null, "titleFromAgent": false,
+            "label": "Taxes", "createdAt": 1, "updatedAt": 2, "lastPreview": null,
+            "unread": true, "lastReadAt": 3, "pinned": true, "archived": true,
+        });
+        let meta: SessionMeta = serde_json::from_value(saved).unwrap();
+        let flags = ThreadFlags { label: Some("Taxes".into()), unread: true, last_read_at: Some(3), pinned: true, archived: Some(true) };
+        assert_eq!(meta.flags, flags);
+        let again = serde_json::to_value(&meta).unwrap();
+        for k in ["label", "unread", "lastReadAt", "pinned", "archived"] {
+            assert!(again.get(k).is_some(), "{k} saved at the top level");
+        }
+        let row = session_row(&meta, false, "/proj");
+        assert_eq!((row["label"].as_str(), row["unread"].as_bool(), row["archived"].as_bool()), (Some("Taxes"), Some(true), Some(true)));
+        // Older entries had no flags at all.
+        let bare: SessionMeta = serde_json::from_value(json!({ "key": "agent:bot:main" })).unwrap();
+        assert_eq!(bare.flags, ThreadFlags::default());
+        assert_eq!(session_row(&bare, false, "/proj")["archived"], false);
+    }
 }

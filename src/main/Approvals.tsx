@@ -1,7 +1,7 @@
 import { ShieldAlert } from "lucide-react";
 import { useMemo, useState } from "react";
 import { approvals as approvalsApi } from "../lib/gateway";
-import { gatewayOf } from "../lib/guys";
+import { gatewayOf, hasMainChat } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { ExecApproval, Guy } from "../lib/types";
 import { agentIdFromKey, useApp } from "../stores/app";
@@ -25,11 +25,11 @@ function approvalAgent(a: ExecApproval): string | null {
 
 /**
  * Pending "can I run this?" requests from the selected guy, answered inline.
- * Claude Code's threads are separate sessions, so each shows only its own.
+ * When the guy's threads are separate sessions (ACP, Claude Code), each shows only its own.
  */
 export function Approvals({ guy, sessionKey }: { guy: Guy; sessionKey: string }) {
   const all = useApp((s) => gatewayOf(s.roster, guy.gatewayId)?.approvals);
-  const perSession = useApp((s) => gatewayOf(s.roster, guy.gatewayId)?.status.kind === "claudecode");
+  const perSession = useApp((s) => !hasMainChat(s.roster, guy.gatewayId));
   const approvals = useMemo(
     () =>
       (all ?? []).filter(
