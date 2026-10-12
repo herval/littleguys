@@ -20,8 +20,10 @@ import {
   Sparkles,
   UserRound,
   Wrench,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { workspace } from "../lib/gateway";
 import { gatewayOf, guyHue, guyName, isOnThisMac, sessionsFor, shortTime } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
@@ -336,9 +338,39 @@ function CodeView({ content, lang }: { content: string; lang: string }) {
   );
 }
 
-/** The open file, in the main pane. */
-export function FilesView({ guy }: { guy: Guy }) {
-  const path = useApp((s) => s.fileByGuy[guy.uid]);
+/**
+ * A file from a guy's folder over the conversation, as Files shows it,
+ * for a path the guy mentioned. Esc or a click beside it closes it.
+ */
+export function FilePeek({ guy, path, onClose }: { guy: Guy; path: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+
+  return createPortal(
+    <div role="dialog" aria-modal="true" aria-label={path} onClick={onClose} className="animate-fade fixed inset-0 z-50 flex justify-end bg-black/20 motion-reduce:animate-none">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="animate-push h-full w-[min(760px,100%)] border-l border-[var(--color-line)] bg-[var(--color-pane-solid)] shadow-[-12px_0_40px_rgb(0_0_0/0.14)] motion-reduce:animate-none"
+      >
+        <FilesView guy={guy} path={path} onClose={onClose} />
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** The open file, in the main pane; with `path` and `onClose`, the one a `FilePeek` shows. */
+export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: string; onClose?: () => void }) {
+  const picked = useApp((s) => s.fileByGuy[guy.uid]);
+  const path = shown ?? picked;
   const thread = useFilesThread(guy);
   const folder = useFilesFolder(guy, thread);
   const gateway = useApp((s) => gatewayOf(s.roster, guy.gatewayId));
@@ -467,6 +499,11 @@ export function FilesView({ guy }: { guy: Guy }) {
           <IconButton label="Reload" onClick={() => setNonce((n) => n + 1)}>
             <RotateCw size={13} />
           </IconButton>
+          {onClose && (
+            <IconButton label="Close" onClick={onClose}>
+              <X size={14} />
+            </IconButton>
+          )}
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">

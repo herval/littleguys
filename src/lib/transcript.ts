@@ -155,8 +155,45 @@ export function mediaTarget(target: string): MediaRef | null {
   return { kind: kindFromName(t), path: t, fileName: name, mentioned: true };
 }
 
+const NOT_A_PATH = /[(){}<>|;&$*?="'\\]/;
+const ROOTED = /^(?:~|\.{1,2})?\//;
+
+/**
+ * The file or folder `target` names, if it looks like a path: absolute,
+ * `~/…`, `file://…`, or relative to the guy's folder (`src/main.rs`,
+ * `README.md`), without a `:12` or `#L12` line suffix. Null for URLs,
+ * commands, code and plain words; whether it's really there is for the
+ * caller to find out.
+ */
+export function pathTarget(target: string, { linked = false } = {}): string | null {
+  let t = target.trim();
+  if (/^file:\/\//i.test(t)) t = decode(t.replace(/^file:\/\/(?:localhost)?/i, ""));
+  if (!t || t.length > 1024 || /[\n`]/.test(t) || NOT_A_PATH.test(t)) return null;
+  t = t.replace(/#L\d+(?:-L?\d+)?$/, "").replace(/:\d+(?::\d+)?$/, "");
+  if (/^[a-z][a-z\d+.-]*:/i.test(t) || t.startsWith("//")) return null; // a URL
+  if (!linked && /\s/.test(t) && !ROOTED.test(t)) return null; // `open out/clip.mp4` is a command
+  if (ROOTED.test(t) || t.includes("/")) return /[^/~.]/.test(t) ? t : null;
+  // A bare name: a file with an extension or a dotfile, but not a version number.
+  return /^[\w@+-][\w@.+-]*\.[A-Za-z]\w{0,9}$|^\.\w[\w.-]*$/.test(t) ? t : null;
+}
+
+/** The path a Markdown link points at (its target is a URL, so the path is percent-encoded). */
+export function linkedPath(href: string): string | null {
+  return /^https?:/i.test(href) ? null : pathTarget(decode(href), { linked: true });
+}
+
+/** Paths in prose (no Markdown) that start at a root (`/`, `~/`, `./`): where each starts, as written. */
+export function barePaths(text: string): { at: number; target: string }[] {
+  const found: { at: number; target: string }[] = [];
+  for (const m of text.matchAll(BARE)) {
+    const target = m[2].replace(/[.,;:!?*_]+$/, "");
+    if (!/^https?:/i.test(target) && pathTarget(target) === target) found.push({ at: (m.index ?? 0) + m[1].length, target });
+  }
+  return found;
+}
+
 /** The media a Markdown link or image points at; its target is a URL, so a path in it is percent-encoded. */
-export function linkedMedia(href: string): MediaRef | null {
+function linkedMedia(href: string): MediaRef | null {
   return mediaTarget(/^https?:/i.test(href) ? href : decode(href));
 }
 
@@ -169,7 +206,7 @@ function decode(s: string): string {
 }
 
 /** Paths and URLs to media in prose (no Markdown): where each starts, as written, and what it points at. */
-export function bareMedia(text: string): { at: number; target: string; ref: MediaRef }[] {
+function bareMedia(text: string): { at: number; target: string; ref: MediaRef }[] {
   const found: { at: number; target: string; ref: MediaRef }[] = [];
   for (const m of text.matchAll(BARE)) {
     const target = m[2].replace(/[.,;:!?*_]+$/, "");

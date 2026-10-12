@@ -368,7 +368,12 @@ const history: Record<string, ChatMessage[]> = {
     { role: "user", content: [{ type: "text", text: "can you record it working?" }], timestamp: now - 4 * min, ...oc("p19") },
     {
       role: "assistant",
-      content: [{ type: "text", text: "Recorded it: `out/export-csv.mp4` (6s). The button before and after is in /tmp/export-button.png." }],
+      content: [
+        {
+          type: "text",
+          text: "Recorded it: `out/export-csv.mp4` (6s). The button before and after is in /tmp/export-button.png.\n\nI left the follow-ups in `notes.ts:4`, and the rules I went by are in [AGENTS.md](AGENTS.md). `npm test` and `src/gone.ts` stay plain.",
+        },
+      ],
       timestamp: now - 3 * min,
       ...oc("p20"),
     },
@@ -801,6 +806,13 @@ export const mockBackend: Backend = {
       case "get_roster":
       case "refresh_roster":
         return roster as T;
+      case "gw_path": {
+        // As if the guy's folder held the mock workspace.
+        const folder = "/Users/you/dev/shop-api";
+        const rel = String(args?.source).replace(/^\.\//, "").replace(new RegExp(`^${folder}/`), "").replace(/\/+$/, "");
+        const isDir = rel in workspaceTree;
+        return (rel in workspaceFiles || isDir ? { path: `${folder}/${rel}`, isDir, folder } : null) as T;
+      }
       case "gw_media":
         await new Promise((r) => setTimeout(r, 400)); // a round trip to the gateway
         return (await mockMedia(String(args?.source))) as T;

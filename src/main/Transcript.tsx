@@ -23,21 +23,22 @@ import {
   X,
 } from "lucide-react";
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
-import { artifacts } from "../lib/gateway";
-import { gatewayOf } from "../lib/guys";
+import { artifacts, workspace } from "../lib/gateway";
+import { findGuy, gatewayOf, guyUid, isOnThisMac } from "../lib/guys";
 import { type DiffLine, type FileDiff, fileDiffs, jsonField } from "../lib/diff";
 import { core, errorMessage } from "../lib/ipc";
 import { presentTense, summarizeSteps, type ToolKind, toolKind, toolLabel } from "../lib/toolPhrases";
 import { cleanOutput, commandOf, numberedLines, shellLines, toolArgs } from "../lib/toolView";
-import { cleanDirectives, extractMediaLines, type Item, type MediaRef, type ToolCallBlock, type ToolResult } from "../lib/transcript";
-import type { AgentSummary } from "../lib/types";
+import { cleanDirectives, extractMediaLines, type Item, type MediaRef, mediaTarget, type ToolCallBlock, type ToolResult } from "../lib/transcript";
+import type { AgentSummary, Guy, WorkspaceEntry } from "../lib/types";
 export { toItems } from "../lib/transcript";
 import { agentIdFromKey, useApp } from "../stores/app";
 import type { LiveRun, ToolState } from "../stores/chat";
 import { Avatar } from "../ui/Avatar";
 import { Lightbox } from "../ui/Lightbox";
 import { TypingDots } from "../ui/kit";
-import { Markdown, type MediaLinker, MediaLinks } from "../ui/Markdown";
+import { Markdown, type PathLinker, PathLinks } from "../ui/Markdown";
+import { FilePeek } from "./Files";
 import { ArgList, toolCard } from "./ToolCards";
 import { type Save, saveIcon, saveLabel, saveTitle, useSave } from "../ui/useSave";
 
@@ -160,13 +161,20 @@ export function Transcript({
   const sections: Section[] = [];
   let prevKind: string | null = null;
   const where = { gatewayId, sessionKey };
-  // Paths to media in the text open it.
-  const linkMedia = useMemo<MediaLinker>(
-    () => (media, children) => (
-      <MediaLink media={media} where={{ gatewayId, sessionKey }}>
-        {children}
-      </MediaLink>
-    ),
+  // A path in the text opens what it names: media in the viewer, any other file in a peek at it.
+  const linkPath = useMemo<PathLinker>(
+    () => (path, children) => {
+      const media = mediaTarget(path);
+      return media ? (
+        <MediaLink media={media} where={{ gatewayId, sessionKey }}>
+          {children}
+        </MediaLink>
+      ) : (
+        <FileLink path={path} where={{ gatewayId, sessionKey }}>
+          {children}
+        </FileLink>
+      );
+    },
     [gatewayId, sessionKey],
   );
 
@@ -264,14 +272,14 @@ export function Transcript({
     });
   }
   return (
-    <MediaLinks.Provider value={linkMedia}>
+    <PathLinks.Provider value={linkPath}>
       {sections.map((s, i) => (
         <section key={`${s.day}-${i}`}>
           {s.label && <DayChip label={s.label} />}
           {s.nodes}
         </section>
       ))}
-    </MediaLinks.Provider>
+    </PathLinks.Provider>
   );
 }
 
@@ -950,9 +958,19 @@ function MediaView({ media, where }: { media: MediaRef; where: Where }) {
 
 /** A path in a reply that points at an image or video: opens it, once it's known to be there. */
 function MediaLink({ media, where, children }: { media: MediaRef; where: Where; children: React.ReactNode }) {
-  const { src, kind, name, save, failed } = useMediaSource(media, where);
+  const { src, kind, name, save, failed, gone } = useMediaSource(media, where);
   const [open, setOpen] = useState(false);
-  if (!src || failed || (kind !== "image" && kind !== "video")) return <>{children}</>;
+  if (!src || failed || (kind !== "image" && kind !== "video")) {
+    // Not something to view here (audio, or it can't be had as media): maybe still a file to look at.
+    const settled = gone || failed || (src && kind !== "image" && kind !== "video");
+    return settled && media.path ? (
+      <FileLink path={media.path} where={where}>
+        {children}
+      </FileLink>
+    ) : (
+      <>{children}</>
+    );
+  }
   return (
     <>
       <a
@@ -967,6 +985,102 @@ function MediaLink({ media, where, children }: { media: MediaRef; where: Where; 
         {children}
       </a>
       {open && <Lightbox kind={kind} src={src} name={name} save={save} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+/** Where a path a guy mentions is: in the folder its Files show (`rel`), or elsewhere on this Mac (`absolute`). */
+type FoundFile = { rel?: string; absolute?: string; isDir: boolean };
+
+const foundCache = new Map<string, { result: Promise<FoundFile | null>; until: number }>();
+const listingCache = new Map<string, { result: Promise<WorkspaceEntry[]>; until: number }>();
+
+function cached<T>(cache: Map<string, { result: Promise<T>; until: number }>, key: string, load: () => Promise<T>): Promise<T> {
+  const hit = cache.get(key);
+  if (hit && hit.until > Date.now()) return hit.result;
+  const result = load();
+  cache.set(key, { result, until: Date.now() + 60_000 });
+  return result;
+}
+
+/**
+ * A guy on this Mac: asked of the disk, from the thread's folder. Any other:
+ * looked up in its workspace, the way its Files tab lists it.
+ */
+function findFile(gatewayId: string, onThisMac: boolean, agentId: string, root: string | undefined, sessionKey: string, path: string): Promise<FoundFile | null> {
+  return cached(foundCache, `${gatewayId}|${sessionKey}|${path}`, async () => {
+    if (onThisMac) {
+      const hit = await core.path(gatewayId, path, sessionKey, agentId);
+      if (!hit) return null;
+      const folder = hit.folder.replace(/\/$/, "");
+      const inside = hit.path.startsWith(`${folder}/`);
+      return { rel: inside ? hit.path.slice(folder.length + 1) : undefined, absolute: hit.path, isDir: hit.isDir };
+    }
+    const rel = workspacePath(path, root);
+    if (!rel) return null;
+    const cut = rel.lastIndexOf("/");
+    const dir = cut < 0 ? "" : rel.slice(0, cut);
+    const entries = await cached(listingCache, `${gatewayId}|${agentId}|${dir}`, () =>
+      workspace.list(gatewayId, agentId, dir).then((r) => r.entries),
+    );
+    const entry = entries.find((e) => e.name === rel.slice(cut + 1));
+    return entry ? { rel, isDir: entry.kind === "directory" } : null;
+  }).catch(() => null);
+}
+
+/** `path` relative to the guy's workspace `root` (on its own machine), if it's in there. */
+function workspacePath(path: string, root: string | undefined): string | null {
+  const p = path.replace(/\/+$/, "").replace(/^\.\//, "");
+  if (p.startsWith("/")) {
+    const base = root?.replace(/\/$/, "");
+    return base && p.startsWith(`${base}/`) ? p.slice(base.length + 1) : null;
+  }
+  return p.startsWith("~") || p.split("/").includes("..") ? null : p;
+}
+
+/**
+ * A path in a reply to a file or folder: a file in the guy's folder opens
+ * in a peek at it, anything else on this Mac shows in Finder. Plain text
+ * until it's known to be there.
+ */
+function FileLink({ path, where, children }: { path: string; where: Where; children: React.ReactNode }) {
+  const agentId = agentIdFromKey(where.sessionKey) ?? "";
+  const root = useApp((s) => gatewayOf(s.roster, where.gatewayId)?.agents.find((a) => a.id === agentId)?.workspace);
+  const onThisMac = useApp((s) => {
+    const g = gatewayOf(s.roster, where.gatewayId);
+    return g?.status.kind !== "openclaw" && isOnThisMac(g);
+  });
+  const [found, setFound] = useState<FoundFile | null>(null);
+  const [peek, setPeek] = useState<Guy | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    findFile(where.gatewayId, onThisMac, agentId, root, where.sessionKey, path).then((f) => !cancelled && setFound(f));
+    return () => {
+      cancelled = true;
+    };
+  }, [path, where.gatewayId, where.sessionKey, agentId, onThisMac, root]);
+
+  const peekable = found?.rel != null && !found.isDir;
+  const reveal = found?.absolute;
+  if (!peekable && !reveal) return <>{children}</>;
+  const name = path.replace(/\/+$/, "").split("/").pop() || path;
+  return (
+    <>
+      <a
+        href="#"
+        role="button"
+        title={peekable ? `Open ${name}` : "Show in Finder"}
+        onClick={(e) => {
+          e.preventDefault();
+          const guy = peekable ? findGuy(useApp.getState().roster, guyUid(where.gatewayId, agentId)) : undefined;
+          if (guy) setPeek(guy);
+          else if (reveal) import("@tauri-apps/plugin-opener").then(({ revealItemInDir }) => revealItemInDir(reveal)).catch(() => {});
+        }}
+      >
+        {children}
+      </a>
+      {peek && found?.rel && <FilePeek guy={peek} path={found.rel} onClose={() => setPeek(null)} />}
     </>
   );
 }

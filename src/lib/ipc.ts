@@ -147,6 +147,14 @@ export const core = {
       "gw_media",
       { gateway, source, sessionKey: sessionKey ?? null, agentId: agentId ?? null },
     ),
+  /** A file or folder a guy on this Mac mentions, if it's there; null for guys whose files are elsewhere. */
+  path: (gateway: string, source: string, sessionKey?: string, agentId?: string) =>
+    invoke<{ path: string; isDir: boolean; folder: string } | null>("gw_path", {
+      gateway,
+      source,
+      sessionKey: sessionKey ?? null,
+      agentId: agentId ?? null,
+    }),
   /** The URL the webview loads a file on this Mac from, once `media` has allowed it. */
   fileSrc: async (path: string) => (await import("@tauri-apps/api/core")).convertFileSrc(path),
   /** Save a chat attachment (http(s) or data: URL) to ~/Downloads; resolves to its path. */

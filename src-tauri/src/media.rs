@@ -99,6 +99,32 @@ pub(crate) async fn media_url(
     }))
 }
 
+/// A file or folder a guy on this Mac mentions, if it's there: `{path, isDir, folder}`,
+/// both canonical, `folder` being the one the thread works in. Null otherwise, and for
+/// guys whose files are elsewhere (the UI finds those in their workspace instead).
+#[tauri::command]
+pub async fn gw_path(
+    hub: State<'_, Arc<Hub>>,
+    gateway: String,
+    source: String,
+    session_key: Option<String>,
+    agent_id: Option<String>,
+) -> Result<Value, RpcError> {
+    let runtime = hub.client(&gateway).ok_or_else(|| RpcError::new("UNKNOWN_GATEWAY", format!("no gateway {gateway}")))?;
+    let Some(folder) = runtime.local_folder(session_key.as_deref(), agent_id.as_deref()).await else {
+        return Ok(Value::Null);
+    };
+    crate::runtime::blocking(move || Ok(local_entry(&folder, &source))).await
+}
+
+fn local_entry(folder: &Path, source: &str) -> Value {
+    let Some(path) = local_path(folder, source).and_then(|p| std::fs::canonicalize(p).ok()) else {
+        return Value::Null;
+    };
+    let folder = std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+    json!({ "path": path.display().to_string(), "isDir": path.is_dir(), "folder": folder.display().to_string() })
+}
+
 /// A file on this Mac, if it's media the chat can show. Relative paths start at `folder`.
 fn local_media(folder: &Path, source: &str) -> Value {
     let unavailable = |code: &str, reason: &str| json!({ "available": false, "code": code, "reason": reason });
@@ -357,6 +383,22 @@ mod tests {
         assert_eq!(local_media(&dir, "looks.png")["code"], "unsupported");
         assert_eq!(local_media(&dir, "gone.png")["code"], "not_found");
         assert_eq!(local_media(&dir, ".")["code"], "not_found");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn local_entries() {
+        let dir = std::env::temp_dir().join(format!("littleguys-entry-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), b"fn main() {}").unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+
+        let file = local_entry(&dir, "src/main.rs");
+        assert_eq!(file["path"], root.join("src/main.rs").display().to_string());
+        assert_eq!(file["isDir"], false);
+        assert_eq!(file["folder"], root.display().to_string());
+        assert_eq!(local_entry(&dir, "src")["isDir"], true);
+        assert_eq!(local_entry(&dir, "src/gone.rs"), Value::Null);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

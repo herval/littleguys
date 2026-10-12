@@ -79,6 +79,7 @@ pub fn run() {
             browser_stream::browser_stream_stop,
             browser_stream::browser_screenshot,
             media::gw_media,
+            media::gw_path,
             media::save_media,
             bridge::commands::bridge_state,
             bridge::commands::bridge_set_enabled,
