@@ -1,6 +1,7 @@
 import {
   AlarmClock,
   Archive,
+  Camera,
   ArchiveRestore,
   ChevronLeft,
   ChevronRight,
@@ -18,9 +19,12 @@ import {
   Sparkles,
   SquarePen,
   Trash2,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { photoToAvatar } from "../lib/avatarImage";
 import { sessions as sessionsApi } from "../lib/gateway";
+import { hasPicture, setPicture } from "../lib/guyPicture";
 import {
   activityFor,
   capsOf,
@@ -39,7 +43,7 @@ import {
   threadKind,
   threadTitle,
 } from "../lib/guys";
-import { core } from "../lib/ipc";
+import { core, errorMessage } from "../lib/ipc";
 import type { Guy, SessionRow } from "../lib/types";
 import { type MainView, mainSessionKey, useApp } from "../stores/app";
 import { useArchive } from "../stores/archive";
@@ -166,6 +170,12 @@ function GuyHeader({ guy }: { guy: Guy }) {
   const model = typeof guy.model === "object" && guy.model ? guy.model.primary : undefined;
   const isAcp = gateway?.status.kind === "acp";
   const isClaudeCode = gateway?.status.kind === "claudecode";
+  const [faceError, setFaceError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!faceError) return;
+    const t = setTimeout(() => setFaceError(null), 4000);
+    return () => clearTimeout(t);
+  }, [faceError]);
   const subtitle = [
     act.running
       ? "working…"
@@ -184,7 +194,7 @@ function GuyHeader({ guy }: { guy: Guy }) {
   return (
     <div className="px-3 pb-3">
       <div className="flex items-center gap-2.5">
-        <Avatar agent={guy} size={36} />
+        <GuyFace guy={guy} onError={setFaceError} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1">
             <h2 className="truncate font-display text-[15px] font-semibold tracking-tight">{guyName(guy)}</h2>
@@ -194,7 +204,11 @@ function GuyHeader({ guy }: { guy: Guy }) {
               </IconButton>
             )}
           </div>
-          <p className="truncate text-[11.5px] text-[var(--color-ink-3)]">{subtitle}</p>
+          {faceError ? (
+            <p className="truncate text-[11.5px] text-[var(--color-bad)]">{faceError}</p>
+          ) : (
+            <p className="truncate text-[11.5px] text-[var(--color-ink-3)]">{subtitle}</p>
+          )}
         </div>
       </div>
     </div>
@@ -203,6 +217,69 @@ function GuyHeader({ guy }: { guy: Guy }) {
 
 type Group = { id: string; title: string; rows: SessionRow[]; collapsible: boolean };
 
+/**
+ * A guy's face; click it (or drop an image on it) to give them a picture, for
+ * any kind of guy (see lib/guyPicture.ts for where it's kept).
+ */
+function GuyFace({ guy, onError }: { guy: Guy; onError: (message: string) => void }) {
+  const roster = useApp((s) => s.roster);
+  const hasPhoto = hasPicture(roster, guy);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [dropping, setDropping] = useState(false);
+  const change = async (file: File | null) => {
+    try {
+      await setPicture(roster, guy, file ? await photoToAvatar(file) : null);
+    } catch (e) {
+      onError(errorMessage(e));
+    }
+  };
+  return (
+    <div className="group relative shrink-0">
+      <button
+        onClick={() => fileRef.current?.click()}
+        onDragOver={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return;
+          e.preventDefault();
+          setDropping(true);
+        }}
+        onDragLeave={() => setDropping(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDropping(false);
+          if (e.dataTransfer.files.length) void change(e.dataTransfer.files[0]);
+        }}
+        title={hasPhoto ? "Change photo" : "Use a photo"}
+        className={`block rounded-full transition ${dropping ? "ring-4 ring-[var(--color-accent)]/40" : ""}`}
+      >
+        <Avatar agent={guy} size={36} />
+        <span className="absolute -bottom-0.5 -right-0.5 hidden h-4 w-4 items-center justify-center rounded-full bg-[var(--color-pane-solid)] text-[var(--color-ink-2)] shadow ring-1 ring-[var(--color-line)] group-hover:flex">
+          <Camera size={9} />
+        </span>
+      </button>
+      {hasPhoto && (
+        <button
+          onClick={() => void change(null)}
+          className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-[var(--color-ink)] text-[var(--color-pane-solid)] shadow group-hover:flex"
+          title="Remove photo"
+          aria-label="Remove photo"
+        >
+          <X size={10} />
+        </button>
+      )}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void change(file);
+          e.target.value = "";
+        }}
+      />
+    </div>
+  );
+}
 function ThreadList({ guy }: { guy: Guy }) {
   const roster = useApp((s) => s.roster);
   const caps = capsOf(roster, guy.gatewayId);

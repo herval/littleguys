@@ -1,8 +1,10 @@
-import { Check, Globe } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Camera, Check, Globe, ImagePlus } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { photoToAvatar } from "../lib/avatarImage";
 import { agents as agentsApi, models as modelsApi } from "../lib/gateway";
+import { hasPicture, pictureHome, setPicture } from "../lib/guyPicture";
 import { giveOwnBrowser, hasOwnBrowser, identityMarkdown, PERSONALITIES, readPersonality, writePersonality } from "../lib/guySetup";
-import { findGuy, guyEmoji, guyName, guyUid, liveGateways, splitUid } from "../lib/guys";
+import { findGuy, guyAvatarUrl, guyEmoji, guyName, guyUid, liveGateways, splitUid } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { AgentSummary, ModelChoice } from "../lib/types";
 import { mainSessionKey, useApp } from "../stores/app";
@@ -26,6 +28,11 @@ export function GuyEditor({ uid }: { uid: string | null }) {
 
   const [name, setName] = useState(existing ? guyName(existing) : "");
   const [emoji, setEmoji] = useState<string>(existing ? (guyEmoji(existing) ?? "") : EMOJIS[Math.floor(Math.random() * 12)]);
+  // Their picture, separate from the emoji (which is what OpenClaw uses where only text fits).
+  const [savedPhoto] = useState(() => (existing && hasPicture(roster, existing) ? guyAvatarUrl(existing) : null));
+  const [photo, setPhoto] = useState<string | null>(savedPhoto);
+  const [dropping, setDropping] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [personality, setPersonality] = useState(isNew ? PERSONALITIES[0].text : "");
   const [model, setModel] = useState<string>(currentModel(existing));
   const [ownBrowser, setOwnBrowser] = useState(true);
@@ -54,9 +61,18 @@ export function GuyEditor({ uid }: { uid: string | null }) {
   }, [gw, agentId]);
 
   const preview = useMemo<AgentSummary>(
-    () => ({ id: agentId ?? (name.trim() || "new"), name, identity: { name, emoji } }) as AgentSummary,
-    [agentId, name, emoji],
+    () => ({ id: agentId ?? (name.trim() || "new"), name, identity: { name, emoji, avatarUrl: photo ?? undefined } }) as AgentSummary,
+    [agentId, name, emoji, photo],
   );
+
+  const choosePhoto = async (file: File) => {
+    setError(null);
+    try {
+      setPhoto(await photoToAvatar(file));
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
   const hostName = gateways.find((g) => g.id === gw)?.name;
 
   const save = async () => {
@@ -81,7 +97,11 @@ export function GuyEditor({ uid }: { uid: string | null }) {
           setStep("Setting up their browser…");
           await giveOwnBrowser(gw, id, trimmed).catch((e) => console.warn("browser profile", e));
         }
-        await core.refreshRoster(gw);
+        const fresh = await core.refreshRoster(gw);
+        if (photo) {
+          setStep("Saving their picture…");
+          await setPicture(fresh, { uid: guyUid(gw, id), id, gatewayId: gw, identity: undefined }, photo);
+        }
         useApp.getState().selectGuy(guyUid(gw, id), mainSessionKey(id));
       } else {
         setStep("Saving…");
@@ -93,6 +113,7 @@ export function GuyEditor({ uid }: { uid: string | null }) {
           ...(emoji ? { emoji } : {}),
           ...(model !== prevModel ? { model: model || null } : {}),
         });
+        if (photo !== savedPhoto) await setPicture(roster, existing!, photo);
         await writePersonality(gw, id, personality);
         if (ownBrowser && !hadBrowser) await giveOwnBrowser(gw, id, trimmed).catch(() => {});
         await core.refreshRoster(gw);
@@ -115,6 +136,8 @@ export function GuyEditor({ uid }: { uid: string | null }) {
     setStep("Deleting…");
     try {
       await agentsApi.remove(gw, existing.id, deleteFiles);
+      // So a new guy that gets the same id doesn't start with this one's photo.
+      if (roster.faces.includes(existing.uid)) await core.setGuyFace(existing.uid, null).catch(() => {});
       await core.refreshRoster(gw);
       close();
     } catch (e) {
@@ -127,9 +150,46 @@ export function GuyEditor({ uid }: { uid: string | null }) {
 
   return (
     <Modal onClose={busy ? () => {} : close} width={560}>
-      <div className="flex gap-5 p-6">
+      <div
+        className="flex gap-5 p-6"
+        onDragOver={(e) => {
+          if (busy || !e.dataTransfer.types.includes("Files")) return;
+          e.preventDefault();
+          setDropping(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropping(false);
+        }}
+        onDrop={(e) => {
+          if (!e.dataTransfer.files.length) return;
+          e.preventDefault();
+          setDropping(false);
+          void choosePhoto(e.dataTransfer.files[0]);
+        }}
+      >
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void choosePhoto(file);
+            e.target.value = "";
+          }}
+        />
         <div className="flex w-[120px] shrink-0 flex-col items-center pt-2">
-          <Avatar agent={preview} size={96} ring="idle" />
+          <button
+            onClick={() => fileRef.current?.click()}
+            disabled={busy}
+            title={photo ? "Change photo" : "Use a photo"}
+            className={`group relative rounded-full transition ${dropping ? "scale-105 ring-4 ring-[var(--color-accent)]/40" : ""}`}
+          >
+            <Avatar agent={preview} size={96} ring="idle" />
+            <span className="absolute bottom-0 right-0 flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-pane-solid)] text-[var(--color-ink-2)] opacity-0 shadow ring-1 ring-[var(--color-line)] transition group-hover:opacity-100">
+              <Camera size={14} />
+            </span>
+          </button>
           <p className="mt-2 max-w-full truncate text-center font-display text-[14px] font-semibold">{name || "New guy"}</p>
         </div>
         <div className="min-w-0 flex-1 space-y-4">
@@ -170,6 +230,40 @@ export function GuyEditor({ uid }: { uid: string | null }) {
                 title="Any emoji"
                 disabled={busy}
               />
+            </div>
+          </Field>
+          <Field
+            label="Picture"
+            hint={
+              pictureHome(roster, { gatewayId: gw }) === "openclaw"
+                ? "Saved in their workspace, so OpenClaw shows it too."
+                : `Kept in littleguys on this Mac: ${hostName ?? "their gateway"} is on another computer.`
+            }
+          >
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => fileRef.current?.click()}
+                disabled={busy}
+                className="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--color-line)] pl-1 pr-2.5 text-[12.5px] transition hover:border-[var(--color-ink-3)]/50"
+              >
+                {photo ? (
+                  <img src={photo} alt="" className="h-6 w-6 rounded-md object-cover" draggable={false} />
+                ) : (
+                  <span className="flex h-6 w-6 items-center justify-center text-[var(--color-ink-3)]">
+                    <ImagePlus size={15} />
+                  </span>
+                )}
+                {photo ? "Change…" : "Choose a photo…"}
+              </button>
+              {photo && (
+                <button
+                  onClick={() => setPhoto(null)}
+                  disabled={busy}
+                  className="text-[12.5px] text-[var(--color-ink-3)] transition hover:text-[var(--color-ink)]"
+                >
+                  Remove
+                </button>
+              )}
             </div>
           </Field>
           <Field label="Personality" hint={loadingExtras ? "Loading…" : "Saved to their SOUL.md. They'll grow into it."}>

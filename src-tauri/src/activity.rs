@@ -47,6 +47,9 @@ pub struct Roster {
     /// Guys the user hid (`gatewayId/agentId`): left out of lists, the tray
     /// mood and reply/routine notifications (approvals still notify).
     pub hidden: Vec<String>,
+    /// Guys with a photo picked in littleguys (`gatewayId/agentId`). It's kept on
+    /// this Mac, never sent to the bot, and is already in their `identity.avatarUrl`.
+    pub faces: Vec<String>,
     pub updated_at: u64,
 }
 
@@ -128,6 +131,8 @@ impl State {
 pub struct Activity {
     app: AppHandle,
     hidden: Mutex<HashSet<String>>,
+    /// `gatewayId/agentId` → the photo picked for them, as a `data:image/…` URL.
+    faces: Mutex<HashMap<String, String>>,
     clients: Mutex<HashMap<String, Runtime>>,
     tray: TrayAnimator,
     state: Mutex<State>,
@@ -141,9 +146,11 @@ const SESSION_LIST_LIMIT: u64 = 400;
 impl Activity {
     pub fn new(app: AppHandle, tray: TrayAnimator) -> Arc<Self> {
         let hidden = read_prefs(&app).hidden_guys.into_iter().collect();
+        let faces = read_faces(&app);
         Arc::new(Self {
             app,
             hidden: Mutex::new(hidden),
+            faces: Mutex::new(faces),
             clients: Mutex::new(HashMap::new()),
             tray,
             state: Mutex::new(State::default()),
@@ -175,6 +182,37 @@ impl Activity {
         write_prefs(&self.app, &prefs)?;
         self.publish();
         Ok(())
+    }
+
+    /// Give a guy (`gatewayId/agentId`) a photo, or take it away with `None`. It's
+    /// only stored in littleguys' data dir: bots never see it.
+    pub fn set_guy_face(&self, uid: &str, face: Option<String>) -> anyhow::Result<()> {
+        if let Some(face) = &face {
+            anyhow::ensure!(is_face(face), "That photo can't be used.");
+        }
+        let faces = {
+            let mut faces = self.faces.lock().unwrap();
+            match face {
+                Some(face) => faces.insert(uid.to_string(), face),
+                None => faces.remove(uid),
+            };
+            faces.clone()
+        };
+        write_faces(&self.app, &faces)?;
+        self.publish();
+        Ok(())
+    }
+
+    /// The workspace folder of a guy whose gateway runs on this Mac (from `agents.list`).
+    pub fn local_workspace(&self, gateway: &str, agent_id: &str) -> Option<std::path::PathBuf> {
+        let state = self.state.lock().unwrap();
+        let g = state.gateways.iter().find(|g| g.roster.id == gateway)?;
+        if g.roster.status.mode != Some(crate::openclaw::config::GatewayMode::Local) {
+            return None;
+        }
+        let agent = g.roster.agents.iter().find(|a| a.get("id").and_then(Value::as_str) == Some(agent_id))?;
+        let path = std::path::PathBuf::from(agent.get("workspace")?.as_str()?);
+        (path.is_absolute() && path.is_dir()).then_some(path)
     }
 
     fn is_hidden(&self, gateway: &str, agent_id: &str) -> bool {
@@ -543,16 +581,20 @@ impl Activity {
         }
         let mut hidden: Vec<String> = self.hidden.lock().unwrap().iter().cloned().collect();
         hidden.sort();
+        let faces = self.faces.lock().unwrap();
         let gateways = state
             .gateways
             .iter()
             .map(|g| {
                 let mut roster = g.roster.clone();
                 apply_live_previews(&mut roster.sessions, &g.live_previews);
+                apply_faces(&mut roster.agents, &roster.id, &faces);
                 roster
             })
             .collect();
-        Roster { gateways, hidden, updated_at: now_ms() }
+        let mut with_faces: Vec<String> = faces.keys().cloned().collect();
+        with_faces.sort();
+        Roster { gateways, hidden, faces: with_faces, updated_at: now_ms() }
     }
 
     /// Streamed text arrives in bursts across every running thread; one roster
@@ -769,6 +811,47 @@ fn write_prefs(app: &AppHandle, prefs: &Prefs) -> anyhow::Result<()> {
     crate::gateway::identity::write_private(&path, &serde_json::to_vec_pretty(prefs)?)
 }
 
+/// Photos are small images the app made itself (see src/lib/avatarImage.ts).
+const MAX_FACE_CHARS: usize = 100_000;
+
+pub(crate) fn is_face(url: &str) -> bool {
+    url.len() <= MAX_FACE_CHARS
+        && ["data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,"].iter().any(|p| url.starts_with(p))
+}
+
+fn faces_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("faces.json"))
+}
+
+fn read_faces(app: &AppHandle) -> HashMap<String, String> {
+    let faces: HashMap<String, String> = faces_path(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    faces.into_iter().filter(|(_, face)| is_face(face)).collect()
+}
+
+fn write_faces(app: &AppHandle, faces: &HashMap<String, String>) -> anyhow::Result<()> {
+    let path = faces_path(app).ok_or_else(|| anyhow::anyhow!("no app data dir"))?;
+    crate::gateway::identity::write_private(&path, &serde_json::to_vec(faces)?)
+}
+
+/// A photo picked in littleguys wins over the face the bot gives a guy.
+fn apply_faces(agents: &mut [Value], gateway: &str, faces: &HashMap<String, String>) {
+    if faces.is_empty() {
+        return;
+    }
+    for agent in agents.iter_mut().filter(|a| a.is_object()) {
+        let Some(face) = agent.get("id").and_then(Value::as_str).and_then(|id| faces.get(&format!("{gateway}/{id}"))) else {
+            continue;
+        };
+        if !agent.get("identity").is_some_and(Value::is_object) {
+            agent["identity"] = json!({});
+        }
+        agent["identity"]["avatarUrl"] = json!(face);
+    }
+}
+
 fn approval_id(payload: &Value) -> Option<String> {
     payload
         .get("id")
@@ -956,5 +1039,36 @@ mod tests {
         assert!(notifiable_session("agent:main:dashboard:abc"));
         assert!(!notifiable_session("agent:main:slack:channel:C1"));
         assert!(!notifiable_session("agent:main:cron:job:run:1"));
+    }
+
+    #[test]
+    fn a_picked_photo_is_the_face_on_its_own_gateway_only() {
+        let photo = "data:image/jpeg;base64,/9j/4AAQ".to_string();
+        let faces = HashMap::from([("attic/fox".to_string(), photo.clone())]);
+        let mut agents = vec![
+            json!({ "id": "fox", "identity": { "name": "Fox", "emoji": "🦊", "avatarUrl": "data:image/svg+xml;base64,PHN2Zz4=" } }),
+            json!({ "id": "owl", "identity": { "name": "Owl", "emoji": "🦉" } }),
+        ];
+        apply_faces(&mut agents, "attic", &faces);
+        assert_eq!(agents[0]["identity"]["avatarUrl"], photo.as_str());
+        assert_eq!(agents[0]["identity"]["emoji"], "🦊");
+        assert!(agents[1]["identity"].get("avatarUrl").is_none());
+        // Same agent id on another gateway is another guy.
+        let mut elsewhere = vec![json!({ "id": "fox" })];
+        apply_faces(&mut elsewhere, "garage", &faces);
+        assert!(elsewhere[0].get("identity").is_none());
+        // A guy the bot gives no identity still gets the photo.
+        let mut bare = vec![json!({ "id": "fox" })];
+        apply_faces(&mut bare, "attic", &faces);
+        assert_eq!(bare[0]["identity"]["avatarUrl"], photo.as_str());
+    }
+
+    #[test]
+    fn only_small_images_are_faces() {
+        assert!(is_face("data:image/png;base64,iVBORw0KGgo="));
+        assert!(is_face("data:image/webp;base64,UklGRg=="));
+        assert!(!is_face("data:image/svg+xml;base64,PHN2Zz4="));
+        assert!(!is_face("https://example.com/fox.png"));
+        assert!(!is_face(&format!("data:image/png;base64,{}", "A".repeat(MAX_FACE_CHARS))));
     }
 }

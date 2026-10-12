@@ -158,6 +158,9 @@ claudeCode.status = {
   capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
 };
 
+/** The face each bot gave a guy, from before a photo was picked for them. */
+const botFaces = new Map<string, string | undefined>();
+
 const roster: Roster = {
   gateways: forcedPhase
     ? [attic]
@@ -165,6 +168,7 @@ const roster: Roster = {
       ? [attic]
       : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude],
   hidden: ["hermes-1/research"],
+  faces: [],
   updatedAt: now,
 };
 
@@ -775,6 +779,18 @@ export const mockBackend: Backend = {
         const uid = String(args?.uid);
         roster.hidden = args?.hidden ? [...new Set([...roster.hidden, uid])] : roster.hidden.filter((u) => u !== uid);
         emit("lg:roster", { ...roster, hidden: [...roster.hidden] });
+        return undefined as T;
+      }
+      case "set_guy_face": {
+        const uid = String(args?.uid);
+        const face = (args?.face as string | null | undefined) ?? null;
+        const agent = roster.gateways.flatMap((g) => g.agents.map((a) => ({ g, a }))).find(({ g, a }) => `${g.id}/${a.id}` === uid)?.a;
+        if (agent) {
+          if (!botFaces.has(uid)) botFaces.set(uid, agent.identity?.avatarUrl);
+          agent.identity = { ...agent.identity, avatarUrl: face ?? botFaces.get(uid) };
+        }
+        roster.faces = face ? [...new Set([...roster.faces, uid])] : roster.faces.filter((u) => u !== uid);
+        emit("lg:roster", { ...roster, faces: [...roster.faces] });
         return undefined as T;
       }
       case "acp_registry":

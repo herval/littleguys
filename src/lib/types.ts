@@ -118,6 +118,8 @@ export interface Roster {
   gateways: GatewayRoster[];
   /** Guys hidden in Settings, as `gatewayId/agentId`. */
   hidden: string[];
+  /** Guys with a photo picked in littleguys (`gatewayId/agentId`); it's already their `identity.avatarUrl`. */
+  faces: string[];
   updatedAt: number;
 }
 

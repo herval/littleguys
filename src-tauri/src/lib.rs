@@ -1,4 +1,5 @@
 mod activity;
+mod avatar_file;
 pub mod bridge;
 mod browser_stream;
 mod commands;
@@ -68,6 +69,8 @@ pub fn run() {
             commands::refresh_roster,
             commands::set_focused_session,
             commands::set_guy_hidden,
+            commands::set_guy_face,
+            commands::set_workspace_avatar,
             commands::open_main,
             commands::hide_popover,
             commands::fit_popover,

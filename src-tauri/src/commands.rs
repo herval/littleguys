@@ -170,6 +170,31 @@ pub fn set_guy_hidden(activity: State<'_, Arc<Activity>>, uid: String, hidden: b
     activity.set_guy_hidden(&uid, hidden).map_err(|e| e.to_string())
 }
 
+/// Give a guy (`gatewayId/agentId`) a photo for their face, or `None` to go back
+/// to the bot's; kept in littleguys only.
+#[tauri::command]
+pub fn set_guy_face(activity: State<'_, Arc<Activity>>, uid: String, face: Option<String>) -> Result<(), String> {
+    activity.set_guy_face(&uid, face).map_err(|e| e.to_string())
+}
+
+/// Save an OpenClaw guy's picture into their workspace (gateways on this Mac only)
+/// and return the path for `agents.update {avatar}`; `None` deletes it.
+#[tauri::command]
+pub fn set_workspace_avatar(
+    activity: State<'_, Arc<Activity>>,
+    gateway: String,
+    agent_id: String,
+    face: Option<String>,
+) -> Result<Option<String>, String> {
+    let workspace = activity.local_workspace(&gateway, &agent_id).ok_or("Their workspace isn't on this Mac.")?;
+    match face {
+        Some(face) if crate::activity::is_face(&face) => crate::avatar_file::write(&workspace, &face).map(Some),
+        Some(_) => Err(anyhow::anyhow!("That picture can't be used.")),
+        None => crate::avatar_file::remove(&workspace).map(|()| None),
+    }
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn set_focused_session(activity: State<'_, Arc<Activity>>, gateway: Option<String>, key: Option<String>) {
     activity.set_focused_session(gateway, key);

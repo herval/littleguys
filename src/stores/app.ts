@@ -90,7 +90,7 @@ interface AppState {
   startNewGuy(): void;
 }
 
-const emptyRoster: Roster = { gateways: [], hidden: [], updatedAt: 0 };
+const emptyRoster: Roster = { gateways: [], hidden: [], faces: [], updatedAt: 0 };
 
 export const useApp = create<AppState>((set, get) => ({
   roster: emptyRoster,
