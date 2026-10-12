@@ -1,4 +1,5 @@
 mod activity;
+pub mod bridge;
 mod browser_stream;
 mod commands;
 mod doctor;
@@ -76,6 +77,12 @@ pub fn run() {
             browser_stream::browser_screenshot,
             media::gw_media,
             media::save_media,
+            bridge::commands::bridge_state,
+            bridge::commands::bridge_set_enabled,
+            bridge::commands::bridge_pair_start,
+            bridge::commands::bridge_pair_cancel,
+            bridge::commands::bridge_phone_remove,
+            bridge::commands::bridge_phone_rename,
             commands::quit,
             commands::update_state,
             commands::update_check,
@@ -128,8 +135,20 @@ pub fn run() {
 
             // Gateway connections + roster
             let activity = Activity::new(handle.clone(), animator);
-            let hub = Hub::new(&handle, data_dir, app.package_info().version.to_string(), activity.clone())?;
+            let hub = Hub::new(&handle, data_dir.clone(), app.package_info().version.to_string(), activity.clone())?;
             hub.start();
+
+            // Paired phones (Settings → Phones)
+            let config = bridge::BridgeConfig::new(data_dir, bridge::computer_name(), app.package_info().version.to_string());
+            let host = bridge::app_host::AppHost::new(hub.clone(), activity.clone());
+            let phones = bridge::Bridge::new(config, host, tauri::async_runtime::handle().inner().clone())?;
+            let emitter = handle.clone();
+            phones.on_state(move |state| {
+                let _ = tauri::Emitter::emit(&emitter, "bridge:state", state);
+            });
+            phones.start();
+            app.manage(phones);
+
             app.manage(hub);
             app.manage(activity);
             app.manage(std::sync::Arc::new(browser_stream::Streams::default()));

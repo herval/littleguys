@@ -9,6 +9,7 @@ import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputClass, Modal } from "../ui/kit";
 import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix } from "./GatewayFix";
 import { GuyVisibility } from "./GuyVisibility";
+import { Phones } from "./Phones";
 
 export function Settings() {
   const close = () => useApp.getState().setSettingsOpen(false);
@@ -52,6 +53,8 @@ export function Settings() {
             ))}
           </div>
         </section>
+
+        <Phones />
 
         <GuyVisibility />
 

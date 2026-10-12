@@ -27,6 +27,16 @@ pub async fn gw_media(
     agent_id: Option<String>,
 ) -> Result<Value, RpcError> {
     let runtime = hub.client(&gateway).ok_or_else(|| RpcError::new("UNKNOWN_GATEWAY", format!("no gateway {gateway}")))?;
+    media_url(&runtime, source, session_key, agent_id).await
+}
+
+/// The meta request and ticket behind `gw_media`; the bridge downloads the URL for phones.
+pub(crate) async fn media_url(
+    runtime: &crate::runtime::Runtime,
+    source: String,
+    session_key: Option<String>,
+    agent_id: Option<String>,
+) -> Result<Value, RpcError> {
     let client = runtime
         .as_openclaw()
         .ok_or_else(|| RpcError::new("UNSUPPORTED", "only OpenClaw serves files by path"))?;

@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
+use crate::bridge::NoticeKind;
 use crate::gateway::client::{ConnStatus, Phase};
 use crate::runtime::Runtime;
 use crate::gateway::identity::now_ms;
@@ -131,6 +132,8 @@ pub struct Activity {
     tray: TrayAnimator,
     state: Mutex<State>,
     publish_pending: AtomicBool,
+    /// Statuses, events and bot-list changes for paired phones (the bridge).
+    bridge: tokio::sync::broadcast::Sender<crate::bridge::HostEvent>,
 }
 
 const SESSION_LIST_LIMIT: u64 = 400;
@@ -145,7 +148,13 @@ impl Activity {
             tray,
             state: Mutex::new(State::default()),
             publish_pending: AtomicBool::new(false),
+            bridge: tokio::sync::broadcast::channel(4096).0,
         })
+    }
+
+    /// Everything a paired phone hears about (bridge/app_host.rs).
+    pub fn subscribe_bridge(&self) -> tokio::sync::broadcast::Receiver<crate::bridge::HostEvent> {
+        self.bridge.subscribe()
     }
 
     /// Show or hide a guy (`gatewayId/agentId`); persisted in the app's prefs.
@@ -187,12 +196,15 @@ impl Activity {
                 ..Default::default()
             });
         }
+        drop(state);
+        let _ = self.bridge.send(crate::bridge::HostEvent::BotsChanged);
     }
 
     pub fn detach(&self, id: &str) {
         self.clients.lock().unwrap().remove(id);
         self.state.lock().unwrap().gateways.retain(|g| g.roster.id != id);
         self.publish();
+        let _ = self.bridge.send(crate::bridge::HostEvent::BotsChanged);
     }
 
     pub fn set_gateway_meta(&self, id: &str, name: Option<String>, enabled: Option<bool>) {
@@ -217,6 +229,7 @@ impl Activity {
             }
         }
         self.publish();
+        let _ = self.bridge.send(crate::bridge::HostEvent::BotsChanged);
     }
 
     fn client(&self, id: &str) -> Option<Runtime> {
@@ -246,6 +259,9 @@ impl Activity {
             status.message.as_deref().unwrap_or("")
         );
         let _ = self.app.emit("gw:status", status);
+        if let Ok(raw) = serde_json::to_value(status) {
+            let _ = self.bridge.send(crate::bridge::HostEvent::Status(raw));
+        }
         let open = {
             let mut state = self.state.lock().unwrap();
             let others_connected = state
@@ -315,6 +331,11 @@ impl Activity {
 
     pub fn on_event(self: &Arc<Self>, gateway: &str, name: &str, payload: &Value) {
         let _ = self.app.emit("gw:event", json!({ "gateway": gateway, "event": name, "payload": payload }));
+        let _ = self.bridge.send(crate::bridge::HostEvent::Event {
+            gateway: gateway.to_string(),
+            name: name.to_string(),
+            payload: payload.clone(),
+        });
         match name {
             "sessions.changed" => {
                 if let Some(key) = payload.get("sessionKey").and_then(Value::as_str) {
@@ -399,6 +420,8 @@ impl Activity {
                     if let Some(g) = self.state.lock().unwrap().gateway(gateway) {
                         g.approvals.remove(&id);
                     }
+                    // Phones take down the approval's notification.
+                    self.push_to_phones(NoticeKind::ApprovalResolved, "", "", gateway, None, Some(id));
                 }
                 self.publish();
             }
@@ -645,7 +668,9 @@ impl Activity {
             };
             let agent_id = agent_id_from_key(&key).unwrap_or_default();
             let preview = preview.unwrap_or_else(|| "Finished working.".into());
-            this.show_notification(&this.agent_label(&gateway, &agent_id), &preview);
+            let title = this.agent_label(&gateway, &agent_id);
+            this.show_notification(&title, &preview);
+            this.push_to_phones(NoticeKind::Reply, &title, &preview, &gateway, Some(key), None);
         });
     }
 
@@ -674,6 +699,8 @@ impl Activity {
             (other, None) => format!("Routine {other}."),
         };
         self.show_notification(&title, &body);
+        let key = payload.get("sessionKey").and_then(Value::as_str).map(str::to_string).or_else(|| routine_target(payload));
+        self.push_to_phones(NoticeKind::Routine, &title, &body, gateway, key, None);
     }
 
     fn notify_approval(&self, gateway: &str, payload: &Value) {
@@ -690,13 +717,32 @@ impl Activity {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let who = if agent_id.is_empty() { "A little guy".to_string() } else { self.agent_label(gateway, agent_id) };
-        self.show_notification(&format!("{who} needs your OK"), &format!("Wants to run: {command}"));
+        let (title, body) = (format!("{who} needs your OK"), format!("Wants to run: {command}"));
+        self.show_notification(&title, &body);
+        let key = payload
+            .get("sessionKey")
+            .or_else(|| payload.pointer("/request/sessionKey"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.push_to_phones(NoticeKind::Approval, &title, &body, gateway, key, approval_id(payload));
     }
 
     fn show_notification(&self, title: &str, body: &str) {
         if let Err(e) = self.app.notification().builder().title(title).body(body).show() {
             log::warn!("notification failed: {e}");
         }
+    }
+
+    /// The same notification for paired phones, as a push (bridge/push.rs).
+    fn push_to_phones(&self, kind: NoticeKind, title: &str, body: &str, gateway: &str, session_key: Option<String>, approval_id: Option<String>) {
+        let _ = self.bridge.send(crate::bridge::HostEvent::Notice(crate::bridge::Notice {
+            kind,
+            title: title.to_string(),
+            body: body.to_string(),
+            gateway: gateway.to_string(),
+            session_key,
+            approval_id,
+        }));
     }
 }
 

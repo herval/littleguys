@@ -50,6 +50,14 @@ littleguys can be connected to several OpenClaw gateways at once, and every gate
   - Service stopped → `openclaw gateway install/start`
   - Never set up → non-interactive `openclaw onboard` with the provider you pick
 
+### Your phone
+littleguys for iPhone pairs with this Mac and reaches every bot on it (OpenClaw, Hermes, Claude Code, ACP agents), so your guys come along without each one being reachable from the phone:
+- **Pairing:** **Settings → Phones → Pair mobile app** shows a QR code. Scan it from the iPhone app's **Pair with your Mac**. The code works once, for 10 minutes; **Copy link** pastes it on the phone through Universal Clipboard.
+- **Where it works:** on the same Wi-Fi as this Mac, or anywhere when both are on Tailscale. The phone finds the Mac again on its own (Bonjour `_littleguys._tcp`, then the addresses from the code).
+- **Notifications:** replies, routines and approvals reach the phone as pushes through [littleguys-relay](https://github.com/herval/littleguys-relay), sealed so the relay can't read them, and not while the app is open on the phone.
+- **What a paired phone can do:** everything littleguys can here: chat, OK commands, edit guys and routines. Remove a phone in Settings → Phones to cut it off at once.
+- **Security:** each session is end-to-end encrypted (Noise IK) with keys that never leave the two devices. Nothing listens until a phone is paired or a code is showing; "Let paired phones connect" turns it off. The wire format is [docs/BRIDGE-PROTOCOL.md](docs/BRIDGE-PROTOCOL.md).
+
 ## Building from source
 
 The install script does it in one go. It installs whatever's missing (the Command Line Tools, Rust, and Node and pnpm if you don't have them), builds `main` in `~/.littleguys` and puts the app in `/Applications`. Run it again to update.
@@ -82,6 +90,13 @@ cd src-tauri && cargo run --example gw_probe -- agents.list   # raw RPC probe (P
 cd src-tauri && cargo run --example discover                  # what "Add gateway" would find
 ```
 
+The phone bridge has a stand-in Mac and a stand-in phone:
+
+```bash
+cd src-tauri && cargo run --example bridge_demo                         # pretend bots; prints a pairing link
+cd src-tauri && cargo run --example bridge_probe -- pair '<link>'       # then: bots | call <bot> <method> [json] | events
+```
+
 ### Releases
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds the universal app, signs it with a Developer ID and notarizes it. It then publishes the `.dmg` and the signed update bundle to GitHub Releases, along with the `latest.json` the in-app updater reads (`src-tauri/src/updater.rs`), and bumps the cask in [herval/homebrew-tap](https://github.com/herval/homebrew-tap).
@@ -105,6 +120,7 @@ src-tauri/            Rust core — owns the gateway connection so the menu bar 
   openclaw/runtime.rs finds the CLI (login-shell PATH), launchd service state, /health
   doctor.rs           install / update / start / onboard
   activity.rs         per-gateway roster (guys + threads + running + approvals) → tray mood, notifications
+  bridge/             paired iPhones: pairing, the Noise session, every bot passed through (BRIDGE-PROTOCOL.md)
   tray.rs             animated template sprite (frames from scripts/gen-icons.mjs)
   updater.rs          self-update from GitHub releases, restarts when idle
   windows.rs          popover (vibrancy, anchored to the tray) + main window

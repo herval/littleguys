@@ -5,6 +5,7 @@
 //   ?empty=1                           connected, but no guys yet
 //   ?stills=1                          the browser tab isn't in front, so its stream sends no frames
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
+import { bridgeMockInvoke } from "./bridge";
 import type { Backend } from "./ipc";
 import type { ChatMessage, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Roster } from "./types";
 
@@ -733,6 +734,7 @@ function silentWav(): string {
 
 export const mockBackend: Backend = {
   async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    if (cmd.startsWith("bridge_")) return (await bridgeMockInvoke(cmd, args, emit)) as T;
     switch (cmd) {
       case "gw_statuses":
         return roster.gateways.map((g) => g.status) as T;
