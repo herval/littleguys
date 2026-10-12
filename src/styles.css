@@ -150,7 +150,7 @@ button { cursor: default; }
   white-space: nowrap;
 }
 /* Ends in a box (code, a table): the time goes under it. */
-.timed:has(> .prose-chat > :is(pre, table, hr):last-child) { padding-bottom: 22px; }
+.timed:has(> .prose-chat > :is(pre, table, hr):last-child) { padding-bottom: 26px; }
 .bubble-me .prose-chat a { color: white; }
 .bubble-me .prose-chat code { background: rgb(255 255 255 / 0.2); }
 

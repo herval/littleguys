@@ -96,7 +96,12 @@ function Bubble({ ts, mine, children }: { ts?: number; mine?: boolean; children:
       }`}
     >
       {children}
-      {ts ? <MessageTime ts={ts} className={`absolute bottom-[7px] right-3 ${mine ? "text-white/75" : "text-[var(--color-ink-3)]"}`} /> : null}
+      {ts ? (
+        // A line box like the text's (.prose-chat's 1.5), level with its last line, so the smaller time sits on its baseline.
+        <span className="absolute bottom-2 right-3.5 leading-[1.5]">
+          <MessageTime ts={ts} className={mine ? "text-white/75" : "text-[var(--color-ink-3)]"} />
+        </span>
+      ) : null}
     </div>
   );
 }
