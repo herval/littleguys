@@ -138,12 +138,17 @@ export const core = {
   hidePopover: () => invoke<void>("hide_popover"),
   fitPopover: (height: number) => invoke<void>("fit_popover", { height }),
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
-  /** A file a guy referenced by path (`MEDIA:/…`), as a short-lived URL the webview can load. */
+  /**
+   * A file a guy referenced by path (`MEDIA:/…`, or one it mentions), as a
+   * short-lived URL the webview can load, or (a local guy's) its `path` on this Mac.
+   */
   media: (gateway: string, source: string, sessionKey?: string, agentId?: string) =>
-    invoke<{ available: boolean; url?: string; mimeType?: string; sizeBytes?: number; expiresAt?: string; code?: string; reason?: string }>(
+    invoke<{ available: boolean; url?: string; path?: string; mimeType?: string; sizeBytes?: number; expiresAt?: string; code?: string; reason?: string }>(
       "gw_media",
       { gateway, source, sessionKey: sessionKey ?? null, agentId: agentId ?? null },
     ),
+  /** The URL the webview loads a file on this Mac from, once `media` has allowed it. */
+  fileSrc: async (path: string) => (await import("@tauri-apps/api/core")).convertFileSrc(path),
   /** Save a chat attachment (http(s) or data: URL) to ~/Downloads; resolves to its path. */
   saveMedia: (url: string, fileName?: string, gateway?: string) =>
     invoke<string>("save_media", { url, fileName: fileName ?? null, gateway: gateway ?? null }),

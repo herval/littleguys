@@ -1,25 +1,33 @@
-//! Files a guy points at by path on its own machine (`MEDIA:/…` in a reply),
-//! and saving chat attachments to ~/Downloads.
+//! Files a guy points at by path on its own machine (`MEDIA:/…` in a reply,
+//! or a path it mentions), and saving chat attachments to ~/Downloads.
 //!
 //! OpenClaw serves them from `/__openclaw__/assistant-media`: an authorized
 //! `meta=1` request says whether the file can be shown and mints a short-lived
 //! media ticket; the ticketed URL then works without credentials, so the
 //! webview can put it straight into an `<img>` or `<video>`.
+//!
+//! Guys that run on this Mac (Claude Code, local ACP and Hermes) have their
+//! files right here: an image, video or audio file is read from disk, through
+//! the asset protocol for the webview. Only files asked for this way are in
+//! its scope, and only media: a path to anything else is never served.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::gateway::client::RpcError;
 use crate::hub::Hub;
 
 const ROUTE: &str = "/__openclaw__/assistant-media";
 
-/// `{available, url?, mimeType?, sizeBytes?, expiresAt?, code?, reason?}`
+/// `{available, url?, path?, mimeType?, sizeBytes?, expiresAt?, code?, reason?}`;
+/// `path` (no `url`) for a file on this Mac, which the webview loads with `convertFileSrc`.
 #[tauri::command]
 pub async fn gw_media(
+    app: tauri::AppHandle,
     hub: State<'_, Arc<Hub>>,
     gateway: String,
     source: String,
@@ -27,19 +35,28 @@ pub async fn gw_media(
     agent_id: Option<String>,
 ) -> Result<Value, RpcError> {
     let runtime = hub.client(&gateway).ok_or_else(|| RpcError::new("UNKNOWN_GATEWAY", format!("no gateway {gateway}")))?;
-    media_url(&runtime, source, session_key, agent_id).await
+    let info = media_url(&runtime, source, session_key, agent_id).await?;
+    if let Some(path) = info["path"].as_str() {
+        app.asset_protocol_scope().allow_file(path).map_err(|e| RpcError::new("UNAVAILABLE", e.to_string()))?;
+    }
+    Ok(info)
 }
 
-/// The meta request and ticket behind `gw_media`; the bridge downloads the URL for phones.
+/// The meta request and ticket behind `gw_media` (or the file on this Mac);
+/// the bridge downloads the URL, or reads the file, for phones.
 pub(crate) async fn media_url(
     runtime: &crate::runtime::Runtime,
     source: String,
     session_key: Option<String>,
     agent_id: Option<String>,
 ) -> Result<Value, RpcError> {
-    let client = runtime
-        .as_openclaw()
-        .ok_or_else(|| RpcError::new("UNSUPPORTED", "only OpenClaw serves files by path"))?;
+    let Some(client) = runtime.as_openclaw() else {
+        let folder = runtime
+            .local_folder(session_key.as_deref(), agent_id.as_deref())
+            .await
+            .ok_or_else(|| RpcError::new("UNSUPPORTED", "this guy's files are on another computer"))?;
+        return crate::runtime::blocking(move || Ok(local_media(&folder, &source))).await;
+    };
     let origin = client.http_origin().ok_or_else(|| RpcError::new("NOT_CONNECTED", "not connected to the gateway"))?;
 
     let mut query: Vec<(&str, String)> = vec![("source", source)];
@@ -80,6 +97,66 @@ pub(crate) async fn media_url(
         "sizeBytes": info["sizeBytes"],
         "expiresAt": info["mediaTicketExpiresAt"],
     }))
+}
+
+/// A file on this Mac, if it's media the chat can show. Relative paths start at `folder`.
+fn local_media(folder: &Path, source: &str) -> Value {
+    let unavailable = |code: &str, reason: &str| json!({ "available": false, "code": code, "reason": reason });
+    let Some(path) = local_path(folder, source) else {
+        return unavailable("invalid", "that isn't a file path");
+    };
+    // The real file (not a link to it) is what's served, so that's what must be media.
+    let Some(path) = std::fs::canonicalize(&path).ok().filter(|p| p.is_file()) else {
+        return unavailable("not_found", "the file isn't there");
+    };
+    let Some(mime) = media_mime(&path) else {
+        return unavailable("unsupported", "only images, videos and audio show in the chat");
+    };
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or_default();
+    json!({ "available": true, "path": path.display().to_string(), "mimeType": mime, "sizeBytes": size })
+}
+
+/// `~/…`, `file://…`, absolute, or relative to `folder`.
+fn local_path(folder: &Path, source: &str) -> Option<PathBuf> {
+    let source = source.trim();
+    let source = match source.strip_prefix("file://") {
+        Some(rest) => percent_decode(rest.strip_prefix("localhost").unwrap_or(rest))?,
+        None => source.to_string(),
+    };
+    if source.is_empty() || source.contains('\0') {
+        return None;
+    }
+    if let Some(rest) = source.strip_prefix("~/") {
+        return dirs::home_dir().map(|home| home.join(rest));
+    }
+    let path = Path::new(&source);
+    Some(if path.is_absolute() { path.to_path_buf() } else { folder.join(path) })
+}
+
+/// Images, videos and audio, by extension.
+fn media_mime(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "wav" => "audio/wav",
+        "ogg" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        _ => return None,
+    })
 }
 
 /// Save a chat attachment to ~/Downloads; resolves to the saved path. The
@@ -248,6 +325,39 @@ mod tests {
         assert_eq!(disposition_name(r#"attachment; filename="report.pdf""#).as_deref(), Some("report.pdf"));
         assert_eq!(disposition_name(r#"inline; filename="../../.ssh/x""#).as_deref(), Some("_.._.ssh_x"));
         assert_eq!(disposition_name("inline"), None);
+    }
+
+    #[test]
+    fn local_paths() {
+        let folder = Path::new("/work/thread");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(local_path(folder, "out/clip.mp4"), Some(folder.join("out/clip.mp4")));
+        assert_eq!(local_path(folder, "/tmp/a.png"), Some(PathBuf::from("/tmp/a.png")));
+        assert_eq!(local_path(folder, "~/dev/a b.mov"), Some(home.join("dev/a b.mov")));
+        assert_eq!(local_path(folder, "file:///tmp/a%20b.png"), Some(PathBuf::from("/tmp/a b.png")));
+        assert_eq!(local_path(folder, "file://localhost/tmp/a.png"), Some(PathBuf::from("/tmp/a.png")));
+        assert_eq!(local_path(folder, "  "), None);
+    }
+
+    #[test]
+    fn only_media_is_served() {
+        let dir = std::env::temp_dir().join(format!("littleguys-media-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("clip.MP4"), b"not really a video").unwrap();
+        std::fs::write(dir.join("secret"), b"hush").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("secret"), dir.join("looks.png")).unwrap();
+
+        let clip = local_media(&dir, "clip.MP4");
+        assert_eq!(clip["available"], true);
+        assert_eq!(clip["mimeType"], "video/mp4");
+        assert_eq!(clip["sizeBytes"], 18);
+        assert_eq!(local_media(&dir, "secret")["code"], "unsupported");
+        #[cfg(unix)]
+        assert_eq!(local_media(&dir, "looks.png")["code"], "unsupported");
+        assert_eq!(local_media(&dir, "gone.png")["code"], "not_found");
+        assert_eq!(local_media(&dir, ".")["code"], "not_found");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -37,7 +37,7 @@ import type { LiveRun, ToolState } from "../stores/chat";
 import { Avatar } from "../ui/Avatar";
 import { Lightbox } from "../ui/Lightbox";
 import { TypingDots } from "../ui/kit";
-import { Markdown } from "../ui/Markdown";
+import { Markdown, type MediaLinker, MediaLinks } from "../ui/Markdown";
 import { ArgList, toolCard } from "./ToolCards";
 import { type Save, saveIcon, saveLabel, saveTitle, useSave } from "../ui/useSave";
 
@@ -112,6 +112,15 @@ export function Transcript({
   let prevKind: string | null = null;
   let lastTs = 0;
   const where = { gatewayId, sessionKey };
+  // Paths to media in the text open it.
+  const linkMedia = useMemo<MediaLinker>(
+    () => (media, children) => (
+      <MediaLink media={media} where={{ gatewayId, sessionKey }}>
+        {children}
+      </MediaLink>
+    ),
+    [gatewayId, sessionKey],
+  );
 
   // Items are grouped by day so each day's chip can stick while it scrolls by.
   const sectionFor = (ts: number): Section => {
@@ -183,11 +192,7 @@ export function Transcript({
     } else {
       section.nodes.push(
         <GuyLine key={item.id} agent={agent} showAvatar={startsGroup}>
-          {item.kind === "text" && (
-            <div className="rounded-2xl rounded-tl-md bg-[var(--color-bubble-them)] px-3.5 py-2">
-              <Markdown text={item.text} />
-            </div>
-          )}
+          {item.kind === "text" && <TextBubble text={item.text} media={item.media} where={where} />}
           {item.kind === "media" && <MediaView media={item.media} where={where} />}
         </GuyLine>,
       );
@@ -217,14 +222,14 @@ export function Transcript({
     });
   }
   return (
-    <>
+    <MediaLinks.Provider value={linkMedia}>
       {sections.map((s, i) => (
         <section key={`${s.day}-${i}`}>
           {s.label && <DayChip label={s.label} />}
           {s.nodes}
         </section>
       ))}
-    </>
+    </MediaLinks.Provider>
   );
 }
 
@@ -237,6 +242,24 @@ export function phaseLabel(phase: string): string {
     queued: "waiting in line…",
   };
   return labels[phase] ?? phase.replace(/_/g, " ") + "…";
+}
+
+/** A reply, with the images, videos and audio it mentions below it. */
+function TextBubble({ text, media, where }: { text: string; media?: MediaRef[]; where: Where }) {
+  const bubble = (
+    <div className="max-w-full rounded-2xl rounded-tl-md bg-[var(--color-bubble-them)] px-3.5 py-2">
+      <Markdown text={text} />
+    </div>
+  );
+  if (!media?.length) return bubble;
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      {bubble}
+      {media.map((m) => (
+        <MediaView key={m.path ?? m.url} media={m} where={where} />
+      ))}
+    </div>
+  );
 }
 
 function GuyLine({ agent, showAvatar, children }: { agent: AgentSummary; showAvatar: boolean; children: React.ReactNode }) {
@@ -691,7 +714,8 @@ function formatSize(bytes?: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function MediaView({ media, where }: { media: MediaRef; where: Where }) {
+/** Where to load a chat file from: inline data, a URL, the gateway's store, or the guy's own disk. */
+function useMediaSource(media: MediaRef, where: Where) {
   const gateway = useApp((s) => gatewayOf(s.roster, where.gatewayId));
   const origin = gatewayHttpOrigin(gateway?.status.url);
   const [artifactId, setArtifactId] = useState<string | undefined>(media.artifactId);
@@ -702,13 +726,10 @@ function MediaView({ media, where }: { media: MediaRef; where: Where }) {
   });
   const [failed, setFailed] = useState<string | null>(null);
   const [lookedUp, setLookedUp] = useState(false);
-  // For `MEDIA:/path` files with no stored copy: asking the gateway for the file itself.
+  // For path files with no stored copy: asking for the file itself.
   const [pathState, setPathState] = useState<"idle" | "loading" | "ready" | "gone">("idle");
-  const [served, setServed] = useState<{ mimeType?: string; sizeBytes?: number } | null>(null);
-  const [viewing, setViewing] = useState<{ startAt: number } | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const [served, setServed] = useState<{ mimeType?: string; sizeBytes?: number; localPath?: string } | null>(null);
   const kind = kindFromMime(served?.mimeType, media.kind);
-  const sizeBytes = served?.sizeBytes ?? media.sizeBytes;
   const inline = kind !== "file";
 
   // `MEDIA:/path` references: find the stored copy of that file in this thread.
@@ -727,26 +748,27 @@ function MediaView({ media, where }: { media: MediaRef; where: Where }) {
     };
   }, [media.path, media.fileName, artifactId, where.gatewayId, where.sessionKey]);
 
-  // No stored copy: OpenClaw can serve the file straight from the guy's machine.
+  // No stored copy: OpenClaw serves the file from the guy's machine, and a
+  // guy on this Mac has it right here.
   // (Not keyed on pathState: setting it to "loading" would cancel this very request.)
   useEffect(() => {
     if (!media.path || artifactId || !lookedUp) return;
-    if (gateway?.status.kind !== "openclaw") return setPathState("gone");
     let cancelled = false;
     setPathState("loading");
     pathMedia(where.gatewayId, media.path, where.sessionKey)
-      .then((r) => {
+      .then(async (r) => {
+        const url = !r.available ? undefined : (r.url ?? (r.path ? await core.fileSrc(r.path) : undefined));
         if (cancelled) return;
-        if (!r.available || !r.url) return setPathState("gone");
-        setServed({ mimeType: r.mimeType, sizeBytes: r.sizeBytes });
-        setSrc(r.url);
+        if (!url) return setPathState("gone");
+        setServed({ mimeType: r.mimeType, sizeBytes: r.sizeBytes, localPath: r.path });
+        setSrc(url);
         setPathState("ready");
       })
       .catch(() => !cancelled && setPathState("gone"));
     return () => {
       cancelled = true;
     };
-  }, [media.path, artifactId, lookedUp, gateway?.status.kind, where.gatewayId, where.sessionKey]);
+  }, [media.path, artifactId, lookedUp, where.gatewayId, where.sessionKey]);
 
   // Inline media resolves its URL right away; files wait for a click.
   useEffect(() => {
@@ -769,11 +791,34 @@ function MediaView({ media, where }: { media: MediaRef; where: Where }) {
     () => (artifactId ? resolveArtifactUrl(where.gatewayId, where.sessionKey, artifactId, origin) : Promise.resolve(src)),
     name,
     where.gatewayId,
+    served?.localPath,
   );
-  const onBot = media.path && !artifactId && !src && pathState === "gone";
+  return {
+    gateway,
+    artifactId,
+    src,
+    kind,
+    inline,
+    name,
+    save,
+    sizeBytes: served?.sizeBytes ?? media.sizeBytes,
+    failed,
+    setFailed,
+    /** A path whose file can't be had: it's only on the bot's machine. */
+    gone: Boolean(media.path && !artifactId && !src && pathState === "gone"),
+  };
+}
+
+function MediaView({ media, where }: { media: MediaRef; where: Where }) {
+  const { gateway, artifactId, src, kind, inline, name, save, sizeBytes, failed, setFailed, gone } = useMediaSource(media, where);
+  const [viewing, setViewing] = useState<{ startAt: number } | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // A file the text only mentions shows once it's here, and not at all if it can't be had.
+  if (media.mentioned && (!src || failed)) return null;
 
   // Not retrievable: a file that only exists on the bot's machine.
-  if (onBot || (!src && !artifactId && !inline && !media.path)) {
+  if (gone || (!src && !artifactId && !inline && !media.path)) {
     return (
       <FileCard
         icon={kind}
@@ -855,6 +900,29 @@ function MediaView({ media, where }: { media: MediaRef; where: Where }) {
         />
       </button>
       {viewer}
+    </>
+  );
+}
+
+/** A path in a reply that points at an image or video: opens it, once it's known to be there. */
+function MediaLink({ media, where, children }: { media: MediaRef; where: Where; children: React.ReactNode }) {
+  const { src, kind, name, save, failed } = useMediaSource(media, where);
+  const [open, setOpen] = useState(false);
+  if (!src || failed || (kind !== "image" && kind !== "video")) return <>{children}</>;
+  return (
+    <>
+      <a
+        href="#"
+        role="button"
+        title={`View ${name}`}
+        onClick={(e) => {
+          e.preventDefault();
+          setOpen(true);
+        }}
+      >
+        {children}
+      </a>
+      {open && <Lightbox kind={kind} src={src} name={name} save={save} onClose={() => setOpen(false)} />}
     </>
   );
 }

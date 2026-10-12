@@ -226,6 +226,18 @@ impl Runtime {
             _ => None,
         }
     }
+
+    /// For guys that run on this Mac, the folder a thread works in (where the
+    /// relative paths it mentions start). None when their files are on another
+    /// machine, and for OpenClaw, which serves its own (see media.rs).
+    pub async fn local_folder(&self, session_key: Option<&str>, agent_id: Option<&str>) -> Option<PathBuf> {
+        match self {
+            Runtime::OpenClaw(_) => None,
+            Runtime::ClaudeCode(c) => Some(c.thread_folder(session_key)),
+            Runtime::Acp(c) => c.thread_folder(session_key),
+            Runtime::Hermes(c) => c.thread_folder(agent_id).await,
+        }
+    }
 }
 
 /// `agent:<agentId>:<rest…>` helpers shared by adapters.

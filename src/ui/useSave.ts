@@ -1,6 +1,7 @@
 // Saving a chat attachment to ~/Downloads (the webview can't download on its
 // own), with brief feedback on whatever button triggered it. Once saved, the
-// same button shows the file in Finder.
+// same button shows the file in Finder, as it does from the start for a file
+// that's already on this Mac.
 import { Check, Download, FolderOpen, type LucideIcon, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { core, errorMessage } from "../lib/ipc";
@@ -8,13 +9,20 @@ import { core, errorMessage } from "../lib/ipc";
 type SaveStatus =
   | { status: "idle" | "saving" }
   /** `saved` flashes a checkmark, then settles into `done` ("Show in Finder"). */
-  | { status: "saved" | "done"; path: string }
+  | { status: "saved" | "done"; path: string; local?: boolean }
   | { status: "failed"; error: string };
 
 export type Save = SaveStatus & { run: () => void };
 
-export function useSave(resolveUrl: () => Promise<string | null>, fileName: string | undefined, gatewayId: string): Save {
-  const [state, setState] = useState<SaveStatus>({ status: "idle" });
+export function useSave(
+  resolveUrl: () => Promise<string | null>,
+  fileName: string | undefined,
+  gatewayId: string,
+  /** Where the file already is on this Mac: nothing to download. */
+  localPath?: string,
+): Save {
+  const [progress, setState] = useState<SaveStatus>({ status: "idle" });
+  const state: SaveStatus = localPath && progress.status === "idle" ? { status: "done", path: localPath, local: true } : progress;
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
 
@@ -77,7 +85,7 @@ export function saveIcon(save: Save): LucideIcon {
 }
 
 export function saveTitle(save: Save): string | undefined {
-  if (save.status === "saved" || save.status === "done") return `Saved to ${save.path}`;
+  if (save.status === "saved" || save.status === "done") return save.local ? save.path : `Saved to ${save.path}`;
   if (save.status === "failed") return save.error;
   return undefined;
 }

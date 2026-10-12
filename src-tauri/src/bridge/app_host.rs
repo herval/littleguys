@@ -82,6 +82,9 @@ impl BridgeHost for AppHost {
                 }
                 Err(e) => return Err(e),
             };
+            if let Some(path) = info["path"].as_str().filter(|_| info["available"] == true) {
+                return local_file(path, info["mimeType"].as_str()).await;
+            }
             let url = match info["url"].as_str() {
                 Some(url) if info["available"] == true => url.to_string(),
                 _ => {
@@ -116,4 +119,28 @@ impl BridgeHost for AppHost {
     fn subscribe(&self) -> broadcast::Receiver<HostEvent> {
         self.activity.subscribe_bridge()
     }
+}
+
+/// A file on this Mac (a local guy's), streamed from disk.
+async fn local_file(path: &str, mime_type: Option<&str>) -> Result<MediaFetch, RpcError> {
+    use tokio::io::AsyncReadExt;
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(e) => return Ok(MediaFetch::Unavailable { code: Some("not_found".into()), reason: Some(e.to_string()) }),
+    };
+    let size_bytes = file.metadata().await.ok().map(|m| m.len());
+    let body = futures_util::stream::unfold(Some(file), |file| async move {
+        let mut file = file?;
+        let mut chunk = vec![0; 64 * 1024];
+        match file.read(&mut chunk).await {
+            Ok(0) => None,
+            Ok(n) => {
+                chunk.truncate(n);
+                Some((Ok(chunk), Some(file)))
+            }
+            Err(e) => Some((Err(e.to_string()), None)),
+        }
+    })
+    .boxed();
+    Ok(MediaFetch::Available { mime_type: mime_type.map(str::to_string), size_bytes, body })
 }

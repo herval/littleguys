@@ -190,6 +190,15 @@ impl AcpClient {
             Err(_) => Err(RpcError::new("TIMEOUT", format!("{method} timed out"))),
         }
     }
+
+    /// For an agent on this Mac, the folder a thread works in: its own, else the guy's.
+    pub fn thread_folder(&self, session_key: Option<&str>) -> Option<PathBuf> {
+        let inner = &self.inner;
+        if !inner.is_local() {
+            return None;
+        }
+        session_key.and_then(|key| resolve_dir(&inner.thread_cwd(key))).or_else(|| inner.workspace().ok())
+    }
 }
 
 /// `local`: the agent runs on this Mac (stdio), so its folders can be read directly.

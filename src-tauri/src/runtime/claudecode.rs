@@ -502,6 +502,11 @@ impl ClaudeCodeClient {
 
     pub fn set_credential_override(&self, _credential: Option<Credential>) {}
 
+    /// The folder a thread works in, else the one you last worked in.
+    pub fn thread_folder(&self, session_key: Option<&str>) -> PathBuf {
+        folder_of(&self.inner, &json!({ "sessionKey": session_key }))
+    }
+
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.call_with_timeout(method, params, DEFAULT_CALL_TIMEOUT).await
     }

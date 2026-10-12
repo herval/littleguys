@@ -34,11 +34,14 @@ export interface MediaRef {
   height?: number;
   /** A file the bot referenced by path on its own machine (`MEDIA:/…`). */
   path?: string;
+  /** Only mentioned in the text: shown if it can be had, else left out. */
+  mentioned?: boolean;
 }
 
 export type Item =
   | { kind: "user"; id: string; text: string; media: MediaRef[]; sender?: string; via?: string; ts?: number; pending?: boolean }
-  | { kind: "text"; id: string; text: string; ts?: number }
+  /** `media`: images, videos and audio the text mentions by path or link. */
+  | { kind: "text"; id: string; text: string; media?: MediaRef[]; ts?: number }
   | { kind: "thinking"; id: string; text: string; ts?: number }
   | { kind: "tool"; id: string; call: ToolCallBlock; result?: ToolResult; ts?: number }
   | { kind: "media"; id: string; media: MediaRef; ts?: number }
@@ -115,12 +118,99 @@ export function extractMediaLines(text: string): { text: string; files: MediaRef
   return { text: rest.replace(/\n{3,}/g, "\n\n").trim(), files };
 }
 
+// What media.rs will serve from a local guy's disk.
+const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "avif", "bmp", "svg"];
+const VIDEO_EXT = ["mp4", "m4v", "mov", "webm"];
+const AUDIO_EXT = ["mp3", "m4a", "aac", "wav", "ogg", "opus", "flac"];
+const MEDIA_EXT = [...IMAGE_EXT, ...VIDEO_EXT, ...AUDIO_EXT].join("|");
+
 function kindFromName(name: string): MediaRef["kind"] {
-  const ext = name.toLowerCase().split(".").pop() ?? "";
-  if (["png", "jpg", "jpeg", "gif", "webp", "heic", "svg"].includes(ext)) return "image";
-  if (["mp4", "mov", "webm", "m4v"].includes(ext)) return "video";
-  if (["mp3", "m4a", "wav", "ogg", "opus", "aac", "flac"].includes(ext)) return "audio";
+  const ext = name.toLowerCase().split(/[?#]/)[0].split(".").pop() ?? "";
+  if (IMAGE_EXT.includes(ext)) return "image";
+  if (VIDEO_EXT.includes(ext)) return "video";
+  if (AUDIO_EXT.includes(ext)) return "audio";
   return "file";
+}
+
+const MEDIA_NAME = new RegExp(`\\.(?:${MEDIA_EXT})$`, "i");
+const MEDIA_URL = new RegExp(`^https?://[^\\s?#]+\\.(?:${MEDIA_EXT})(?:[?#]\\S*)?$`, "i");
+const FENCE = /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1[`~]*[ \t]*$|(?![\s\S]))/gm;
+const CODE_SPAN = /(`+)([^`\n]+?)\1/g;
+const LINK = /!?\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"]*")?\s*\)/g;
+// A path or URL in prose: starts after a space or an opening mark, ends before closing punctuation.
+const BARE = /(^|[\s(\[<"'*_])((?:https?:\/\/|file:\/\/|~\/|\.{1,2}\/|\/)[^\s`"'<>()[\]]+)/gm;
+
+/**
+ * An image, video or audio file `target` points at: a path on the guy's
+ * machine (absolute, `~/…`, `file://…` or relative to its folder) or an
+ * http(s) URL. Null for anything else.
+ */
+export function mediaTarget(target: string): MediaRef | null {
+  const t = target.trim();
+  if (!t || t.length > 1024 || /[\n`]/.test(t)) return null;
+  const name = decode(t.split(/[?#]/)[0].split(/[\\/]/).pop() || t);
+  if (/^https?:/i.test(t)) return MEDIA_URL.test(t) ? { kind: kindFromName(t), url: t, fileName: name, mentioned: true } : null;
+  if (/^[a-z][a-z\d+.-]*:/i.test(t) && !/^file:/i.test(t)) return null; // mailto:, data:, …
+  if (!MEDIA_NAME.test(t)) return null;
+  return { kind: kindFromName(t), path: t, fileName: name, mentioned: true };
+}
+
+/** The media a Markdown link or image points at; its target is a URL, so a path in it is percent-encoded. */
+export function linkedMedia(href: string): MediaRef | null {
+  return mediaTarget(/^https?:/i.test(href) ? href : decode(href));
+}
+
+function decode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/** Paths and URLs to media in prose (no Markdown): where each starts, as written, and what it points at. */
+export function bareMedia(text: string): { at: number; target: string; ref: MediaRef }[] {
+  const found: { at: number; target: string; ref: MediaRef }[] = [];
+  for (const m of text.matchAll(BARE)) {
+    const target = m[2].replace(/[.,;:!?*_]+$/, "");
+    const ref = mediaTarget(target);
+    if (ref) found.push({ at: (m.index ?? 0) + m[1].length, target, ref });
+  }
+  return found;
+}
+
+/**
+ * The media a reply mentions, in order: in code spans (`~/out/clip.mp4`),
+ * as link or image targets, or as bare paths and URLs. Code blocks are
+ * skipped (command output isn't a mention).
+ */
+export function mentionedMedia(text: string, limit = 4): MediaRef[] {
+  const blank = (m: string) => " ".repeat(m.length);
+  const found: { at: number; ref: MediaRef }[] = [];
+  const add = (ref: MediaRef | null, at: number) => ref && found.push({ at, ref });
+  let rest = text.replace(FENCE, blank);
+  rest = rest.replace(CODE_SPAN, (m, _ticks: string, code: string, at: number) => {
+    // `open out/clip.mp4` is a command; `~/Movies/My clip.mov` is a path.
+    if (!/\s/.test(code.trim()) || /^\s*(?:~|\.{0,2})\/|^\s*file:/i.test(code)) add(mediaTarget(code), at);
+    return blank(m);
+  });
+  rest = rest.replace(LINK, (m, bracketed: string | undefined, plain: string | undefined, at: number) => {
+    add(linkedMedia(bracketed ?? plain ?? ""), at);
+    return blank(m);
+  });
+  for (const b of bareMedia(rest)) add(b.ref, b.at);
+
+  const seen = new Set<string>();
+  return found
+    .sort((a, b) => a.at - b.at)
+    .map((f) => f.ref)
+    .filter((ref) => {
+      const key = ref.url ?? ref.path ?? "";
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, limit);
 }
 
 function isInternal(m: ChatMessage): boolean {
@@ -206,7 +296,11 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
         const type = str(r.type);
         if (type === "text") {
           const { text, files } = extractMediaLines(cleanDirectives((b as { text: string }).text));
-          if (text && !HIDDEN_REPLIES.has(text.trim())) items.push({ kind: "text", id: bid, text, ts });
+          if (text && !HIDDEN_REPLIES.has(text.trim())) {
+            const attached = new Set(files.map((f) => f.path));
+            const media = mentionedMedia(text).filter((m) => !m.path || !attached.has(m.path));
+            items.push({ kind: "text", id: bid, text, media: media.length ? media : undefined, ts });
+          }
           files.forEach((f, k) => items.push({ kind: "media", id: `${bid}:f${k}`, media: f, ts }));
         } else if (type === "thinking" || type === "reasoning") {
           const text = String(r.thinking ?? r.text ?? "").trim();

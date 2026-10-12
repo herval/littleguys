@@ -42,7 +42,7 @@ use crate::gateway::client::{ConnStatus, Hooks, Phase, RpcError};
 use crate::gateway::identity::{now_ms, write_private};
 use crate::gateways::{HermesConfig, HermesMode};
 use crate::openclaw::config::{Credential, GatewayMode};
-use crate::runtime::{keys, truncate, unsupported, Capabilities, RuntimeKind};
+use crate::runtime::{home, keys, truncate, unsupported, Capabilities, RuntimeKind};
 
 const DEFAULT_LOCAL_PORT: u16 = 9119;
 const DEFAULT_API_PORT: u16 = 8642;
@@ -223,6 +223,12 @@ fn port_open(host: &str, port: u16) -> bool {
     use std::net::ToSocketAddrs;
     let Ok(mut addrs) = (host.trim_matches(['[', ']']), port).to_socket_addrs() else { return false };
     addrs.next().is_some_and(|addr| std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok())
+}
+
+/// A local Hermes reached over loopback: its files are on this Mac.
+fn on_this_mac(config: &HermesConfig) -> bool {
+    config.mode == HermesMode::Local
+        && config.url.as_deref().is_none_or(|u| normalize_http(u, DEFAULT_LOCAL_PORT).is_ok_and(|u| is_loopback_url(&u)))
 }
 
 fn is_loopback_url(url: &str) -> bool {
@@ -457,9 +463,7 @@ impl HermesClient {
             ..Default::default()
         };
         let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(5));
-        let local_target = config.mode == HermesMode::Local
-            && config.url.as_deref().is_none_or(|u| normalize_http(u, DEFAULT_LOCAL_PORT).is_ok_and(|u| is_loopback_url(&u)));
-        if local_target {
+        if on_this_mac(&config) {
             builder = builder.no_proxy();
         }
         let http = builder.build().unwrap_or_default();
@@ -532,6 +536,17 @@ impl HermesClient {
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.call_with_timeout(method, params, DEFAULT_CALL_TIMEOUT).await
+    }
+
+    /// For a Hermes on this Mac, the folder its guy works in.
+    pub async fn thread_folder(&self, agent_id: Option<&str>) -> Option<PathBuf> {
+        let inner = &self.inner;
+        if !on_this_mac(&inner.config) {
+            return None;
+        }
+        let profile = agent_profile(inner, &json!({ "agentId": agent_id })).ok()?;
+        let root = workspace_root(inner, profile.as_deref(), Duration::from_secs(5)).await.ok();
+        Some(root.map(PathBuf::from).unwrap_or_else(home))
     }
 
     pub async fn call_with_timeout(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, RpcError> {

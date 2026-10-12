@@ -365,6 +365,13 @@ const history: Record<string, ChatMessage[]> = {
     },
     { role: "toolResult", toolCallId: "p17", toolName: "mcp__plugin_tracker_tracker__post_update", isError: false, content: [{ type: "text", text: "Posted to the ticket." }], ...oc("p18") },
     { role: "assistant", content: [{ type: "text", text: "Tests pass — 21/21." }], timestamp: now - 5 * min, ...oc("p6") },
+    { role: "user", content: [{ type: "text", text: "can you record it working?" }], timestamp: now - 4 * min, ...oc("p19") },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Recorded it: `out/export-csv.mp4` (6s). The button before and after is in /tmp/export-button.png." }],
+      timestamp: now - 3 * min,
+      ...oc("p20"),
+    },
   ],
   "openclaw|agent:main:dashboard:a0": [
     { role: "user", content: "Find me 2-bedroom places near the park, under 3k.", timestamp: now - 12 * 24 * 60 * min - 90_000, ...oc("h1") },
@@ -720,6 +727,47 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
   }
 }
 
+/** A file a guy points at by path, as `gw_media` answers: by its extension, like the real one. */
+async function mockMedia(source: string) {
+  const ext = source.toLowerCase().split(".").pop() ?? "";
+  if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) {
+    return { available: true, url: mockPage(source.split("/").pop() ?? source).toDataURL("image/png"), mimeType: "image/png", sizeBytes: 84_211 };
+  }
+  if (["mp4", "mov", "webm", "m4v"].includes(ext)) {
+    const url = await mockVideo();
+    return url ? { available: true, url, mimeType: "video/webm", sizeBytes: 412_000 } : { available: false, code: "not_found" };
+  }
+  if (["mp3", "m4a", "wav", "ogg", "opus", "aac", "flac"].includes(ext)) {
+    return { available: true, url: silentWav(), mimeType: "audio/wav", sizeBytes: 16_044 };
+  }
+  return { available: false, code: "unsupported" };
+}
+
+/** Two seconds of the mock page, recorded once (needs MediaRecorder). */
+let videoUrl: Promise<string | null> | null = null;
+function mockVideo(): Promise<string | null> {
+  videoUrl ??= new Promise((resolve) => {
+    const canvas = mockPage("Mock recording");
+    if (typeof MediaRecorder === "undefined" || !canvas.captureStream) return resolve(null);
+    const ctx = canvas.getContext("2d")!;
+    const recorder = new MediaRecorder(canvas.captureStream(30));
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => chunks.push(e.data);
+    recorder.onstop = () => resolve(URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType || "video/webm" })));
+    let frame = 0;
+    const tick = window.setInterval(() => {
+      ctx.fillStyle = `hsl(${(frame++ * 6) % 360} 80% 55%)`;
+      ctx.fillRect(40 + (frame % 60) * 18, 420, 120, 120);
+    }, 33);
+    recorder.start();
+    window.setTimeout(() => {
+      clearInterval(tick);
+      recorder.stop();
+    }, 2000);
+  });
+  return videoUrl;
+}
+
 /** Half a second of silence, for `MEDIA:` audio served by the gateway. */
 function silentWav(): string {
   const rate = 16_000;
@@ -755,7 +803,7 @@ export const mockBackend: Backend = {
         return roster as T;
       case "gw_media":
         await new Promise((r) => setTimeout(r, 400)); // a round trip to the gateway
-        return { available: true, url: silentWav(), mimeType: "audio/wav", sizeBytes: 16_044 } as T;
+        return (await mockMedia(String(args?.source))) as T;
       case "gw_call":
         return (await gwCall(String(args?.gateway), String(args?.method), (args?.params ?? {}) as Record<string, unknown>)) as T;
       case "browser_stream_start": {
