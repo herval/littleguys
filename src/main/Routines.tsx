@@ -1,7 +1,7 @@
 import { CalendarClock, ChevronRight, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { cron } from "../lib/gateway";
-import { capsOf, guyName, hasMainChat, relativeTime, sessionsFor, threadKind, threadTitle } from "../lib/guys";
+import { capsOf, gatewayOf, guyName, hasMainChat, relativeTime, sessionsFor, threadKind, threadTitle } from "../lib/guys";
 import { errorMessage, listen } from "../lib/ipc";
 import {
   DAYS,
@@ -18,6 +18,7 @@ import { mainSessionKey, useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { confirmAction } from "../ui/confirm";
 import { Button, Field, IconButton, inputBase, inputClass, Modal, Spinner } from "../ui/kit";
+import { FolderPicker } from "./FolderPicker";
 
 type Job = CronJob & {
   lastRunStatus?: string | null;
@@ -311,6 +312,9 @@ function RoutineEditor({ guy, job, onClose, onSaved }: { guy: Guy; job: Job | nu
   const [preset, setPreset] = useState<Preset>(scheduleToPreset(job?.schedule as CronSchedule | undefined));
   const initialTarget = typeof job?.sessionTarget === "string" && job.sessionTarget.startsWith("session:") ? job.sessionTarget.slice(8) : "";
   const [target, setTarget] = useState<string>(initialTarget); // "" = new thread per run
+  // Claude Code starts each run's session in a folder (`payload.cwd`); the guy's is the one you last worked in.
+  const startsInFolder = useApp((s) => gatewayOf(s.roster, gw)?.status.kind === "claudecode");
+  const [folder, setFolder] = useState<string | null>((job?.payload as { cwd?: string } | undefined)?.cwd ?? guy.workspace ?? null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -333,7 +337,7 @@ function RoutineEditor({ guy, job, onClose, onSaved }: { guy: Guy; job: Job | nu
       name: name.trim(),
       schedule: presetToSchedule(preset),
       sessionTarget: target ? `session:${target}` : "isolated",
-      payload: { kind: "agentTurn", message: message.trim() },
+      payload: { kind: "agentTurn", message: message.trim(), ...(startsInFolder && !target && folder ? { cwd: folder } : {}) },
       delivery: { mode: "none" },
     };
     try {
@@ -375,6 +379,11 @@ function RoutineEditor({ guy, job, onClose, onSaved }: { guy: Guy; job: Job | nu
               ))}
             </select>
           </Field>
+          {startsInFolder && !target && folder && (
+            <Field label="Works in" hint="Each run is a new Claude Code session in this folder.">
+              <FolderPicker guy={guy} value={folder} onChange={setFolder} inline />
+            </Field>
+          )}
           {error && <p className="text-[12.5px] text-[var(--color-bad)]">{error}</p>}
         </div>
         <div className="mt-6 flex justify-end gap-2">

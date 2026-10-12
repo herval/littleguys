@@ -2330,7 +2330,7 @@ fn build_prompt(
 // values, headers, args or tokens).
 
 const MAX_SKILLS: usize = 300;
-const MAX_SKILL_BYTES: u64 = 256 * 1024;
+pub(super) const MAX_SKILL_BYTES: u64 = 256 * 1024;
 /// Front matter lives at the top; no need to read whole SKILL.md files to list them.
 const SKILL_HEAD_BYTES: u64 = 16 * 1024;
 const MAX_SUBDIRS: usize = 1_000;
@@ -2410,11 +2410,15 @@ impl Inner {
         skill_dirs(self.flavor(), &cwd, &home())
     }
 
+    /// The guy's folder, or with `sessionKey` the folder that thread works in.
     async fn workspace_call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         check_agent(&params)?;
-        let root = self.local_root(method)?;
+        let mut root = self.local_root(method)?;
+        if let Some(own) = param_str(&params, &["sessionKey"]).and_then(|key| resolve_dir(&self.thread_cwd(key))) {
+            root = own;
+        }
         let method = method.to_string();
-        blocking(move || crate::localfs::handle(&root, AGENT_ID, &method, &params)).await
+        blocking(move || crate::localfs::handle(&root, AGENT_ID, &method, &params).map(|out| crate::localfs::with_root(out, &root))).await
     }
 
     /// Slash commands the agent announced + SKILL.md skills on disk.
@@ -2497,7 +2501,7 @@ impl Inner {
 // ---- files ----------------------------------------------------------------------
 
 /// The whole file as text, if it's at most `max` bytes.
-fn read_capped(path: &Path, max: u64) -> Option<String> {
+pub(super) fn read_capped(path: &Path, max: u64) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > max {
         return None;
@@ -2507,7 +2511,7 @@ fn read_capped(path: &Path, max: u64) -> Option<String> {
 }
 
 /// JSON (or JSON5 / JSON with comments) config file.
-fn read_json(path: &Path) -> Option<Value> {
+pub(super) fn read_json(path: &Path) -> Option<Value> {
     let text = read_capped(path, MAX_CONFIG_BYTES)?;
     serde_json::from_str(&text).ok().or_else(|| json5::from_str(&text).ok())
 }
@@ -2534,16 +2538,16 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
 
 /// A SKILL.md found on disk.
 #[derive(Debug, Clone)]
-struct SkillFile {
-    name: String,
-    description: Option<String>,
+pub(super) struct SkillFile {
+    pub(super) name: String,
+    pub(super) description: Option<String>,
     /// `project` or `personal`.
-    source: &'static str,
-    path: PathBuf,
+    pub(super) source: &'static str,
+    pub(super) path: PathBuf,
 }
 
 impl SkillFile {
-    fn row(&self) -> Value {
+    pub(super) fn row(&self) -> Value {
         json!({
             "name": self.name,
             "skillKey": self.name,
@@ -2570,8 +2574,13 @@ fn skill_dirs(flavor: Flavor, cwd: &Path, home: &Path) -> Vec<(PathBuf, &'static
     project.chain(personal).collect()
 }
 
+/// Claude Code's skill folders (the Claude Code bot reads them too).
+pub(super) fn claude_skill_dirs(cwd: &Path, home: &Path) -> Vec<(PathBuf, &'static str)> {
+    skill_dirs(Flavor::Claude, cwd, home)
+}
+
 /// `<dir>/<skill>/SKILL.md` and `<dir>/<group>/<skill>/SKILL.md`, first name wins.
-fn scan_skills(dirs: &[(PathBuf, &'static str)]) -> Vec<SkillFile> {
+pub(super) fn scan_skills(dirs: &[(PathBuf, &'static str)]) -> Vec<SkillFile> {
     let mut seen = HashSet::new();
     let mut found = Vec::new();
     for (dir, source) in dirs {
@@ -2595,7 +2604,7 @@ fn scan_skills(dirs: &[(PathBuf, &'static str)]) -> Vec<SkillFile> {
 }
 
 /// The first `max` bytes of a file, as text.
-fn read_head(path: &Path, max: u64) -> Option<String> {
+pub(super) fn read_head(path: &Path, max: u64) -> Option<String> {
     use std::io::Read;
     let file = std::fs::File::open(path).ok()?;
     let mut bytes = Vec::new();
@@ -2605,7 +2614,7 @@ fn read_head(path: &Path, max: u64) -> Option<String> {
 
 /// `name` and `description` from YAML front matter. A tiny line-based reader:
 /// plain, quoted and multi-line values, `>` (folded) and `|` (literal) blocks.
-fn front_matter(text: &str) -> (Option<String>, Option<String>) {
+pub(super) fn front_matter(text: &str) -> (Option<String>, Option<String>) {
     let mut lines = text.trim_start_matches('\u{feff}').lines();
     if lines.next().map(str::trim_end) != Some("---") {
         return (None, None);
@@ -2775,6 +2784,11 @@ fn read_mcp_servers(flavor: Flavor, cwd: &Path, home: &Path) -> Vec<Value> {
     servers
 }
 
+/// Claude Code's MCP servers for a folder (the Claude Code bot reads them too).
+pub(super) fn claude_mcp_servers(cwd: &Path, home: &Path) -> Vec<Value> {
+    read_mcp_servers(Flavor::Claude, cwd, home)
+}
+
 /// Claude Code: `projects["<cwd>"].mcpServers` (local) > `<cwd>/.mcp.json` (project)
 /// > `~/.claude.json` `mcpServers` (user).
 fn claude_mcp(claude_json: Option<&Value>, mcp_json: Option<&Value>, cwd_keys: &[String]) -> Vec<Value> {
@@ -2825,7 +2839,7 @@ fn gemini_mcp(settings: &Value, source: &str) -> Vec<Value> {
 }
 
 /// `{name: spec}` → safe rows. `url_transport`: what a bare `url` means.
-fn mcp_rows(servers: Option<&Value>, source: &str, url_transport: &'static str) -> Vec<Value> {
+pub(super) fn mcp_rows(servers: Option<&Value>, source: &str, url_transport: &'static str) -> Vec<Value> {
     let Some(servers) = servers.and_then(Value::as_object) else { return Vec::new() };
     servers.iter().filter_map(|(name, spec)| mcp_row(name, spec, source, url_transport)).collect()
 }
@@ -2903,7 +2917,7 @@ fn safe_url(raw: &str) -> Option<String> {
 
 // ---- plugins ----------------------------------------------------------------------
 
-fn read_claude_plugins(cwd: &Path, home: &Path) -> Vec<Value> {
+pub(super) fn read_claude_plugins(cwd: &Path, home: &Path) -> Vec<Value> {
     let Some(installed) = read_json(&home.join(".claude/plugins/installed_plugins.json")) else { return Vec::new() };
     // Most specific settings first.
     let settings: Vec<Value> =

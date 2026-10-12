@@ -312,6 +312,8 @@ export interface WorkspaceListing {
   entries: WorkspaceEntry[];
   totalEntries: number;
   offset: number;
+  /** The folder listed, when threads each work in their own (ACP, Claude Code). */
+  workspaceDir?: string;
 }
 
 export interface WorkspaceFile {

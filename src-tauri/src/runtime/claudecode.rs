@@ -18,25 +18,35 @@
 //! - With the connection's `approvals` setting on, a background session's
 //!   permission prompt waits in its PermissionRequest hook for Allow or Deny from
 //!   littleguys. Terminal sessions keep asking in their terminal.
+//! - New threads start as drafts (`sessions.create`, or the guy's main key before
+//!   it has a session); the first message starts a background session in the
+//!   thread's folder: `claude "<text>" --bg`. `--bg` picks the session id, so the
+//!   thread keeps the key littleguys gave it, saved in `claude-threads-<id>.json`.
+//! - Routines run through a `LocalScheduler`: each run starts a background session
+//!   the same way (or writes to the thread it targets) and waits for its turn to end.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use futures_util::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, Notify};
 
 use crate::gateway::client::{ConnStatus, Hooks, Phase, RpcError};
-use crate::gateway::identity::now_ms;
+use crate::gateway::identity::{now_ms, write_private};
 use crate::gateways::ClaudeCodeConfig;
 use crate::openclaw::config::{Credential, GatewayMode};
 use crate::openclaw::runtime as cli;
+use crate::runtime::acp;
+use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
 use crate::runtime::{keys, unsupported, Capabilities, RuntimeKind};
 
 const AGENT_ID: &str = "claude";
@@ -65,6 +75,21 @@ const TOOL_TEXT_MAX: usize = 20_000;
 const REQUEST_MAX_BYTES: usize = 8 << 20;
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const CLI_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a session `claude --bg` started has to show up in `claude agents`.
+const LAUNCH_FIND: Duration = Duration::from_secs(30);
+/// A routine's turn gets this long before littleguys stops waiting for it.
+const ROUTINE_MAX: Duration = Duration::from_secs(4 * 3600);
+/// Sessions littleguys started are remembered (by the key it gave them) this long.
+const STARTED_KEEP_MS: u64 = 30 * 24 * 3600 * 1000;
+/// …and at most this many routine runs.
+const STARTED_MAX: usize = 2_000;
+/// Past sessions offered to resume, newest first.
+const PAST_MAX: usize = 400;
+/// A transcript's start holds its folder and first prompt; its end, its latest title.
+const PAST_HEAD_BYTES: u64 = 64 << 10;
+const PAST_TAIL_BYTES: u64 = 64 << 10;
+const MAX_COMMANDS: usize = 500;
+const COMMAND_HEAD_BYTES: u64 = 4 << 10;
 
 /// Starts every message littleguys hands a session, so its transcript shows it as yours.
 const MARK: &str = "The person wrote to you from littleguys:";
@@ -79,20 +104,20 @@ type Emits = Vec<(&'static str, Value)>;
 fn capabilities(config: &ClaudeCodeConfig) -> Capabilities {
     Capabilities {
         manage_guys: false,
-        routines: false,
-        routines_local: false,
+        routines: true,
+        routines_local: true,
         approvals: config.approvals,
         thread_actions: false,
-        new_threads: false,
-        attachments: false,
+        new_threads: true,
+        attachments: true,
         models: false,
-        files: false,
-        skills: false,
-        commands: false,
+        files: true,
+        skills: true,
+        commands: true,
         tools: false,
-        plugins: false,
+        plugins: true,
         browser: false,
-        past_sessions: false,
+        past_sessions: true,
     }
 }
 
@@ -116,6 +141,9 @@ struct Inner {
     wake: Notify,
     claude: Mutex<Option<PathBuf>>,
     st: Mutex<State>,
+    scheduler: Arc<LocalScheduler>,
+    /// `<data_dir>/claude-threads-<id>.json`: [`State::started`].
+    started_path: PathBuf,
 }
 
 #[derive(Default)]
@@ -124,11 +152,137 @@ struct State {
     sessions: HashMap<String, Session>,
     approvals: HashMap<String, Approval>,
     transcripts: TranscriptIndex,
+    /// New threads whose session hasn't started yet, by key.
+    drafts: HashMap<String, Draft>,
+    /// Sessions littleguys started, by session id: the thread key each one has.
+    started: HashMap<String, Started>,
+    /// Sessions `claude --bg` just started (by the short id it printed) → their key,
+    /// until their session id is known.
+    pending: HashMap<String, String>,
+}
+
+impl State {
+    /// The session `sid`, added if it's new (under the key littleguys gave it, if it started it).
+    fn session(&mut self, sid: &str) -> &mut Session {
+        if !self.sessions.contains_key(sid) {
+            let mut s = Session::new(sid);
+            if let Some(t) = self.started.get(sid) {
+                s.key = Some(t.key.clone());
+                s.kept = t.keep;
+                s.cwd = t.cwd.clone().unwrap_or_default();
+            }
+            if let Some(short) = self.pending.keys().find(|short| s.key.is_none() && sid.starts_with(short.as_str())).cloned() {
+                // The session `claude --bg` just started for a thread: the thread is that session now.
+                let key = self.pending.remove(&short).unwrap_or_default();
+                let keep = self.drafts.contains_key(&key);
+                self.started.insert(sid.to_string(), Started { key: key.clone(), at: now_ms(), cwd: None, keep });
+                s.kept = keep;
+                if let Some(d) = self.drafts.remove(&key) {
+                    s.outbox = d.outbox;
+                }
+                s.key = Some(key);
+            }
+            self.sessions.insert(sid.to_string(), s);
+        }
+        self.sessions.get_mut(sid).expect("just added")
+    }
+
+    /// The session thread `key` is about, or the draft it still is.
+    fn thread(&self, key: &str) -> Option<Thread> {
+        if self.drafts.contains_key(key) {
+            return Some(Thread::Draft);
+        }
+        if let Some((sid, _)) = self.started.iter().find(|(_, t)| t.key == key) {
+            return Some(Thread::Session(sid.clone()));
+        }
+        match keys::split(key) {
+            Some((AGENT_ID, "main")) => Some(Thread::Draft),
+            Some((AGENT_ID, rest)) if rest.starts_with("dashboard:") => keys::last_id(key).map(Thread::Session),
+            _ => None,
+        }
+    }
+
+    /// Where a new session starts unless you pick a folder: the one you last worked in.
+    /// (Claude Code won't start a background session in your home folder.)
+    fn default_folder(&self) -> String {
+        let home = dirs::home_dir().unwrap_or_default();
+        let mut recent: Vec<&Session> = self.sessions.values().filter(|s| !s.cwd.is_empty() && !s.cwd.contains("/.claude/")).collect();
+        recent.sort_by_key(|s| std::cmp::Reverse(s.updated_at.max(s.started_at)));
+        recent
+            .into_iter()
+            .map(|s| Path::new(&s.cwd))
+            .find(|dir| *dir != home && dir.is_dir())
+            .unwrap_or(&home)
+            .display()
+            .to_string()
+    }
+}
+
+enum Thread {
+    Session(String),
+    /// Not started yet: its first message starts it.
+    Draft,
+}
+
+/// A new thread, until its first message starts its session.
+struct Draft {
+    cwd: String,
+    created_at: u64,
+    /// Its session is being started.
+    launching: bool,
+    /// Your messages, for when it has.
+    outbox: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Started {
+    key: String,
+    at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+    /// Listed however long ago it last ran: threads you started or opened (not routine runs).
+    #[serde(default)]
+    keep: bool,
+}
+
+fn load_started(path: &Path) -> HashMap<String, Started> {
+    let mut started: HashMap<String, Started> =
+        std::fs::read_to_string(path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+    let now = now_ms();
+    started.retain(|_, t| now.saturating_sub(t.at) < STARTED_KEEP_MS);
+    started
+}
+
+/// Remembers `sid` as `thread` and saves; routine runs past the newest `STARTED_MAX` are forgotten.
+fn remember(path: &Path, started: &mut HashMap<String, Started>, sid: &str, thread: Started) {
+    started.insert(sid.to_string(), thread);
+    let runs = started.values().filter(|t| !t.keep).count();
+    if runs > STARTED_MAX {
+        let mut old: Vec<(String, u64)> = started.iter().filter(|(_, t)| !t.keep).map(|(sid, t)| (sid.clone(), t.at)).collect();
+        old.sort_by_key(|(_, at)| *at);
+        for (sid, _) in old.into_iter().take(runs - STARTED_MAX) {
+            started.remove(&sid);
+        }
+    }
+    save_started(path, started);
+}
+
+fn save_started(path: &Path, started: &HashMap<String, Started>) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(started) {
+        if let Err(e) = write_private(path, &bytes) {
+            log::warn!("[claude] couldn't save the threads littleguys started: {e}");
+        }
+    }
 }
 
 #[derive(Default)]
 struct Session {
     id: String,
+    /// The thread key littleguys gave it, when littleguys started it.
+    key: Option<String>,
+    /// Listed however long ago it last ran (a thread you started or opened).
+    kept: bool,
     /// The short id `claude attach|stop` take (background sessions).
     short_id: Option<String>,
     background: bool,
@@ -161,6 +315,8 @@ struct Session {
     /// Your messages waiting for the session.
     outbox: Vec<String>,
     delivering: bool,
+    /// How many times the outbox was handed over (a routine waits for its message's turn).
+    handed: u64,
 }
 
 impl Session {
@@ -169,7 +325,13 @@ impl Session {
     }
 
     fn key(&self) -> String {
-        keys::thread(AGENT_ID, &self.id)
+        self.key.clone().unwrap_or_else(|| keys::thread(AGENT_ID, &self.id))
+    }
+
+    /// The messages waiting for it, handed over.
+    fn take_outbox(&mut self) -> Vec<String> {
+        self.handed += 1;
+        std::mem::take(&mut self.outbox)
     }
 
     fn run_id(&self) -> String {
@@ -177,12 +339,14 @@ impl Session {
     }
 
     fn listable(&self, now: u64) -> bool {
-        self.running || self.busy || now.saturating_sub(self.updated_at.max(self.started_at)) < LIST_WINDOW_MS
+        self.running || self.busy || self.kept || now.saturating_sub(self.updated_at.max(self.started_at)) < LIST_WINDOW_MS
     }
 
-    /// In the archive rather than the thread list. Never while it runs.
+    /// In the archive rather than the thread list. Never while it runs, and never a routine's
+    /// run (those stay with their routine).
     fn archived(&self) -> bool {
-        !self.running && !self.busy && self.archived.unwrap_or(self.finished)
+        let routine_run = self.key.as_deref().and_then(keys::split).is_some_and(|(_, rest)| rest.starts_with("cron:"));
+        !self.running && !self.busy && !routine_run && self.archived.unwrap_or(self.finished)
     }
 
     fn followed(&self, now: u64) -> bool {
@@ -252,6 +416,13 @@ impl ClaudeCodeClient {
             url: Some("This Mac".into()),
             ..Default::default()
         };
+        let scheduler = LocalScheduler::new(&data_dir, &id);
+        let started_path = data_dir.join(format!("claude-threads-{id}.json"));
+        let mut st = State { started: load_started(&started_path), ..Default::default() };
+        // Threads littleguys started or opened show up again, however old.
+        for sid in st.started.keys().cloned().collect::<Vec<_>>() {
+            st.session(&sid);
+        }
         Self {
             inner: Arc::new(Inner {
                 id,
@@ -265,7 +436,9 @@ impl ClaudeCodeClient {
                 poke: AtomicBool::new(false),
                 wake: Notify::new(),
                 claude: Mutex::new(None),
-                st: Mutex::new(State::default()),
+                st: Mutex::new(st),
+                scheduler,
+                started_path,
             }),
         }
     }
@@ -282,6 +455,7 @@ impl ClaudeCodeClient {
         if self.inner.started.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.inner.scheduler.start(Arc::new(Runner(Arc::downgrade(&self.inner))));
         let inner = self.inner.clone();
         tauri::async_runtime::spawn(async move { run(inner).await });
     }
@@ -289,6 +463,7 @@ impl ClaudeCodeClient {
     /// Stop for good (bot removed or turned off).
     pub fn stop(&self) {
         self.inner.stopped.store(true, Ordering::SeqCst);
+        self.inner.scheduler.stop();
         self.inner.wake.notify_one();
     }
 
@@ -318,6 +493,7 @@ impl ClaudeCodeClient {
                 let approvals: Vec<Value> = st.approvals.values().map(|a| a.payload.clone()).collect();
                 return Ok(json!({ "approvals": approvals }));
             }
+            m if m.starts_with("cron.") => return inner.scheduler.handle(m, params).await,
             _ => {}
         }
         if !inner.st.lock().unwrap().connected {
@@ -326,10 +502,32 @@ impl ClaudeCodeClient {
         match method {
             "agents.list" => Ok(agents_list(inner)),
             "sessions.list" => Ok(sessions_list(inner, &params)),
+            "sessions.create" => sessions_create(inner, &params),
             "sessions.patch" => sessions_patch(inner, &params),
             "chat.history" => chat_history(inner, &params).await,
             "chat.send" => chat_send(inner, &params),
-            "chat.abort" => Err(RpcError::new("UNSUPPORTED", "Press Esc in the session's terminal (claude attach) to stop it.")),
+            "chat.abort" => chat_abort(inner, &params).await,
+            "sessions.past" => sessions_past(inner).await,
+            "sessions.open" => sessions_open(inner, &params),
+            // The folder of the thread you're on (`sessionKey`), else the one you last worked in.
+            "agents.workspace.list" | "agents.workspace.get" => {
+                check_agent(&params)?;
+                let root = folder_of(inner, &params);
+                let method = method.to_string();
+                blocking(move || crate::localfs::handle(&root, AGENT_ID, &method, &params).map(|out| crate::localfs::with_root(out, &root))).await
+            }
+            "skills.status" => skills_status(inner, &params).await,
+            "skills.read" => skills_read(inner, &params).await,
+            "commands.list" => commands_list(inner, &params).await,
+            "mcp.servers.list" => {
+                check_agent(&params)?;
+                let cwd = folder_of(inner, &params);
+                blocking(move || Ok(json!({ "servers": mcp_servers(&cwd, &home()) }))).await
+            }
+            "plugins.list" => {
+                let cwd = folder_of(inner, &params);
+                blocking(move || Ok(json!({ "plugins": acp::read_claude_plugins(&cwd, &home()) }))).await
+            }
             "exec.approval.resolve" => approval_resolve(inner, &params),
             other => Err(unsupported(other)),
         }
@@ -659,7 +857,7 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
         let mut st = inner.st.lock().unwrap();
         let st = &mut *st;
         let is_new = !st.sessions.contains_key(&sid);
-        let s = st.sessions.entry(sid.clone()).or_insert_with(|| Session::new(&sid));
+        let s = st.session(&sid);
         s.hooked = true;
         s.last_hook = Some(Instant::now());
         s.updated_at = now_ms();
@@ -695,7 +893,7 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
                 s.set_busy(true, &mut emits);
                 // A terminal session that was idle: what you sent rides along with this prompt.
                 if !s.outbox.is_empty() && !s.background && !s.delivering {
-                    reply = handover(&std::mem::take(&mut s.outbox));
+                    reply = handover(&s.take_outbox());
                 }
             }
             "Notification" => match input.get("notification_type").and_then(Value::as_str) {
@@ -712,7 +910,7 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
                 s.waiting_for = None;
                 if !s.outbox.is_empty() && !s.delivering {
                     // Your message keeps the turn going.
-                    let reason = handover(&std::mem::take(&mut s.outbox));
+                    let reason = handover(&s.take_outbox());
                     reply = json!({ "decision": "block", "reason": reason }).to_string();
                 } else {
                     s.set_busy(false, &mut emits);
@@ -916,7 +1114,7 @@ async fn poll_agents(inner: &Arc<Inner>) {
             if !known && !running && now.saturating_sub(l.started_at) >= LIST_WINDOW_MS {
                 continue;
             }
-            let s = st.sessions.entry(l.session_id.clone()).or_insert_with(|| Session::new(&l.session_id));
+            let s = st.session(&l.session_id);
             changed |= !known
                 || s.running != running
                 || s.finished != l.finished()
@@ -1542,6 +1740,7 @@ fn read_history(path: &Path) -> std::io::Result<Vec<Value>> {
 
 fn agents_list(inner: &Inner) -> Value {
     let name = inner.status.lock().unwrap().gateway_name.clone();
+    let folder = inner.st.lock().unwrap().default_folder();
     json!({
         "defaultId": AGENT_ID,
         "mainKey": "main",
@@ -1549,7 +1748,8 @@ fn agents_list(inner: &Inner) -> Value {
             "id": AGENT_ID,
             "name": name,
             "identity": { "name": name, "avatarUrl": super::claude_face() },
-            "workspace": dirs::home_dir().map(|h| h.display().to_string()),
+            // Where new threads start (they can pick another folder).
+            "workspace": folder,
         }],
     })
 }
@@ -1566,7 +1766,23 @@ fn sessions_list(inner: &Inner, params: &Value) -> Value {
         .collect();
     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at.max(s.started_at)));
     sessions.truncate(limit);
-    let rows: Vec<Value> = sessions.iter().map(|s| session_row(s)).collect();
+    // Drafts are never archived.
+    let drafts = st.drafts.iter().filter(|_| archived != Some(true)).map(|(key, d)| {
+        json!({
+            "key": key,
+            "agentId": AGENT_ID,
+            "kind": "direct",
+            "workspaceDir": d.cwd,
+            "createdAt": d.created_at,
+            "updatedAt": d.created_at,
+            "unread": false,
+            "pinned": false,
+            "archived": false,
+            "hasActiveRun": d.launching,
+            "status": if d.launching { "running" } else { "done" },
+        })
+    });
+    let rows: Vec<Value> = drafts.chain(sessions.iter().map(|s| session_row(s))).collect();
     json!({ "count": rows.len(), "sessions": rows })
 }
 
@@ -1595,34 +1811,53 @@ fn sessions_patch(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
     let Some(archived) = params.get("archived").and_then(Value::as_bool) else {
         return Err(unsupported("sessions.patch"));
     };
-    let (key, sid) = session_of(params)?;
+    let (key, thread) = thread_of(inner, params)?;
     let row = {
         let mut st = inner.st.lock().unwrap();
-        let s = st.sessions.get_mut(&sid).ok_or_else(|| RpcError::new("NOT_FOUND", "Not a Claude Code session."))?;
-        s.archived = Some(archived);
-        session_row(s)
+        match thread {
+            Thread::Draft => return Err(RpcError::new("INVALID_REQUEST", "This thread hasn't started yet.")),
+            Thread::Session(sid) => {
+                let s = st.sessions.get_mut(&sid).ok_or_else(|| RpcError::new("NOT_FOUND", "Not a Claude Code session."))?;
+                s.archived = Some(archived);
+                session_row(s)
+            }
+        }
     };
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "patch" }));
     Ok(row)
 }
 
-fn session_of(params: &Value) -> Result<(String, String), RpcError> {
+/// The thread a call is about.
+fn thread_of(inner: &Inner, params: &Value) -> Result<(String, Thread), RpcError> {
     let key = params
         .get("sessionKey")
         .or_else(|| params.get("key"))
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::new("INVALID_REQUEST", "sessionKey is required"))?;
-    match keys::split(key) {
-        Some((AGENT_ID, rest)) if rest.starts_with("dashboard:") => {
-            let sid = keys::last_id(key).unwrap_or_default();
-            Ok((key.to_string(), sid))
-        }
-        _ => Err(RpcError::new("NOT_FOUND", "Not a Claude Code session.")),
+    let thread = inner.st.lock().unwrap().thread(key).ok_or_else(|| RpcError::new("NOT_FOUND", "Not a Claude Code session."))?;
+    Ok((key.to_string(), thread))
+}
+
+/// A new thread: a draft until its first message starts its session.
+fn sessions_create(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
+    if let Some(agent) = params.get("agentId").and_then(Value::as_str).filter(|a| *a != AGENT_ID) {
+        return Err(RpcError::new("NOT_FOUND", format!("no guy {agent} here")));
     }
+    let key = keys::thread(AGENT_ID, &uuid::Uuid::new_v4().to_string());
+    {
+        let mut st = inner.st.lock().unwrap();
+        let cwd = st.default_folder();
+        st.drafts.insert(key.clone(), Draft { cwd, created_at: now_ms(), launching: false, outbox: Vec::new() });
+    }
+    emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "created" }));
+    Ok(json!({ "ok": true, "key": key }))
 }
 
 async fn chat_history(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
-    let (key, sid) = session_of(params)?;
+    let (key, thread) = thread_of(inner, params)?;
+    let Thread::Session(sid) = thread else {
+        return Ok(json!({ "sessionKey": key, "messages": [], "hasMore": false, "inFlightRun": Value::Null }));
+    };
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(200).clamp(1, 1000) as usize;
     let path = {
         let mut st = inner.st.lock().unwrap();
@@ -1650,13 +1885,37 @@ async fn chat_history(inner: &Inner, params: &Value) -> Result<Value, RpcError> 
 }
 
 /// Your reply: handed over when the session's turn ends, or the session is resumed with it.
+/// A new thread's first message starts its session (in `cwd`, when you picked a folder).
 fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
-    let (key, sid) = session_of(params)?;
-    let text = params.get("message").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
-    if text.is_empty() {
+    let (key, thread) = thread_of(inner, params)?;
+    let text = params.get("message").and_then(Value::as_str).map(str::trim).unwrap_or_default();
+    let attachments = params.get("attachments").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    if text.is_empty() && attachments.is_empty() {
         return Err(RpcError::new("INVALID_REQUEST", "Write something first."));
     }
+    let text = with_attachments(&inner.data_dir, text, attachments)?;
     let run_id = uuid::Uuid::new_v4().to_string();
+    let sid = match thread {
+        Thread::Session(sid) => sid,
+        Thread::Draft => {
+            let cwd = params.get("cwd").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+            let start = {
+                let mut st = inner.st.lock().unwrap();
+                let fallback = st.default_folder();
+                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft { cwd: fallback, created_at: now_ms(), launching: false, outbox: Vec::new() });
+                if let Some(cwd) = cwd.filter(|_| !d.launching) {
+                    d.cwd = cwd;
+                }
+                d.outbox.push(text);
+                !std::mem::replace(&mut d.launching, true)
+            };
+            if start {
+                let inner = inner.clone();
+                tauri::async_runtime::spawn(async move { start_draft(inner, key).await });
+            }
+            return Ok(json!({ "runId": run_id, "status": "started" }));
+        }
+    };
     let mut deliver_now = false;
     let mut settled = false;
     {
@@ -1713,7 +1972,7 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
         st.sessions.get_mut(&sid).map(|s| {
-            let text = std::mem::take(&mut s.outbox).join("\n\n");
+            let text = s.take_outbox().join("\n\n");
             (text, s.short_id.clone(), s.running && s.background, s.cwd.clone(), s.key())
         })
     };
@@ -1764,6 +2023,8 @@ async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, ru
     // A prompt starting with '-' would read as a flag.
     let prompt = if text.starts_with('-') { format!(" {text}") } else { text.to_string() };
     let mut cmd = cli::command(&claude);
+    // No other flags: a background session keeps the options it started with, and any
+    // passed here would start a copy of it instead.
     cmd.arg(&prompt).args(["--resume", sid, "--bg"]);
     if Path::new(cwd).is_dir() {
         cmd.current_dir(cwd);
@@ -1773,6 +2034,589 @@ async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, ru
         log::warn!("[claude] resuming {sid} started a copy: {out}");
     }
     Ok(())
+}
+
+// ---- new sessions -------------------------------------------------------------------------
+
+/// Starts a draft's session with what you wrote; the thread is that session from then on.
+async fn start_draft(inner: Arc<Inner>, key: String) {
+    let job = {
+        let mut st = inner.st.lock().unwrap();
+        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox).join("\n\n"), d.cwd.clone()))
+    };
+    let Some((text, cwd)) = job else { return };
+    let result = launch(&inner, &key, &cwd, &text, None, true).await;
+    let mut emits: Emits = vec![refresh()];
+    {
+        let mut st = inner.st.lock().unwrap();
+        match result {
+            Ok(sid) => {
+                // What you wrote while it started waits for its turn to end.
+                if let Some(d) = st.drafts.remove(&key) {
+                    st.session(&sid).outbox.extend(d.outbox);
+                }
+            }
+            Err(e) => {
+                log::warn!("[claude] couldn't start a session in {cwd}: {e}");
+                if let Some(d) = st.drafts.get_mut(&key) {
+                    d.launching = false;
+                    d.outbox.clear();
+                }
+                let run_id = uuid::Uuid::new_v4().to_string();
+                emits.push(("chat", json!({ "sessionKey": key, "runId": run_id, "state": "error", "errorMessage": format!("Couldn't start a session: {e}") })));
+            }
+        }
+    }
+    flush(&inner, emits);
+    inner.poke.store(true, Ordering::SeqCst);
+}
+
+/// `claude "<text>" --bg` in `cwd`: a new background session, shown as thread `key`.
+/// Resolves to its session id once Claude Code lists it.
+async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Option<&str>, keep: bool) -> Result<String, String> {
+    let claude = inner.claude.lock().unwrap().clone().ok_or("Claude Code isn't installed")?;
+    if !Path::new(cwd).is_dir() {
+        return Err(format!("{cwd} isn't a folder on this Mac."));
+    }
+    // A prompt starting with '-' would read as a flag.
+    let prompt = if text.starts_with('-') { format!(" {text}") } else { text.to_string() };
+    let mut cmd = cli::command(&claude);
+    cmd.arg(&prompt).arg("--bg").current_dir(cwd);
+    add_attachments_dir(&mut cmd, &inner.data_dir);
+    if let Some(name) = name {
+        cmd.args(["--name", name]);
+    }
+    let out = output(cmd, Duration::from_secs(60)).await?;
+    let short = backgrounded_id(&out).ok_or_else(|| format!("Claude Code didn't say which session it started ({})", first_line(&out)))?;
+    inner.st.lock().unwrap().pending.insert(short.clone(), key.to_string());
+    let found = find_session(inner, &claude, &short).await;
+    let mut emits: Emits = vec![refresh()];
+    let result = {
+        let mut st = inner.st.lock().unwrap();
+        let st = &mut *st;
+        match found {
+            // Still pending: it gets its key when it reports.
+            None => Err("it started, but hasn't shown up in `claude agents` yet.".to_string()),
+            Some(sid) => {
+                st.pending.remove(&short);
+                let thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep };
+                remember(&inner.started_path, &mut st.started, &sid, thread);
+                let s = st.session(&sid);
+                s.kept = keep;
+                if s.key.as_deref() != Some(key) {
+                    // Its hooks reported before littleguys knew it: show it under its key, from the top.
+                    s.key = Some(key.to_string());
+                    s.tail = Some(Tail::default());
+                }
+                s.tail.get_or_insert_with(Tail::default);
+                s.background = true;
+                s.short_id = Some(short.clone());
+                s.running = true;
+                if s.cwd.is_empty() {
+                    s.cwd = cwd.to_string();
+                }
+                if s.name.is_none() {
+                    s.name = name.map(str::to_string);
+                }
+                let now = now_ms();
+                if s.started_at == 0 {
+                    s.started_at = now;
+                }
+                s.updated_at = s.updated_at.max(now);
+                if s.turn == 0 {
+                    // Its hooks take a moment to report; don't let `claude agents` say otherwise meanwhile.
+                    s.last_hook = Some(Instant::now());
+                    s.set_busy(true, &mut emits);
+                }
+                Ok(sid)
+            }
+        }
+    };
+    flush(inner, emits);
+    result
+}
+
+/// The id of the session `claude --bg` printed `short` for: from its hooks, or `claude agents`.
+async fn find_session(inner: &Inner, claude: &Path, short: &str) -> Option<String> {
+    let deadline = Instant::now() + LAUNCH_FIND;
+    loop {
+        let hooked = inner.st.lock().unwrap().sessions.keys().find(|sid| sid.starts_with(short)).cloned();
+        if hooked.is_some() {
+            return hooked;
+        }
+        let listed = list_agents(claude).await.and_then(|all| all.into_iter().find(|l| l.short_id.as_deref() == Some(short)));
+        if let Some(l) = listed {
+            return Some(l.session_id);
+        }
+        if Instant::now() > deadline || inner.stopped.load(Ordering::SeqCst) {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// The short id `claude --bg` prints: `backgrounded · 31009426 · <name>`, then
+/// `claude attach 31009426` among its hints.
+fn backgrounded_id(stdout: &str) -> Option<String> {
+    let id = |token: Option<&str>| token.filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric())).map(str::to_string);
+    let lines = || stdout.lines().map(str::trim);
+    lines()
+        .find_map(|l| id(l.strip_prefix("backgrounded")?.trim_start_matches(|c: char| c.is_whitespace() || c == '·').split_whitespace().next()))
+        .or_else(|| lines().find_map(|l| id(l.strip_prefix("claude attach ")?.split_whitespace().next())))
+}
+
+// ---- routines -----------------------------------------------------------------------------
+
+struct Runner(Weak<Inner>);
+
+impl RoutineRunner for Runner {
+    /// A new background session for each run (in the routine's folder, `payload.cwd`),
+    /// or a message to the thread it targets; resolves when that turn ends.
+    fn run_turn(&self, agent_id: String, target: String, job_id: String, message: String) -> BoxFuture<'static, Result<TurnOutcome, String>> {
+        let inner = self.0.clone();
+        Box::pin(async move {
+            let inner = inner.upgrade().ok_or("littleguys is shutting down")?;
+            if agent_id != AGENT_ID {
+                return Err(format!("no guy {agent_id} here"));
+            }
+            if !inner.st.lock().unwrap().connected {
+                return Err("littleguys isn't following Claude Code right now.".into());
+            }
+            let (key, sid, done): (String, String, Box<dyn Fn(&Session) -> bool + Send + Sync>) = match target.strip_prefix("session:") {
+                None => {
+                    let job = inner.scheduler.handle("cron.get", json!({ "id": job_id })).await.ok();
+                    let text = |p: &str| job.as_ref().and_then(|j| j.pointer(p)).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                    let cwd = text("/payload/cwd").unwrap_or_else(|| inner.st.lock().unwrap().default_folder());
+                    let key = keys::routine_run(AGENT_ID, &job_id, &uuid::Uuid::new_v4().to_string());
+                    let sid = launch(&inner, &key, &cwd, &message, text("/name").as_deref(), false).await?;
+                    (key, sid, Box::new(|s: &Session| s.turn > 0 && !s.busy))
+                }
+                Some(key) => {
+                    let (sid, before) = {
+                        let st = inner.st.lock().unwrap();
+                        let sid = match st.thread(key) {
+                            Some(Thread::Session(sid)) => sid,
+                            Some(Thread::Draft) => return Err("That thread hasn't started yet. Write to it once, then this routine can continue it.".into()),
+                            None => return Err("That thread is gone.".into()),
+                        };
+                        let s = st.sessions.get(&sid);
+                        if s.is_some_and(|s| s.running && !s.background) {
+                            return Err("That session is open in a terminal, so only you can write to it.".into());
+                        }
+                        (sid.clone(), s.map_or(0, |s| s.handed))
+                    };
+                    chat_send(&inner, &json!({ "sessionKey": key, "message": message })).map_err(|e| e.message)?;
+                    (key.to_string(), sid, Box::new(move |s: &Session| s.handed > before && !s.busy && !s.delivering))
+                }
+            };
+            let said = wait_turn(&inner, &sid, done.as_ref()).await?;
+            Ok(TurnOutcome { session_key: key, summary: said.map(|t| truncate(&t, 300)) })
+        })
+    }
+
+    fn emit(&self, name: &str, payload: Value) {
+        if let Some(inner) = self.0.upgrade() {
+            emit(&inner, name, payload);
+        }
+    }
+}
+
+/// Waits for a routine's turn to end (`done`); the session's last words.
+async fn wait_turn(inner: &Inner, sid: &str, done: &(dyn Fn(&Session) -> bool + Send + Sync)) -> Result<Option<String>, String> {
+    let deadline = Instant::now() + ROUTINE_MAX;
+    loop {
+        {
+            let st = inner.st.lock().unwrap();
+            let s = st.sessions.get(sid).ok_or("littleguys lost track of the session")?;
+            if done(s) {
+                return Ok(s.said.clone());
+            }
+        }
+        if inner.stopped.load(Ordering::SeqCst) {
+            return Err("littleguys stopped following Claude Code before it finished.".into());
+        }
+        if Instant::now() > deadline {
+            return Err(format!("Still going after {} hours, so littleguys stopped waiting.", ROUTINE_MAX.as_secs() / 3600));
+        }
+        tokio::time::sleep(TICK).await;
+    }
+}
+
+// ---- stop, past sessions ------------------------------------------------------------------
+
+/// Stops a background session (`claude stop`); writing to it again resumes it.
+async fn chat_abort(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    let (key, thread) = thread_of(inner, params)?;
+    let Thread::Session(sid) = thread else { return Ok(json!({ "ok": true, "aborted": false, "runIds": [] })) };
+    let (short, background, live, run_id) = {
+        let st = inner.st.lock().unwrap();
+        let s = st.sessions.get(&sid).ok_or_else(|| RpcError::new("NOT_FOUND", "littleguys lost track of this session."))?;
+        (s.short_id.clone(), s.background, s.running || s.busy, s.run_id())
+    };
+    if !live {
+        return Ok(json!({ "ok": true, "aborted": false, "runIds": [] }));
+    }
+    let short = match short {
+        Some(short) if background => short,
+        _ => return Err(RpcError::new("UNSUPPORTED", "This session runs in a terminal: press Esc there to stop it.")),
+    };
+    let claude = inner.claude.lock().unwrap().clone().ok_or_else(|| RpcError::new("UNAVAILABLE", "Claude Code isn't installed"))?;
+    run_cli(&claude, &["stop", &short], CLI_TIMEOUT).await.map_err(|e| RpcError::new("UNAVAILABLE", format!("Couldn't stop it: {e}")))?;
+    let mut emits: Emits = vec![refresh()];
+    {
+        let mut st = inner.st.lock().unwrap();
+        if let Some(s) = st.sessions.get_mut(&sid) {
+            s.running = false;
+            s.waiting_for = None;
+            s.set_busy(false, &mut emits);
+        }
+    }
+    flush(inner, emits);
+    emit(inner, "chat", json!({ "sessionKey": key, "runId": run_id, "state": "aborted" }));
+    Ok(json!({ "ok": true, "aborted": true, "runIds": [run_id] }))
+}
+
+/// Every session Claude Code kept a transcript of, newest first (the newest `PAST_MAX`).
+async fn sessions_past(inner: &Arc<Inner>) -> Result<Value, RpcError> {
+    let projects = claude_home().join("projects");
+    let found = blocking(move || Ok(past_sessions(&projects, PAST_MAX))).await?;
+    let st = inner.st.lock().unwrap();
+    let now = now_ms();
+    let rows: Vec<Value> = found
+        .into_iter()
+        .map(|p| {
+            let known = st.sessions.get(&p.session_id);
+            let key = known.map_or_else(|| keys::thread(AGENT_ID, &p.session_id), Session::key);
+            json!({
+                "sessionId": p.session_id,
+                "cwd": p.cwd,
+                "title": known.and_then(Session::title).or(p.title),
+                "updatedAt": p.updated_at,
+                "key": key,
+                "inThreads": known.is_some_and(|s| s.listable(now) && (s.running || s.transcript.is_some())),
+            })
+        })
+        .collect();
+    Ok(json!({ "sessions": rows }))
+}
+
+/// A past session, as a thread that stays in the list.
+fn sessions_open(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
+    let sid = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::new("INVALID_REQUEST", "sessionId is required"))?
+        .to_string();
+    let cwd = params.get("cwd").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+    let key = {
+        let mut st = inner.st.lock().unwrap();
+        let st = &mut *st;
+        let s = st.session(&sid);
+        if s.cwd.is_empty() {
+            s.cwd = cwd.clone().unwrap_or_default();
+        }
+        s.kept = true;
+        let updated = params.get("updatedAt").and_then(Value::as_u64).unwrap_or_default();
+        s.updated_at = s.updated_at.max(updated);
+        let (key, cwd) = (s.key(), (!s.cwd.is_empty()).then(|| s.cwd.clone()));
+        let at = now_ms();
+        let thread = st.started.get(&sid).cloned().map_or(Started { key: key.clone(), at, cwd: cwd.clone(), keep: true }, |t| Started { keep: true, ..t });
+        remember(&inner.started_path, &mut st.started, &sid, thread);
+        key
+    };
+    emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "opened" }));
+    Ok(json!({ "key": key }))
+}
+
+#[derive(Debug, PartialEq)]
+struct PastSession {
+    session_id: String,
+    cwd: String,
+    title: Option<String>,
+    updated_at: u64,
+}
+
+/// `~/.claude/projects/*/<sessionId>.jsonl`, newest first: each one's folder (from its
+/// lines), and its title (the last AI title, else its first prompt).
+fn past_sessions(projects: &Path, max: usize) -> Vec<PastSession> {
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    for dir in std::fs::read_dir(projects).into_iter().flatten().flatten() {
+        for file in std::fs::read_dir(dir.path()).into_iter().flatten().flatten() {
+            let path = file.path();
+            if path.extension().is_some_and(|e| e == "jsonl") {
+                let modified = file.metadata().map(|m| modified_ms(&m)).unwrap_or(0);
+                files.push((path, modified));
+            }
+        }
+    }
+    files.sort_by_key(|(_, m)| std::cmp::Reverse(*m));
+    files
+        .into_iter()
+        .filter_map(|(path, updated_at)| {
+            let session_id = path.file_stem()?.to_str()?.to_string();
+            let len = std::fs::metadata(&path).ok()?.len();
+            let (head, _, _) = read_lines(&path, 0, len.min(PAST_HEAD_BYTES), Vec::new(), false).ok()?;
+            let cwd = head.iter().find_map(|l| l.get("cwd").and_then(Value::as_str).map(str::to_string))?;
+            let from = len.saturating_sub(PAST_TAIL_BYTES);
+            let (tail, _, _) = read_lines(&path, from, len, Vec::new(), from > 0).unwrap_or_default();
+            let title = tail
+                .iter()
+                .rev()
+                .find_map(|l| line_meta(l).ai_title)
+                .or_else(|| head.iter().find_map(|l| line_meta(l).prompt).map(|p| truncate(first_line(&p), 80)));
+            Some(PastSession { session_id, cwd, title, updated_at })
+        })
+        .take(max)
+        .collect()
+}
+
+// ---- attachments ------------------------------------------------------------------------
+
+/// Where attached files are saved; sessions get `--add-dir` to it so they can read them.
+fn attachments_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("claude-attachments")
+}
+
+/// Saves a message's attachments and lists them after its text, the way Claude Code
+/// reads attached files (and littleguys shows them): "Attached files:", `- name: /path`.
+fn with_attachments(data_dir: &Path, text: &str, attachments: &[Value]) -> Result<String, RpcError> {
+    use base64::Engine;
+    if attachments.is_empty() {
+        return Ok(text.to_string());
+    }
+    let dir = attachments_dir(data_dir).join(format!("{}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), &uuid::Uuid::new_v4().to_string()[..8]));
+    std::fs::create_dir_all(&dir).map_err(|e| RpcError::new("UNAVAILABLE", format!("Couldn't save the attachments: {e}")))?;
+    let mut list = Vec::new();
+    for (i, attachment) in attachments.iter().enumerate() {
+        let raw = attachment.get("content").or_else(|| attachment.get("data")).and_then(Value::as_str).unwrap_or_default();
+        let data = raw.split_once(";base64,").map_or(raw, |(_, d)| d);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| RpcError::new("INVALID_REQUEST", "An attachment isn't valid base64."))?;
+        let name = attachment.get("fileName").and_then(Value::as_str).map(safe_file_name).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("attachment-{}", i + 1));
+        let path = dir.join(&name);
+        std::fs::write(&path, bytes).map_err(|e| RpcError::new("UNAVAILABLE", format!("Couldn't save {name}: {e}")))?;
+        list.push(format!("- {name}: {}", path.display()));
+    }
+    let text = text.trim();
+    let gap = if text.is_empty() { "" } else { "\n\n" };
+    Ok(format!("{text}{gap}Attached files:\n{}", list.join("\n")))
+}
+
+/// Lets a session littleguys starts read the files attached to your messages (from the
+/// start: resuming keeps the options a background session started with).
+fn add_attachments_dir(cmd: &mut tokio::process::Command, data_dir: &Path) {
+    let dir = attachments_dir(data_dir);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        cmd.arg("--add-dir").arg(dir);
+    }
+}
+
+/// A file name without folders, control characters or a leading dot.
+fn safe_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    base.chars().filter(|c| !c.is_control()).collect::<String>().trim().trim_start_matches('.').to_string()
+}
+
+// ---- the folder you work in: skills, commands, MCP servers, plugins -----------------------
+
+fn home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/var/empty"))
+}
+
+/// Run file work off the async runtime.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, RpcError> + Send + 'static) -> Result<T, RpcError> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| RpcError::new("INTERNAL", e.to_string()))?
+}
+
+/// `agentId`, when given, must be this guy's.
+fn check_agent(params: &Value) -> Result<(), RpcError> {
+    match params.get("agentId").and_then(Value::as_str) {
+        Some(id) if id != AGENT_ID => Err(RpcError::new("NOT_FOUND", format!("no guy {id} here"))),
+        _ => Ok(()),
+    }
+}
+
+/// The folder a call is about: its thread's, else the one you last worked in.
+fn folder_of(inner: &Inner, params: &Value) -> PathBuf {
+    let st = inner.st.lock().unwrap();
+    let key = params.get("sessionKey").and_then(Value::as_str);
+    let cwd = key.and_then(|key| match st.thread(key)? {
+        Thread::Session(sid) => st.sessions.get(&sid).map(|s| s.cwd.clone()),
+        Thread::Draft => st.drafts.get(key).map(|d| d.cwd.clone()),
+    });
+    PathBuf::from(cwd.filter(|c| Path::new(c).is_dir()).unwrap_or_else(|| st.default_folder()))
+}
+
+/// Plugins Claude Code has on for `cwd`: (name, install folder).
+fn plugin_folders(cwd: &Path, home: &Path) -> Vec<(String, PathBuf)> {
+    let Some(installed) = acp::read_json(&home.join(".claude/plugins/installed_plugins.json")) else { return Vec::new() };
+    let here = cwd.display().to_string();
+    acp::read_claude_plugins(cwd, home)
+        .into_iter()
+        .filter(|p| p["enabled"] == true)
+        .filter_map(|p| {
+            let entries = installed.get("plugins")?.get(p["id"].as_str()?)?;
+            let entries: Vec<&Value> = match entries {
+                Value::Array(list) => list.iter().collect(),
+                other => vec![other],
+            };
+            let entry = entries.into_iter().find(|e| e.get("projectPath").and_then(Value::as_str).is_none_or(|p| p == here))?;
+            Some((p["name"].as_str()?.to_string(), PathBuf::from(entry.get("installPath")?.as_str()?)))
+        })
+        .collect()
+}
+
+/// Every skill Claude Code loads in `cwd`: the folder's, yours, then your plugins' (`plugin:skill`).
+fn skills_in(cwd: &Path, home: &Path) -> Vec<acp::SkillFile> {
+    let mut skills = acp::scan_skills(&acp::claude_skill_dirs(cwd, home));
+    for (plugin, dir) in plugin_folders(cwd, home) {
+        for mut skill in acp::scan_skills(&[(dir.join("skills"), "plugin")]) {
+            skill.name = format!("{plugin}:{}", skill.name);
+            skills.push(skill);
+        }
+    }
+    skills
+}
+
+/// A custom slash command: a markdown file under a `commands` folder.
+struct CommandFile {
+    name: String,
+    description: Option<String>,
+    /// `project`, `personal` or `plugin`.
+    source: &'static str,
+    path: PathBuf,
+}
+
+/// `.claude/commands/**/*.md` (the folder's, then yours) and your plugins' `commands/`.
+/// Subfolders and plugins namespace them: `frontend/component.md` → `frontend:component`.
+fn commands_in(cwd: &Path, home: &Path) -> Vec<CommandFile> {
+    let mut roots: Vec<(PathBuf, Option<String>, &'static str)> =
+        vec![(cwd.join(".claude/commands"), None, "project"), (home.join(".claude/commands"), None, "personal")];
+    roots.extend(plugin_folders(cwd, home).into_iter().map(|(plugin, dir)| (dir.join("commands"), Some(plugin), "plugin")));
+    let mut seen = HashSet::new();
+    let mut found = Vec::new();
+    for (root, plugin, source) in roots {
+        let mut stack = vec![(root.clone(), 0)];
+        while let Some((dir, depth)) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten().take(MAX_COMMANDS) {
+                let path = entry.path();
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    if depth < 2 {
+                        stack.push((path, depth + 1));
+                    }
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "md") {
+                    continue;
+                }
+                let rel = path.strip_prefix(&root).unwrap_or(&path).with_extension("");
+                let local: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                let name = plugin.iter().cloned().chain(local).collect::<Vec<_>>().join(":");
+                if found.len() >= MAX_COMMANDS || !seen.insert(name.clone()) {
+                    continue;
+                }
+                let head = acp::read_head(&path, COMMAND_HEAD_BYTES).unwrap_or_default();
+                let description = acp::front_matter(&head).1.or_else(|| {
+                    let body = if head.starts_with("---") { head.splitn(3, "---").nth(2).unwrap_or_default() } else { &head };
+                    Some(truncate(first_line(body), 120)).filter(|l| !l.is_empty())
+                });
+                found.push(CommandFile { name, description, source, path });
+            }
+        }
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
+/// Built-in commands that make sense sent as a message.
+const BUILT_IN_COMMANDS: &[(&str, &str)] = &[("compact", "Summarize the conversation so far, to free up context")];
+
+/// Skills, then slash commands (marked `source: "command"`).
+async fn skills_status(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    check_agent(params)?;
+    let cwd = folder_of(inner, params);
+    blocking(move || {
+        let home = home();
+        let mut rows: Vec<Value> = skills_in(&cwd, &home).iter().map(acp::SkillFile::row).collect();
+        rows.extend(commands_in(&cwd, &home).iter().map(|c| {
+            json!({
+                "name": c.name,
+                "skillKey": format!("cmd:{}", c.name),
+                "description": c.description.clone().unwrap_or_default(),
+                "source": "command",
+                "eligible": true,
+                "disabled": false,
+                "filePath": c.path.display().to_string(),
+            })
+        }));
+        Ok(json!({ "agentId": AGENT_ID, "skills": rows, "workspaceDir": cwd.display().to_string() }))
+    })
+    .await
+}
+
+async fn skills_read(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    check_agent(params)?;
+    let name = params
+        .get("name")
+        .or_else(|| params.get("skillKey"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| RpcError::new("INVALID_REQUEST", "name is required"))?
+        .to_string();
+    let cwd = folder_of(inner, params);
+    blocking(move || {
+        let home = home();
+        let path = match name.strip_prefix("cmd:") {
+            Some(command) => commands_in(&cwd, &home).into_iter().find(|c| c.name == command).map(|c| c.path),
+            None => skills_in(&cwd, &home).into_iter().find(|s| s.name == name).map(|s| s.path),
+        };
+        let path = path.ok_or_else(|| RpcError::new("INVALID_REQUEST", format!("There's no skill called {name}.")))?;
+        let content = acp::read_capped(&path, acp::MAX_SKILL_BYTES)
+            .ok_or_else(|| RpcError::new("INVALID_REQUEST", format!("{} is too big (or unreadable) to show.", path.display())))?;
+        Ok(json!({ "name": name.trim_start_matches("cmd:"), "path": path.display().to_string(), "content": content }))
+    })
+    .await
+}
+
+/// What the composer offers after `/`: skills, custom commands, and the built-ins that work here.
+async fn commands_list(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    check_agent(params)?;
+    let cwd = folder_of(inner, params);
+    blocking(move || {
+        let home = home();
+        let entry = |name: &str, description: &str, source: &str| {
+            json!({ "name": name, "description": description, "source": source, "scope": "text", "acceptsArgs": true })
+        };
+        let mut commands: Vec<Value> = BUILT_IN_COMMANDS.iter().map(|(name, description)| entry(name, description, "native")).collect();
+        commands.extend(commands_in(&cwd, &home).iter().map(|c| {
+            entry(&c.name, c.description.as_deref().unwrap_or_default(), if c.source == "plugin" { "plugin" } else { "native" })
+        }));
+        commands.extend(skills_in(&cwd, &home).iter().map(|s| entry(&s.name, s.description.as_deref().unwrap_or_default(), "skill")));
+        Ok(json!({ "commands": commands }))
+    })
+    .await
+}
+
+/// Claude Code's MCP servers for `cwd`, then your plugins' (`plugin:server`).
+fn mcp_servers(cwd: &Path, home: &Path) -> Vec<Value> {
+    let mut servers = acp::claude_mcp_servers(cwd, home);
+    for (plugin, dir) in plugin_folders(cwd, home) {
+        let Some(config) = acp::read_json(&dir.join(".mcp.json")) else { continue };
+        let specs = config.get("mcpServers").unwrap_or(&config);
+        for mut row in acp::mcp_rows(Some(specs), "plugin", "http") {
+            row["name"] = json!(format!("{plugin}:{}", row["name"].as_str().unwrap_or_default()));
+            servers.push(row);
+        }
+    }
+    servers
 }
 
 // ---- the claude CLI -----------------------------------------------------------------------
@@ -2125,11 +2969,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let hooks = Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
         let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks);
+        let run = keys::routine_run(AGENT_ID, "job", "r-1");
         {
             let mut st = client.inner.st.lock().unwrap();
             st.connected = true;
-            for (sid, finished) in [("done", true), ("blocked", false)] {
-                let s = st.sessions.entry(sid.to_string()).or_insert_with(|| Session::new(sid));
+            st.started.insert("run".into(), Started { key: run.clone(), at: now_ms(), ..Default::default() });
+            for (sid, finished) in [("done", true), ("blocked", false), ("run", true)] {
+                let s = st.session(sid);
                 s.finished = finished;
                 s.started_at = now_ms();
                 s.transcript = Some(dir.join(format!("{sid}.jsonl")));
@@ -2142,11 +2988,12 @@ mod tests {
         };
         let done = keys::thread(AGENT_ID, "done");
         let blocked = keys::thread(AGENT_ID, "blocked");
-        assert_eq!(keys_of(client.call("sessions.list", json!({})).await.unwrap()), [blocked.clone()]);
+        // A routine's run stays with its routine.
+        assert_eq!(keys_of(client.call("sessions.list", json!({})).await.unwrap()), [run.clone(), blocked.clone()]);
         let archived = client.call("sessions.list", json!({ "archived": true })).await.unwrap();
         assert_eq!(keys_of(archived.clone()), [done.clone()]);
         assert_eq!(archived["sessions"][0]["archived"], true);
-        assert_eq!(keys_of(client.call("sessions.list", json!({ "archived": "all" })).await.unwrap()).len(), 2);
+        assert_eq!(keys_of(client.call("sessions.list", json!({ "archived": "all" })).await.unwrap()).len(), 3);
 
         let row = client.call("sessions.patch", json!({ "key": done, "archived": false })).await.unwrap();
         assert_eq!(row["archived"], false);
@@ -2161,6 +3008,242 @@ mod tests {
         s.set_busy(false, &mut emits);
         assert!(s.archived());
         drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backgrounded_sessions_say_their_short_id() {
+        let out = "warning: --bg manages the session id\nbackgrounded · 31009426 · littleguys probe\n  claude agents             list sessions\n  claude attach 31009426    open in this terminal\n";
+        assert_eq!(backgrounded_id(out).as_deref(), Some("31009426"));
+        assert_eq!(backgrounded_id("backgrounded · ab12cd34").as_deref(), Some("ab12cd34"));
+        assert_eq!(backgrounded_id("  claude attach 0f0f0f0f    open in this terminal").as_deref(), Some("0f0f0f0f"));
+        assert_eq!(backgrounded_id("Workspace not trusted."), None);
+    }
+
+    #[test]
+    fn threads_resolve_to_drafts_and_the_sessions_littleguys_started() {
+        let mut st = State::default();
+        let draft = keys::thread(AGENT_ID, "d-1");
+        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: false, outbox: Vec::new() });
+        assert!(matches!(st.thread(&draft), Some(Thread::Draft)));
+        // The guy's main key is a draft until a session has it.
+        let main = keys::main(AGENT_ID);
+        assert!(matches!(st.thread(&main), Some(Thread::Draft)));
+        st.started.insert("s-main".into(), Started { key: main.clone(), at: 1, ..Default::default() });
+        assert!(matches!(st.thread(&main), Some(Thread::Session(sid)) if sid == "s-main"));
+        // A routine run's key, and any session's own.
+        let run = keys::routine_run(AGENT_ID, "job", "r-1");
+        st.started.insert("s-run".into(), Started { key: run.clone(), at: 1, ..Default::default() });
+        assert!(matches!(st.thread(&run), Some(Thread::Session(sid)) if sid == "s-run"));
+        assert!(matches!(st.thread(&keys::thread(AGENT_ID, "s-9")), Some(Thread::Session(sid)) if sid == "s-9"));
+        assert!(st.thread("agent:other:dashboard:x").is_none());
+        assert!(st.thread(&keys::routine_run(AGENT_ID, "job", "unknown")).is_none());
+    }
+
+    #[test]
+    fn started_sessions_keep_their_thread_key() {
+        let mut st = State::default();
+        let key = keys::thread(AGENT_ID, "draft");
+        st.started.insert("s-1".into(), Started { key: key.clone(), at: 1, ..Default::default() });
+        assert_eq!(st.session("s-1").key(), key);
+        // Reported before its id was known: matched by the short id `claude --bg` printed,
+        // it takes over its draft (and what you wrote meanwhile).
+        let draft = keys::thread(AGENT_ID, "d-2");
+        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: true, outbox: vec!["and then".into()] });
+        st.pending.insert("31009426".into(), draft.clone());
+        let sid = "31009426-f4da-4001-87f2-0d40829fb8af";
+        assert_eq!(st.session(sid).key(), draft);
+        assert_eq!(st.session(sid).outbox, vec!["and then".to_string()]);
+        assert!(st.pending.is_empty() && st.drafts.is_empty());
+        assert!(matches!(st.thread(&draft), Some(Thread::Session(s)) if s == sid));
+        assert_eq!(st.session("other").key(), keys::thread(AGENT_ID, "other"));
+    }
+
+    #[test]
+    fn new_sessions_start_where_you_last_worked() {
+        let dir = std::env::temp_dir().join(format!("lg-folder-{}", uuid::Uuid::new_v4()));
+        let (old, new) = (dir.join("old"), dir.join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let mut st = State::default();
+        for (sid, cwd, at) in [("a", &old, 10), ("b", &new, 20), ("c", &dir.join("gone"), 30)] {
+            let s = st.session(sid);
+            s.cwd = cwd.display().to_string();
+            s.updated_at = at;
+        }
+        let home = dirs::home_dir().unwrap();
+        st.session("d").cwd = home.display().to_string();
+        st.session("d").updated_at = 40;
+        assert_eq!(st.default_folder(), new.display().to_string());
+        assert_eq!(State::default().default_folder(), home.display().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn started_threads_are_saved_and_old_ones_dropped() {
+        let path = std::env::temp_dir().join(format!("lg-started-{}.json", uuid::Uuid::new_v4()));
+        let now = now_ms();
+        let started = HashMap::from([
+            ("new".to_string(), Started { key: "agent:claude:main".into(), at: now, ..Default::default() }),
+            ("old".to_string(), Started { key: "agent:claude:dashboard:x".into(), at: now - STARTED_KEEP_MS - 1, ..Default::default() }),
+        ]);
+        save_started(&path, &started);
+        let loaded = load_started(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded["new"].key, "agent:claude:main");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lg-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(path: &Path, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn past_sessions_come_from_every_folders_transcripts() {
+        let projects = temp_dir("projects");
+        write(
+            &projects.join("-w-shop/s-old.jsonl"),
+            "{\"type\":\"mode\"}\n{\"type\":\"user\",\"cwd\":\"/w/shop\",\"message\":{\"content\":\"fix the checkout\\nplease\"}}\n",
+        );
+        write(
+            &projects.join("-w-blog/s-new.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/w/blog\",\"message\":{\"content\":\"hi\"}}\n{\"type\":\"ai-title\",\"aiTitle\":\"Blog redesign\"}\n",
+        );
+        write(&projects.join("-w-x/no-cwd.jsonl"), "{\"type\":\"mode\"}\n");
+        let old = std::fs::File::options().write(true).open(projects.join("-w-shop/s-old.jsonl")).unwrap();
+        old.set_modified(std::time::SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        let found = past_sessions(&projects, 10);
+        let _ = std::fs::remove_dir_all(&projects);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].session_id, "s-new");
+        assert_eq!(found[0].cwd, "/w/blog");
+        assert_eq!(found[0].title.as_deref(), Some("Blog redesign"));
+        assert_eq!(found[1].title.as_deref(), Some("fix the checkout"));
+    }
+
+    /// A home with one plugin (on) that has a skill, a command and an MCP server.
+    fn home_with_plugin(home: &Path) {
+        let plugin = home.join(".claude/plugins/cache/mk/tools/1.0");
+        write(&plugin.join(".claude-plugin/plugin.json"), r#"{"name":"tools","description":"Handy"}"#);
+        write(&plugin.join("skills/lint/SKILL.md"), "---\nname: lint\ndescription: Lints things\n---\nbody");
+        write(&plugin.join("commands/deploy.md"), "---\ndescription: Ship it\n---\nDeploy $ARGUMENTS");
+        write(&plugin.join(".mcp.json"), r#"{"mcpServers":{"db":{"command":"/usr/bin/pg-mcp --secret x"}}}"#);
+        let installed = json!({ "version": 2, "plugins": { "tools@mk": [{ "scope": "user", "installPath": plugin.display().to_string(), "version": "1.0" }] } });
+        write(&home.join(".claude/plugins/installed_plugins.json"), &installed.to_string());
+        write(&home.join(".claude/settings.json"), r#"{"enabledPlugins":{"tools@mk":true}}"#);
+    }
+
+    #[test]
+    fn skills_commands_and_mcp_servers_include_plugins() {
+        let (home, cwd) = (temp_dir("home"), temp_dir("cwd"));
+        home_with_plugin(&home);
+        write(&home.join(".claude/skills/notes/SKILL.md"), "---\nname: notes\ndescription: Takes notes\n---\n");
+        write(&cwd.join(".claude/skills/build/SKILL.md"), "---\nname: build\ndescription: Builds\n---\n");
+        write(&home.join(".claude/commands/standup.md"), "Write my standup from git log");
+        write(&cwd.join(".claude/commands/frontend/component.md"), "---\ndescription: New component\n---\n");
+
+        let skills: Vec<(String, &str)> = skills_in(&cwd, &home).iter().map(|s| (s.name.clone(), s.source)).collect();
+        assert_eq!(skills, vec![("build".into(), "project"), ("notes".into(), "personal"), ("tools:lint".into(), "plugin")]);
+
+        let commands: Vec<(String, Option<String>, &str)> = commands_in(&cwd, &home).into_iter().map(|c| (c.name, c.description, c.source)).collect();
+        assert_eq!(
+            commands,
+            vec![
+                ("frontend:component".into(), Some("New component".into()), "project"),
+                ("standup".into(), Some("Write my standup from git log".into()), "personal"),
+                ("tools:deploy".into(), Some("Ship it".into()), "plugin"),
+            ]
+        );
+
+        let servers = mcp_servers(&cwd, &home);
+        assert_eq!(servers, vec![json!({ "name": "tools:db", "transport": "stdio", "source": "plugin", "command": "pg-mcp" })]);
+
+        // Turned off: its skills, commands and servers go.
+        write(&home.join(".claude/settings.json"), r#"{"enabledPlugins":{"tools@mk":false}}"#);
+        assert!(plugin_folders(&cwd, &home).is_empty());
+        let _ = (std::fs::remove_dir_all(&home), std::fs::remove_dir_all(&cwd));
+    }
+
+    #[test]
+    fn attachments_are_saved_and_listed_after_the_text() {
+        let dir = temp_dir("attach");
+        let png = json!({ "type": "image", "mimeType": "image/png", "fileName": "../shot.png", "content": "data:image/png;base64,iVBORw0KGgo=" });
+        let notes = json!({ "type": "file", "mimeType": "text/plain", "fileName": "notes.txt", "content": "aGk=" });
+        let text = with_attachments(&dir, "look at these", &[png, notes]).unwrap();
+        let (said, list) = text.split_once("\n\nAttached files:\n").expect("the list follows the text");
+        assert_eq!(said, "look at these");
+        let files: Vec<(&str, &str)> = list.lines().map(|l| l.strip_prefix("- ").unwrap().split_once(": ").unwrap()).collect();
+        assert_eq!(files.iter().map(|(name, _)| *name).collect::<Vec<_>>(), vec!["shot.png", "notes.txt"]);
+        assert!(files.iter().all(|(_, path)| Path::new(path).starts_with(attachments_dir(&dir))));
+        assert_eq!(std::fs::read(files[1].1).unwrap(), b"hi");
+        assert_eq!(with_attachments(&dir, "plain", &[]).unwrap(), "plain");
+        assert!(with_attachments(&dir, "", &[json!({ "fileName": "x", "content": "%%%" })]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn files_are_the_selected_threads_folder() {
+        let (shop, blog) = (temp_dir("shop"), temp_dir("blog"));
+        write(&shop.join("cart.rs"), "fn main() {}");
+        write(&blog.join("post.md"), "# hi");
+        let dir = temp_dir("files");
+        let hooks = Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let client = ClaudeCodeClient::new("f".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks);
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            let s = st.session("s-shop");
+            s.cwd = shop.display().to_string();
+            s.updated_at = 1;
+            // The latest folder, for calls without a thread.
+            let s = st.session("s-blog");
+            s.cwd = blog.display().to_string();
+            s.updated_at = 2;
+        }
+        let names = |v: &Value| v["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let list = |key: Option<String>| {
+            let mut params = json!({ "agentId": AGENT_ID });
+            if let Some(key) = key {
+                params["sessionKey"] = json!(key);
+            }
+            client.call("agents.workspace.list", params)
+        };
+        let thread = list(Some(keys::thread(AGENT_ID, "s-shop"))).await.unwrap();
+        assert_eq!(names(&thread), vec!["cart.rs"]);
+        assert_eq!(thread["workspaceDir"], shop.display().to_string());
+        let latest = list(None).await.unwrap();
+        assert_eq!(names(&latest), vec!["post.md"]);
+        assert_eq!(latest["workspaceDir"], blog.display().to_string());
+        let file = client
+            .call("agents.workspace.get", json!({ "path": "cart.rs", "sessionKey": keys::thread(AGENT_ID, "s-shop") }))
+            .await
+            .unwrap();
+        assert_eq!(file["file"]["content"], "fn main() {}");
+        assert!(file.get("workspaceDir").is_none());
+        for d in [&shop, &blog, &dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn opened_sessions_stay_listed_across_restarts() {
+        let dir = temp_dir("open");
+        let hooks = || Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks());
+        let out = sessions_open(&client.inner, &json!({ "sessionId": "s-old", "cwd": "/w/shop", "updatedAt": 5 })).unwrap();
+        assert_eq!(out["key"], keys::thread(AGENT_ID, "s-old"));
+        let again = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks());
+        let st = again.inner.st.lock().unwrap();
+        let s = st.sessions.get("s-old").expect("seeded from what littleguys remembers");
+        assert!(s.kept && s.listable(now_ms()));
+        assert_eq!(s.cwd, "/w/shop");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2249,5 +3332,189 @@ mod tests {
         s.background = true;
         s.name = Some("checkout fix".into());
         assert_eq!(s.title().as_deref(), Some("checkout fix"));
+    }
+
+    /// Follows sessions the way a connection does (hooks report to the app, not here).
+    async fn follow(inner: &Arc<Inner>) {
+        poll_agents(inner).await;
+        follow_transcripts(inner).await;
+    }
+
+    async fn remove_session(claude: &Path, sid: &str) {
+        let _ = run_cli(claude, &["rm", &sid[..8]], CLI_TIMEOUT).await;
+    }
+
+    /// Reads this Mac's real Claude Code setup (nothing is started or changed):
+    /// `LG_E2E_CWD=<folder> cargo test --lib real_extras -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "reads this Mac's Claude Code setup"]
+    async fn real_extras_read_this_macs_setup() {
+        let cwd = std::env::var("LG_E2E_CWD").expect("LG_E2E_CWD: a folder you work in");
+        let dir = temp_dir("extras");
+        let hooks = Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let client = ClaudeCodeClient::new("x".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks);
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            st.session("here").cwd = cwd.clone();
+            st.session("here").updated_at = now_ms();
+        }
+        let names = |v: &Value, list: &str| -> Vec<String> {
+            v[list].as_array().unwrap().iter().map(|r| format!("{}{}", r["name"].as_str().unwrap_or_default(), r["source"].as_str().map(|s| format!(" ({s})")).unwrap_or_default())).collect()
+        };
+        let skills = client.call("skills.status", json!({ "agentId": AGENT_ID })).await.unwrap();
+        println!("skills: {:?}", names(&skills, "skills"));
+        let commands = client.call("commands.list", json!({ "agentId": AGENT_ID })).await.unwrap();
+        println!("commands: {:?}", names(&commands, "commands"));
+        let servers = client.call("mcp.servers.list", json!({ "agentId": AGENT_ID })).await.unwrap();
+        println!("mcp: {:?}", names(&servers, "servers"));
+        let plugins = client.call("plugins.list", json!({})).await.unwrap();
+        println!("plugins: {:?}", names(&plugins, "plugins"));
+        let files = client.call("agents.workspace.list", json!({ "agentId": AGENT_ID })).await.unwrap();
+        println!("files in {cwd}: {}", files.to_string().chars().take(300).collect::<String>());
+        let started = Instant::now();
+        let past = client.call("sessions.past", json!({})).await.unwrap();
+        let rows = past["sessions"].as_array().unwrap();
+        println!("past: {} sessions in {:?}; newest: {:?}", rows.len(), started.elapsed(), rows.iter().take(3).map(|r| (r["title"].clone(), r["cwd"].clone())).collect::<Vec<_>>());
+        assert!(!rows.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Starts two real (tiny) background sessions, a new thread's and a routine run's:
+    /// `LG_E2E_CWD=<a folder Claude Code trusts> cargo test --lib real_sessions -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts real Claude Code sessions"]
+    async fn real_sessions_start_from_new_threads_and_routines() {
+        let cwd = std::env::var("LG_E2E_CWD").expect("LG_E2E_CWD: a folder Claude Code trusts");
+        let events: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
+        let seen = events.clone();
+        let hooks = Hooks {
+            status: Box::new(|_| {}),
+            event: Box::new(move |name, payload, _| seen.lock().unwrap().push((name.to_string(), payload.clone()))),
+            connected: Box::new(|| {}),
+        };
+        let dir = std::env::temp_dir().join(format!("lg-e2e-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = ClaudeCodeClient::new("e2e".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks);
+        let inner = client.inner.clone();
+        let claude = find_claude().expect("Claude Code installed");
+        *inner.claude.lock().unwrap() = Some(claude.clone());
+        inner.st.lock().unwrap().connected = true;
+
+        // A new thread: a draft, then a session once you write to it.
+        let created = client.call("sessions.create", json!({ "agentId": AGENT_ID })).await.unwrap();
+        let key = created["key"].as_str().unwrap().to_string();
+        let listed = client.call("sessions.list", json!({})).await.unwrap();
+        assert!(listed["sessions"].as_array().unwrap().iter().any(|r| r["key"] == key.as_str()), "the draft is listed");
+        let empty = client.call("chat.history", json!({ "sessionKey": key })).await.unwrap();
+        assert_eq!(empty["messages"], json!([]));
+        client
+            .call("chat.send", json!({ "sessionKey": key, "message": "Reply with just the word pong. Don't use any tools.", "cwd": cwd }))
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let sid = loop {
+            assert!(Instant::now() < deadline, "the new thread's turn never ended: {:?}", events.lock().unwrap());
+            follow(&inner).await;
+            let done = inner.st.lock().unwrap().sessions.values().find(|s| s.key() == key && s.turn > 0 && !s.busy).map(|s| s.id.clone());
+            if let Some(sid) = done {
+                break sid;
+            }
+            tokio::time::sleep(TICK).await;
+        };
+        println!("new thread {key} → session {sid}");
+        let listed = client.call("sessions.list", json!({})).await.unwrap();
+        let row = listed["sessions"].as_array().unwrap().iter().find(|r| r["key"] == key.as_str()).cloned().expect("listed under its key");
+        assert_eq!(row["sessionId"], sid.as_str());
+        assert_eq!(row["workspaceDir"], cwd.as_str());
+        let history = client.call("chat.history", json!({ "sessionKey": key })).await.unwrap();
+        let messages = history["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|m| m["role"] == "user"), "{messages:?}");
+        assert!(messages.iter().any(|m| m["role"] == "assistant"), "{messages:?}");
+        assert!(events.lock().unwrap().iter().any(|(n, p)| n == "session.message" && p["sessionKey"] == key.as_str()), "followed live");
+        assert_eq!(load_started(&inner.started_path)[&sid].key, key, "remembered across restarts");
+
+        // An attached image: saved, listed after the text, readable by the resumed session.
+        let (before, said_before) = inner.st.lock().unwrap().sessions.get(&sid).map(|s| (s.handed, s.said.clone())).unwrap();
+        let red = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC";
+        client
+            .call(
+                "chat.send",
+                json!({
+                    "sessionKey": key,
+                    "message": "What single color fills the attached image? Answer with just that word.",
+                    "attachments": [{ "type": "image", "mimeType": "image/png", "fileName": "swatch.png", "content": red }],
+                }),
+            )
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            assert!(Instant::now() < deadline, "the attachment's turn never ended");
+            follow(&inner).await;
+            // Without the plugin's hooks here, a new reply is the sure sign its turn ended.
+            let said = inner.st.lock().unwrap().sessions.get(&sid).filter(|s| s.handed > before && !s.busy && s.said != said_before).map(|s| s.said.clone());
+            if let Some(said) = said {
+                println!("about the attached image: {said:?}");
+                assert!(said.is_some_and(|s| s.to_lowercase().contains("red")));
+                break;
+            }
+            tokio::time::sleep(TICK).await;
+        }
+
+        // Stop: the background session ends; writing to it again would resume it.
+        client.call("chat.send", json!({ "sessionKey": key, "message": "Run `sleep 45` with the Bash tool, then say done." })).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !inner.st.lock().unwrap().sessions.get(&sid).is_some_and(|s| s.busy && s.running && s.short_id.is_some() && !s.delivering) {
+            assert!(Instant::now() < deadline, "it never got going");
+            follow(&inner).await;
+            tokio::time::sleep(TICK).await;
+        }
+        let stopped = client.call("chat.abort", json!({ "sessionKey": key })).await.unwrap();
+        assert_eq!(stopped["aborted"], true);
+        let listed = list_agents(&claude).await.unwrap_or_default();
+        assert!(!listed.iter().any(|l| l.session_id == sid && l.pid.is_some()), "still running after Stop");
+        remove_session(&claude, &sid).await;
+
+        // A routine run: its own session, named after the routine, in the routine's folder.
+        let job = client
+            .call(
+                "cron.add",
+                json!({
+                    "name": "e2e routine", "agentId": AGENT_ID,
+                    "schedule": { "kind": "at", "at": "2099-01-01T00:00:00Z" },
+                    "payload": { "kind": "agentTurn", "message": "Reply with just the word ping. Don't use any tools.", "cwd": cwd },
+                }),
+            )
+            .await
+            .unwrap();
+        let following = {
+            let inner = inner.clone();
+            tokio::spawn(async move {
+                loop {
+                    follow(&inner).await;
+                    tokio::time::sleep(TICK).await;
+                }
+            })
+        };
+        let runner = Runner(Arc::downgrade(&inner));
+        let message = job["payload"]["message"].as_str().unwrap().to_string();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(180),
+            runner.run_turn(AGENT_ID.into(), "isolated".into(), job["id"].as_str().unwrap().into(), message),
+        )
+        .await
+        .expect("the routine's turn never ended")
+        .unwrap();
+        following.abort();
+        println!("routine run {} said {:?}", outcome.session_key, outcome.summary);
+        assert!(outcome.session_key.starts_with(&format!("agent:{AGENT_ID}:cron:")));
+        assert!(outcome.summary.as_deref().is_some_and(|s| s.to_lowercase().contains("ping")), "{outcome:?}");
+        let run = inner.st.lock().unwrap().sessions.values().find(|s| s.key() == outcome.session_key).map(|s| (s.id.clone(), s.name.clone(), s.cwd.clone()));
+        let (run_sid, name, run_cwd) = run.expect("the run's session");
+        assert_eq!(name.as_deref(), Some("e2e routine"));
+        assert_eq!(run_cwd, cwd);
+        remove_session(&claude, &run_sid).await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

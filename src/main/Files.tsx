@@ -23,12 +23,13 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { workspace } from "../lib/gateway";
-import { gatewayOf, guyHue, guyName, isOnThisMac, shortTime } from "../lib/guys";
+import { gatewayOf, guyHue, guyName, isOnThisMac, sessionsFor, shortTime } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { Guy, WorkspaceEntry, WorkspaceFile } from "../lib/types";
 import { useApp } from "../stores/app";
 import { Markdown } from "../ui/Markdown";
 import { IconButton, Segmented, Spinner } from "../ui/kit";
+import { threadFolder } from "./FolderPicker";
 
 type Dir = { entries: WorkspaceEntry[]; total: number; loading: boolean; error?: string };
 
@@ -78,22 +79,59 @@ function EntryIcon({ entry, open }: { entry: WorkspaceEntry; open?: boolean }) {
   return <File size={14} className="shrink-0 text-[var(--color-ink-3)]" />;
 }
 
+/**
+ * The thread whose folder the Files tab shows, for bots whose threads each work in their
+ * own (ACP on this Mac, Claude Code): the one open, else the one you were on last.
+ */
+function useFilesThread(guy: Guy): string | undefined {
+  return useApp((s) => {
+    const g = gatewayOf(s.roster, guy.gatewayId);
+    if (g?.status.kind !== "claudecode" && !(g?.status.kind === "acp" && isOnThisMac(g))) return undefined;
+    return (s.selectedUid === guy.uid ? s.selectedSessionKey : null) ?? s.lastThreadByGuy[guy.uid] ?? undefined;
+  });
+}
+
+/** The folder the Files tab shows: the thread's, else the guy's. */
+function useFilesFolder(guy: Guy, thread: string | undefined): string | null {
+  return useApp((s) => (thread ? threadFolder(guy, sessionsFor(s.roster, guy).find((r) => r.key === thread)) : guy.workspace) ?? null);
+}
+
+/** The file you last opened in each folder, by `${guy uid}|${folder}`. */
+const openedIn = new Map<string, string>();
+
 /** The workspace tree, in the sidebar. Folders load as you open them. */
 export function FileTree({ guy }: { guy: Guy }) {
+  const thread = useFilesThread(guy);
+  const folder = useFilesFolder(guy, thread);
+  // Another thread's folder is another tree.
+  return <Tree key={folder ?? ""} guy={guy} thread={thread} folder={folder} />;
+}
+
+function Tree({ guy, thread, folder }: { guy: Guy; thread?: string; folder: string | null }) {
   // Highlight only what's on screen.
   const selected = useApp((s) => (s.selectedUid === guy.uid && s.view === "files" ? s.fileByGuy[guy.uid] : undefined));
   const pick = useApp((s) => s.selectFile);
-  const selectFile = useCallback((path: string) => pick(guy.uid, path), [pick, guy.uid]);
+  const remembered = `${guy.uid}|${folder ?? ""}`;
+  const selectFile = useCallback(
+    (path: string) => {
+      openedIn.set(remembered, path);
+      pick(guy.uid, path);
+    },
+    [pick, guy.uid, remembered],
+  );
   const gateway = useApp((s) => gatewayOf(s.roster, guy.gatewayId));
   const [pathNote, setPathNote] = useState<string | null>(null);
   const [dirs, setDirs] = useState<Record<string, Dir>>({});
   const [open, setOpen] = useState<Set<string>>(() => new Set([""]));
+  // The folder the listing says it's of (exact even for threads not in the roster).
+  const [listed, setListed] = useState<string | null>(null);
 
   const load = useCallback(
     async (path: string, offset = 0) => {
       setDirs((d) => ({ ...d, [path]: { entries: d[path]?.entries ?? [], total: d[path]?.total ?? 0, loading: true } }));
       try {
-        const res = await workspace.list(guy.gatewayId, guy.id, path, offset);
+        const res = await workspace.list(guy.gatewayId, guy.id, path, offset, thread);
+        if (!path && res.workspaceDir) setListed(res.workspaceDir);
         setDirs((d) => ({
           ...d,
           [path]: { entries: offset ? [...(d[path]?.entries ?? []), ...res.entries] : res.entries, total: res.totalEntries, loading: false },
@@ -104,19 +142,25 @@ export function FileTree({ guy }: { guy: Guy }) {
         return [];
       }
     },
-    [guy.gatewayId, guy.id],
+    [guy.gatewayId, guy.id, thread],
   );
 
-  // Root on mount; open the guy's personality (or the first file) if nothing is picked yet.
+  // Root on mount. Open the file you last had open in this folder, else the guy's
+  // personality (or the first file); remembered for when the Files view opens.
   useEffect(() => {
     load("").then((entries) => {
-      if (useApp.getState().fileByGuy[guy.uid]) return;
+      const before = openedIn.get(remembered);
+      if (before) return pick(guy.uid, before, false);
+      const current = useApp.getState().fileByGuy[guy.uid];
+      if (current && !thread) return openedIn.set(remembered, current);
       const files = entries.filter((e) => e.kind === "file");
       const first = ["SOUL.md", "AGENTS.md", "CLAUDE.md", "README.md"].map((n) => files.find((f) => f.name === n)).find(Boolean) ?? files[0];
-      // Remembered for when the Files view opens; browsing doesn't open it.
-      if (first) pick(guy.uid, first.path, false);
+      if (first) {
+        openedIn.set(remembered, first.path);
+        pick(guy.uid, first.path, false);
+      }
     });
-  }, [load, guy.uid, pick]);
+  }, [load, guy.uid, pick, remembered, thread]);
 
   const toggle = (path: string) => {
     const next = new Set(open);
@@ -204,8 +248,8 @@ export function FileTree({ guy }: { guy: Guy }) {
         </IconButton>
       </div>
       {/* Hermes browses its working folder, not the profile folder it reports as the workspace. */}
-      {guy.workspace && gateway?.status.kind !== "hermes" && (
-        <WorkspacePath path={guy.workspace} local={isOnThisMac(gateway)} gatewayName={guy.gatewayName} note={pathNote} setNote={setPathNote} />
+      {(listed ?? folder) && gateway?.status.kind !== "hermes" && (
+        <WorkspacePath path={(listed ?? folder) as string} local={isOnThisMac(gateway)} gatewayName={guy.gatewayName} note={pathNote} setNote={setPathNote} />
       )}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {coreFiles.length > 0 && (
@@ -295,6 +339,8 @@ function CodeView({ content, lang }: { content: string; lang: string }) {
 /** The open file, in the main pane. */
 export function FilesView({ guy }: { guy: Guy }) {
   const path = useApp((s) => s.fileByGuy[guy.uid]);
+  const thread = useFilesThread(guy);
+  const folder = useFilesFolder(guy, thread);
   const gateway = useApp((s) => gatewayOf(s.roster, guy.gatewayId));
   const [file, setFile] = useState<WorkspaceFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -311,7 +357,7 @@ export function FilesView({ guy }: { guy: Guy }) {
     setError(null);
     setSize(null);
     workspace
-      .get(guy.gatewayId, guy.id, path)
+      .get(guy.gatewayId, guy.id, path, thread)
       .then((r) => !cancelled && setFile(r.file))
       .catch((e) => {
         if (cancelled) return;
@@ -322,10 +368,10 @@ export function FilesView({ guy }: { guy: Guy }) {
     return () => {
       cancelled = true;
     };
-  }, [guy.gatewayId, guy.id, path, nonce]);
+  }, [guy.gatewayId, guy.id, path, nonce, thread]);
 
   // Hermes roots the files at its working folder, not the guy's profile folder.
-  const absolute = path && guy.workspace && gateway?.status.kind !== "hermes" ? `${guy.workspace.replace(/\/$/, "")}/${path}` : null;
+  const absolute = path && folder && gateway?.status.kind !== "hermes" ? `${folder.replace(/\/$/, "")}/${path}` : null;
   const local = isOnThisMac(gateway);
 
   const body = useMemo(() => {

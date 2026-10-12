@@ -22,13 +22,14 @@ Or grab the `.dmg` from [Releases](https://github.com/herval/littleguys/releases
 For OpenClaw it's a UX layer over your existing `~/.openclaw`, not a separate install. New guys use the workspaces OpenClaw gives each agent, and the UI links to their folder. With no OpenClaw on the Mac yet, littleguys can install and set it up for you.
 
 ### Kinds of bots
-Each saved bot uses one of three adapters (`src-tauri/src/runtime/`), and each adapter declares what it can do so the UI hides the rest:
+Each saved bot uses one of four adapters (`src-tauri/src/runtime/`), and each adapter declares what it can do so the UI hides the rest:
 
 | Runtime | How littleguys talks to it | Guys | Routines | Approvals |
 |---|---|---|---|---|
 | **OpenClaw** | Gateway WebSocket protocol v4 | Agents | Native cron | ✓ |
 | **Hermes Agent** | Local `hermes serve` backend (JSON-RPC over WebSocket), or a remote API server (`API_SERVER_KEY`) | Profiles | Native cron | ✓ |
 | **ACP agents**: Claude Code, Codex, Gemini CLI, Goose, OpenCode, ZeroClaw… | Agent Client Protocol over stdio, or WebSocket for `goose serve` and similar | One per agent | Run by littleguys while it's open | ✓ |
+| **Claude Code** | Every session on this Mac, terminal or background: `claude agents`, their transcripts, and hooks from the littleguys plugin. New threads and routine runs are background sessions (`claude --bg`) | One | Run by littleguys while it's open | Background sessions |
 
 Every adapter speaks the same OpenClaw-shaped calls and events, documented in `runtime/mod.rs`, so the rest of the app doesn't care what's behind a guy. ACP agents can be added in one click from the [ACP registry](https://agentclientprotocol.com). Bots without a scheduler get routines from `runtime/scheduler.rs`.
 

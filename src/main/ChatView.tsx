@@ -125,12 +125,12 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
     return null;
   }, [items, running, thread?.toolStatus]);
   const browsing = Boolean(activeTool && toolKind(activeTool.name) === "browse");
-  // ACP threads can start in any folder on this Mac; it's fixed once they have messages.
+  // ACP and Claude Code threads can start in any folder on this Mac; it's fixed once they have messages.
   const [pendingFolder, setPendingFolder] = usePendingFolder(tid);
   const folder = threadFolder(guy, row);
   const canPickFolder = useApp((s) => {
     const g = gatewayOf(s.roster, gw);
-    return g?.status.kind === "acp" && isOnThisMac(g) && kind !== "routine";
+    return ((g?.status.kind === "acp" && isOnThisMac(g)) || g?.status.kind === "claudecode") && kind !== "routine";
   });
   // A title or preview means it has history somewhere, even if none loaded.
   const unstarted = Boolean(thread?.loaded) && items.length === 0 && !running && !row?.derivedTitle && !row?.lastMessagePreview;
@@ -321,7 +321,7 @@ function ChatHeader({
   const channel = kind === "channel" ? channelName(sessionKey) : null;
   const channelLabel = channel ? channel.charAt(0).toUpperCase() + channel.slice(1) : null;
   // The main chat is just "talking to Jefe"; other threads say which one this is.
-  const isMain = kind === "main" && gateway?.status.kind !== "acp";
+  const isMain = kind === "main" && gateway?.status.kind !== "acp" && gateway?.status.kind !== "claudecode";
   const showFolder = (gateway?.status.kind === "acp" || gateway?.status.kind === "claudecode") && folder;
   const threadLabel = isMain ? null : kind === "channel" ? `${title} on ${channelLabel}` : title;
 

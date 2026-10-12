@@ -104,7 +104,8 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
           : "bg-[var(--color-bad)]";
 
   const run = (fn: () => Promise<unknown>) => fn().catch((e) => setError(errorMessage(e)));
-  const missingAdmin = phase === "connected" && !g.status.scopes.includes("operator.admin");
+  // Scopes are OpenClaw's pairing grants; other runtimes report none.
+  const missingAdmin = g.status.kind === "openclaw" && phase === "connected" && !g.status.scopes.includes("operator.admin");
 
   return (
     <div className={`rounded-xl border border-[var(--color-line)] p-3 ${g.enabled ? "" : "opacity-60"}`}>

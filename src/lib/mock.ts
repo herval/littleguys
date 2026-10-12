@@ -129,7 +129,7 @@ claude.status = {
 const ccKey = (id: string) => `agent:claude:dashboard:${id}`;
 const claudeCode = gateway("claude-5f2a9c1e7b", "Claude Code", "This Mac", "connected", {
   defaultAgentId: "claude",
-  agents: [{ id: "claude", name: "Claude Code", identity: { name: "Claude Code", avatarUrl: claudeFace }, workspace: "/Users/you" }] as never,
+  agents: [{ id: "claude", name: "Claude Code", identity: { name: "Claude Code", avatarUrl: claudeFace }, workspace: "/Users/you/dev/shop-api" }] as never,
   sessions: [
     { key: ccKey("c1"), agentId: "claude", kind: "direct", derivedTitle: "Fix the flaky checkout test", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 20_000, lastMessagePreview: "Running the suite 20 times to catch the race…", hasActiveRun: true, status: "running" },
     { key: ccKey("c2"), agentId: "claude", kind: "direct", derivedTitle: "Upgrade the Terraform providers", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 2 * min, lastMessagePreview: "The plan only touches the providers. Applying it next.", status: "done" },
@@ -154,7 +154,7 @@ claudeCode.status = {
   mode: "local",
   serverVersion: "2.1.296",
   hello: { approvals: true },
-  capabilities: { manageGuys: false, routines: false, routinesLocal: false, approvals: true, threadActions: false, newThreads: false, attachments: false, models: false, files: false, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: false },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: false, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
 };
 
 const roster: Roster = {
@@ -665,8 +665,13 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
       return { models: [{ id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" }, { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic" }, { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "openai" }] };
     case "agents.files.get":
       return { agentId: p.agentId, workspace: "", file: { name: p.name, content: "# SOUL.md\n", hash: "x" } };
-    case "agents.workspace.list":
-      return workspaceList(String(p.path ?? ""));
+    case "agents.workspace.list": {
+      const listing = workspaceList(String(p.path ?? ""));
+      // Claude Code and ACP threads each work in their own folder.
+      const rows = [...claudeCode.sessions, ...claude.sessions] as Array<{ key: string; workspaceDir?: string }>;
+      const folder = rows.find((r) => r.key === p.sessionKey)?.workspaceDir;
+      return gateway === claudeCode.id || gateway === claude.id ? { ...listing, workspaceDir: folder ?? "/Users/you/dev/shop-api" } : listing;
+    }
     case "agents.workspace.get":
       return workspaceGet(String(p.path));
     case "skills.status":

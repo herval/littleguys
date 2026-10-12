@@ -167,12 +167,18 @@ export const approvals = {
     gwCall(gw, "exec.approval.resolve", { id, decision }),
 };
 
-/** Read-only view of a guy's workspace folder. */
+/** Read-only view of a guy's workspace folder; with `sessionKey`, the folder that thread works in (ACP, Claude Code). */
 export const workspace = {
-  list: (gw: string, agentId: string, path = "", offset = 0) =>
-    gwCall<WorkspaceListing>(gw, "agents.workspace.list", { agentId, ...(path ? { path } : {}), offset, limit: 250 }),
-  get: (gw: string, agentId: string, path: string) =>
-    gwCall<{ agentId: string; file: WorkspaceFile }>(gw, "agents.workspace.get", { agentId, path }, 30_000),
+  list: (gw: string, agentId: string, path = "", offset = 0, sessionKey?: string) =>
+    gwCall<WorkspaceListing>(gw, "agents.workspace.list", {
+      agentId,
+      ...(path ? { path } : {}),
+      ...(sessionKey ? { sessionKey } : {}),
+      offset,
+      limit: 250,
+    }),
+  get: (gw: string, agentId: string, path: string, sessionKey?: string) =>
+    gwCall<{ agentId: string; file: WorkspaceFile }>(gw, "agents.workspace.get", { agentId, path, ...(sessionKey ? { sessionKey } : {}) }, 30_000),
 };
 
 export const skills = {

@@ -35,6 +35,14 @@ const IMAGE_EXTENSIONS: &[(&str, &str)] = &[
     ("webp", "image/webp"),
 ];
 
+/// A listing that says which folder it's of (for bots whose threads each work in their own).
+pub fn with_root(mut out: Value, root: &Path) -> Value {
+    if out.get("entries").is_some() {
+        out["workspaceDir"] = json!(root.display().to_string());
+    }
+    out
+}
+
 /// `agents.workspace.list|get` with OpenClaw's params, rooted at `root`.
 pub fn handle(root: &Path, agent_id: &str, method: &str, params: &Value) -> Result<Value, RpcError> {
     let rel = params.get("path").and_then(Value::as_str).unwrap_or_default();

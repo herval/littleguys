@@ -37,8 +37,11 @@ export function usePendingFolder(threadId: string): [string | null, (dir: string
   return [dir, set];
 }
 
-/** Where a new thread will work: the guy's folder, a recent one, or any other. */
-export function FolderPicker({ guy, value, onChange }: { guy: Guy; value: string; onChange: (dir: string) => void }) {
+/**
+ * Where a new thread will work: the guy's folder, a recent one, or any other.
+ * `inline`: inside a labelled form field rather than above the composer.
+ */
+export function FolderPicker({ guy, value, onChange, inline = false }: { guy: Guy; value: string; onChange: (dir: string) => void; inline?: boolean }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const roster = useApp((s) => s.roster);
@@ -75,19 +78,19 @@ export function FolderPicker({ guy, value, onChange }: { guy: Guy; value: string
   };
 
   return (
-    <div ref={ref} className="relative px-5 pb-0.5">
+    <div ref={ref} className={`relative ${inline ? "" : "px-5 pb-0.5"}`}>
       <button
         onClick={() => setOpen((o) => !o)}
         title={`Works in ${value}`}
         className="flex max-w-full items-center gap-1.5 rounded-full px-2 py-1 text-[12px] text-[var(--color-ink-3)] transition hover:bg-[var(--color-chip)] hover:text-[var(--color-ink)]"
       >
         <Folder size={12} className="shrink-0" />
-        <span className="shrink-0">Works in</span>
+        {!inline && <span className="shrink-0">Works in</span>}
         <span className="truncate font-medium text-[var(--color-ink-2)]">{baseName(value)}</span>
         <ChevronDown size={12} className="shrink-0" />
       </button>
       {open && (
-        <div className="animate-pop absolute bottom-full left-5 z-20 mb-1 w-72 rounded-lg border border-[var(--color-line)] bg-[var(--color-pane-solid)] p-1 text-[12.5px] text-[var(--color-ink)] shadow-xl">
+        <div className={`animate-pop absolute bottom-full ${inline ? "left-0" : "left-5"} z-20 mb-1 w-72 rounded-lg border border-[var(--color-line)] bg-[var(--color-pane-solid)] p-1 text-[12.5px] text-[var(--color-ink)] shadow-xl`}>
           {choices.map((dir) => (
             <button
               key={dir}
