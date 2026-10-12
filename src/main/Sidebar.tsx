@@ -296,18 +296,6 @@ function ThreadList({ guy }: { guy: Guy }) {
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        {caps.pastSessions && (
-          <button
-            onClick={() => openPast(guy.uid)}
-            title="Sessions from every folder on this Mac, including ones you ran in a terminal"
-            className={`mb-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${
-              pastShown ? "bg-[var(--color-accent)] text-white shadow-sm" : "text-[var(--color-ink-2)] hover:bg-[var(--color-chip)]"
-            }`}
-          >
-            <History size={14} className="shrink-0 opacity-80" />
-            <span className="font-medium">Resume a session…</span>
-          </button>
-        )}
         {groups.map((g) => (
           <div key={g.id} className="mb-1">
             {g.title && (
@@ -337,6 +325,18 @@ function ThreadList({ guy }: { guy: Guy }) {
               ))}
           </div>
         ))}
+        {caps.pastSessions && (
+          <button
+            onClick={() => openPast(guy.uid)}
+            title="Sessions from every folder on this Mac, including ones you ran in a terminal"
+            className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${
+              pastShown ? "bg-[var(--color-accent)] text-white shadow-sm" : "text-[var(--color-ink-2)] hover:bg-[var(--color-chip)]"
+            }`}
+          >
+            <History size={14} className="shrink-0 opacity-80" />
+            <span className="font-medium">Resume a session…</span>
+          </button>
+        )}
       </div>
       {archived && archived.length > 0 && (
         <div className="shrink-0 border-t border-[var(--color-line)] px-2 py-1.5">
