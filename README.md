@@ -128,7 +128,6 @@ src/                  React + Tailwind
   lib/gateway.ts        typed RPC wrappers (types from @openclaw/gateway-protocol)
   stores/               zustand: app (status, roster, selection), chat (transcripts + live runs)
   popover/  main/       the two windows
-promo/                the intro video (Remotion); the GIF above is cut from it
 ```
 
 - **Protocol:** the gateway speaks WebSocket protocol v4. The handshake signs a v3 payload with an Ed25519 device key. `src-tauri/tests/device-auth-fixture.json` is generated from OpenClaw's own implementation with a fixed throwaway key (`node scripts/device-auth-fixture.mjs`), and `cargo test` checks the Rust signer against it.
