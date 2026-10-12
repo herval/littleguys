@@ -195,11 +195,12 @@ export function Composer({
             ))}
           </div>
         )}
+        {/* The buttons sit on the last line of text: its middle is 18px up from the bottom (8px padding + half the 20px line). */}
         <div className="flex items-end gap-1.5 p-1.5 pl-2">
           <button
             hidden={!canAttach}
             onClick={() => fileRef.current?.click()}
-            className="mb-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--color-ink-3)] transition hover:bg-[var(--color-chip)] hover:text-[var(--color-ink)]"
+            className="mb-[calc(18px_-_1rem)] flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--color-ink-3)] transition hover:bg-[var(--color-chip)] hover:text-[var(--color-ink)]"
             title="Attach files"
           >
             <Paperclip size={16} />
@@ -257,13 +258,13 @@ export function Composer({
                 submit();
               }
             }}
-            className="selectable max-h-[220px] min-h-[36px] flex-1 resize-none bg-transparent py-2 text-[13.5px] leading-[20px] outline-none placeholder:text-[var(--color-ink-3)]"
+            className="selectable max-h-[220px] min-h-[36px] flex-1 resize-none bg-transparent py-[8px] text-[13.5px] leading-[20px] outline-none placeholder:text-[var(--color-ink-3)]"
           />
           {running && !text.trim() && attachments.length === 0 ? (
             <button
               onClick={onStop}
               title="Stop"
-              className="mb-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-ink)] text-[var(--color-pane-solid)] transition active:scale-95"
+              className="mb-[calc(18px_-_1rem)] flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-ink)] text-[var(--color-pane-solid)] transition active:scale-95"
             >
               <Square size={12} fill="currentColor" />
             </button>
@@ -272,7 +273,7 @@ export function Composer({
               onClick={() => submit()}
               disabled={!text.trim() && attachments.length === 0}
               title="Send (↵)"
-              className="mb-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)] text-white shadow-sm transition hover:bg-[var(--color-accent-strong)] active:scale-95 disabled:bg-[var(--color-chip)] disabled:text-[var(--color-ink-3)] disabled:shadow-none"
+              className="mb-[calc(18px_-_1rem)] flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)] text-white shadow-sm transition hover:bg-[var(--color-accent-strong)] active:scale-95 disabled:bg-[var(--color-chip)] disabled:text-[var(--color-ink-3)] disabled:shadow-none"
             >
               <ArrowUp size={17} strokeWidth={2.4} />
             </button>
