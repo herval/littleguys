@@ -6,14 +6,25 @@ import type { GatewayRoster, UpdateState } from "../lib/types";
 import { useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { confirmAction } from "../ui/confirm";
-import { Button, IconButton, inputClass, Modal } from "../ui/kit";
+import { Button, IconButton, inputClass, Modal, Segmented } from "../ui/kit";
 import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix } from "./GatewayFix";
 import { GuyVisibility } from "./GuyVisibility";
 import { Notifications } from "./Notifications";
 import { Phones } from "./Phones";
 
+type Tab = "connections" | "agents" | "notifications" | "phones" | "general";
+
+const TABS: Array<{ value: Tab; label: string }> = [
+  { value: "connections", label: "Connections" },
+  { value: "agents", label: "Agents" },
+  { value: "notifications", label: "Notifications" },
+  { value: "phones", label: "Phones" },
+  { value: "general", label: "General" },
+];
+
 export function Settings() {
   const close = () => useApp.getState().setSettingsOpen(false);
+  const [tab, setTab] = useState<Tab>("connections");
   const roster = useApp((s) => s.roster);
   const setAddGatewayOpen = useApp((s) => s.setAddGatewayOpen);
   const [autostart, setAutostart] = useState<boolean | null>(null);
@@ -41,46 +52,57 @@ export function Settings() {
           </div>
         </div>
 
-        <section className="mt-5">
-          <div className="mb-1.5 flex items-center justify-between">
-            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">Bots & gateways</h3>
-            <Button size="sm" onClick={() => setAddGatewayOpen(true)}>
-              <Plus size={12} /> Add a bot
-            </Button>
-          </div>
-          <div className="space-y-2">
-            {roster.gateways.map((g) => (
-              <GatewayRow key={g.id} gateway={g} />
-            ))}
-          </div>
-        </section>
+        <div className="mt-5">
+          <Segmented value={tab} options={TABS} onChange={setTab} />
+        </div>
 
-        <Phones />
+        {/* A fixed height, so switching tabs doesn't resize the sheet. */}
+        <div className="-mx-6 h-[440px] overflow-y-auto px-6 pb-1">
+          {tab === "connections" && (
+            <section className="mt-5">
+              <div className="mb-1.5 flex items-center justify-between">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">Bots & gateways</h3>
+                <Button size="sm" onClick={() => setAddGatewayOpen(true)}>
+                  <Plus size={12} /> Add a bot
+                </Button>
+              </div>
+              <div className="space-y-2">
+                {roster.gateways.map((g) => (
+                  <GatewayRow key={g.id} gateway={g} />
+                ))}
+              </div>
+            </section>
+          )}
 
-        <GuyVisibility />
+          {tab === "agents" && <GuyVisibility />}
 
-        <Notifications />
+          {tab === "notifications" && <Notifications />}
 
-        <section className="mt-5">
-          <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">General</h3>
-          <div className="rounded-xl border border-[var(--color-line)] px-3.5 py-1.5">
-            <Row label="Open at login">
-              <input
-                type="checkbox"
-                className="accent-[var(--color-accent)]"
-                disabled={autostart === null}
-                checked={Boolean(autostart)}
-                onChange={(e) => toggleAutostart(e.target.checked)}
-              />
-            </Row>
-            <Row label="Open littleguys">
-              <kbd className="rounded bg-[var(--color-chip)] px-1.5 py-0.5 text-[11px]">⇧⌘L</kbd>
-            </Row>
-            <UpdateRow />
-          </div>
-        </section>
+          {tab === "phones" && <Phones />}
 
-        <div className="mt-6 flex justify-between">
+          {tab === "general" && (
+            <section className="mt-5">
+              <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">General</h3>
+              <div className="rounded-xl border border-[var(--color-line)] px-3.5 py-1.5">
+                <Row label="Open at login">
+                  <input
+                    type="checkbox"
+                    className="accent-[var(--color-accent)]"
+                    disabled={autostart === null}
+                    checked={Boolean(autostart)}
+                    onChange={(e) => toggleAutostart(e.target.checked)}
+                  />
+                </Row>
+                <Row label="Open littleguys">
+                  <kbd className="rounded bg-[var(--color-chip)] px-1.5 py-0.5 text-[11px]">⇧⌘L</kbd>
+                </Row>
+                <UpdateRow />
+              </div>
+            </section>
+          )}
+        </div>
+
+        <div className="mt-5 flex justify-between">
           <Button variant="ghost" size="sm" onClick={() => core.quit()}>
             Quit littleguys
           </Button>

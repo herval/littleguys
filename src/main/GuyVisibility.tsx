@@ -34,7 +34,7 @@ export function GuyVisibility() {
           {guys.length - hiddenCount} shown{hiddenCount ? ` · ${hiddenCount} hidden` : ""}
         </span>
       </div>
-      <div className="max-h-[260px] overflow-y-auto rounded-xl border border-[var(--color-line)]">
+      <div className="overflow-hidden rounded-xl border border-[var(--color-line)]">
         {guys.map((guy, i) => {
           const isHidden = hidden.has(guy.uid);
           return (
