@@ -114,10 +114,26 @@ export interface GatewayRoster {
   approvals: ExecApproval[];
 }
 
+export type RoutineNotifications = "all" | "failing" | "off";
+
+/** What notifies you about a guy. Approvals always do. */
+export interface NotifyPrefs {
+  replies: boolean;
+  routines: RoutineNotifications;
+}
+
+export interface Notifications {
+  everyone: NotifyPrefs;
+  /** Guys set apart from everyone, by `gatewayId/agentId`. */
+  guys: Record<string, NotifyPrefs>;
+}
+
 export interface Roster {
   gateways: GatewayRoster[];
   /** Guys hidden in Settings, as `gatewayId/agentId`. */
   hidden: string[];
+  /** What notifies you, for everyone and per guy (Settings → Notifications). */
+  notifications: Notifications;
   /** Guys with a photo picked in littleguys (`gatewayId/agentId`); it's already their `identity.avatarUrl`. */
   faces: string[];
   updatedAt: number;

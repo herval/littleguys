@@ -17,7 +17,7 @@ import type { CronJob, CronRunLogEntry, Guy } from "../lib/types";
 import { mainSessionKey, useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { confirmAction } from "../ui/confirm";
-import { Button, Field, IconButton, inputBase, inputClass, Modal, Spinner } from "../ui/kit";
+import { Button, Field, IconButton, inputBase, inputClass, Modal, Spinner, Switch } from "../ui/kit";
 import { FolderPicker } from "./FolderPicker";
 
 type Job = CronJob & {
@@ -216,8 +216,10 @@ function RoutineCard({
           {err && <p className="mt-1 text-[12px] text-[var(--color-bad)]">{err}</p>}
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
-          <Toggle
+          <Switch
             on={enabled}
+            label={enabled ? "Pause" : "Resume"}
+            className="mr-1"
             disabled={busy !== null}
             onChange={(on) => act("toggle", () => cron.update(gw, job.id, { enabled: on }))}
           />
@@ -247,21 +249,6 @@ function RoutineCard({
       </div>
       {open && <RunHistory gw={gw} jobId={job.id} onOpen={(key) => selectSession(key)} />}
     </div>
-  );
-}
-
-function Toggle({ on, onChange, disabled }: { on: boolean; onChange: (on: boolean) => void; disabled?: boolean }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={on}
-      disabled={disabled}
-      onClick={() => onChange(!on)}
-      title={on ? "Pause" : "Resume"}
-      className={`relative mr-1 h-[18px] w-[30px] rounded-full transition ${on ? "bg-[var(--color-ok)]" : "bg-[var(--color-ink-3)]/35"} disabled:opacity-50`}
-    >
-      <span className={`absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white shadow transition-all ${on ? "left-[14px]" : "left-[2px]"}`} />
-    </button>
   );
 }
 

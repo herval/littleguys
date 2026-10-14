@@ -9,6 +9,7 @@ import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputClass, Modal } from "../ui/kit";
 import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix } from "./GatewayFix";
 import { GuyVisibility } from "./GuyVisibility";
+import { Notifications } from "./Notifications";
 import { Phones } from "./Phones";
 
 export function Settings() {
@@ -57,6 +58,8 @@ export function Settings() {
         <Phones />
 
         <GuyVisibility />
+
+        <Notifications />
 
         <section className="mt-5">
           <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">General</h3>

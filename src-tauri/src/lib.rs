@@ -69,6 +69,7 @@ pub fn run() {
             commands::refresh_roster,
             commands::set_focused_session,
             commands::set_guy_hidden,
+            commands::set_notifications,
             commands::set_guy_face,
             commands::set_workspace_avatar,
             commands::open_main,

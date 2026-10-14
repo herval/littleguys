@@ -7,7 +7,7 @@
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { bridgeMockInvoke } from "./bridge";
 import type { Backend } from "./ipc";
-import type { ChatMessage, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Roster } from "./types";
+import type { ChatMessage, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, NotifyPrefs, Roster } from "./types";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -168,6 +168,7 @@ const roster: Roster = {
       ? [attic]
       : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude],
   hidden: ["hermes-1/research"],
+  notifications: { everyone: { replies: true, routines: "all" }, guys: {} },
   faces: [],
   updatedAt: now,
 };
@@ -839,6 +840,15 @@ export const mockBackend: Backend = {
         const uid = String(args?.uid);
         roster.hidden = args?.hidden ? [...new Set([...roster.hidden, uid])] : roster.hidden.filter((u) => u !== uid);
         emit("lg:roster", { ...roster, hidden: [...roster.hidden] });
+        return undefined as T;
+      }
+      case "set_notifications": {
+        const prefs = args?.prefs as NotifyPrefs;
+        const { everyone, guys } = roster.notifications;
+        roster.notifications = args?.uid
+          ? { everyone, guys: { ...guys, [String(args.uid)]: prefs } }
+          : { everyone: prefs, guys: {} };
+        emit("lg:roster", { ...roster });
         return undefined as T;
       }
       case "set_guy_face": {

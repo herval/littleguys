@@ -13,6 +13,7 @@ import type {
   HermesProbe,
   Navigate,
   RegistryAgent,
+  NotifyPrefs,
   Roster,
   UpdateState,
 } from "./types";
@@ -97,6 +98,8 @@ export const core = {
   roster: () => invoke<Roster>("get_roster"),
   refreshRoster: (gateway?: string) => invoke<Roster>("refresh_roster", { gateway: gateway ?? null }),
   setGuyHidden: (uid: string, hidden: boolean) => invoke<void>("set_guy_hidden", { uid, hidden }),
+  /** What notifies you about a guy, or (`null`) everyone: that resets every guy to it. */
+  setNotifications: (uid: string | null, prefs: NotifyPrefs) => invoke<void>("set_notifications", { uid, prefs }),
   /** A photo for a guy's face (a `data:image/…` URL), or `null` for the bot's own; kept on this Mac only. */
   setGuyFace: (uid: string, face: string | null) => invoke<void>("set_guy_face", { uid, face }),
   /** Save an OpenClaw guy's picture into their workspace (gateway on this Mac); resolves to the path for `avatar`. */

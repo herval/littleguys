@@ -3,7 +3,7 @@
 //! notifications stay live while every window is hidden; webviews receive it
 //! as `lg:roster`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,6 +49,8 @@ pub struct Roster {
     /// Guys the user hid (`gatewayId/agentId`): left out of lists, the tray
     /// mood and reply/routine notifications (approvals still notify).
     pub hidden: Vec<String>,
+    /// What notifies you, for everyone and per guy (Settings → Notifications).
+    pub notifications: Notifications,
     /// Guys with a photo picked in littleguys (`gatewayId/agentId`). It's kept on
     /// this Mac, never sent to the bot, and is already in their `identity.avatarUrl`.
     pub faces: Vec<String>,
@@ -133,6 +135,7 @@ impl State {
 pub struct Activity {
     app: AppHandle,
     hidden: Mutex<HashSet<String>>,
+    notifications: Mutex<Notifications>,
     /// `gatewayId/agentId` → the photo picked for them, as a `data:image/…` URL.
     faces: Mutex<HashMap<String, String>>,
     clients: Mutex<HashMap<String, Runtime>>,
@@ -147,11 +150,12 @@ const SESSION_LIST_LIMIT: u64 = 400;
 
 impl Activity {
     pub fn new(app: AppHandle, tray: TrayAnimator) -> Arc<Self> {
-        let hidden = read_prefs(&app).hidden_guys.into_iter().collect();
+        let prefs = read_prefs(&app);
         let faces = read_faces(&app);
         Arc::new(Self {
             app,
-            hidden: Mutex::new(hidden),
+            hidden: Mutex::new(prefs.hidden_guys.into_iter().collect()),
+            notifications: Mutex::new(prefs.notifications),
             faces: Mutex::new(faces),
             clients: Mutex::new(HashMap::new()),
             tray,
@@ -168,19 +172,24 @@ impl Activity {
 
     /// Show or hide a guy (`gatewayId/agentId`); persisted in the app's prefs.
     pub fn set_guy_hidden(&self, uid: &str, hidden: bool) -> anyhow::Result<()> {
-        let list: Vec<String> = {
-            let mut set = self.hidden.lock().unwrap();
-            if hidden {
-                set.insert(uid.to_string());
-            } else {
-                set.remove(uid);
-            }
-            let mut list: Vec<String> = set.iter().cloned().collect();
-            list.sort();
-            list
+        let list = set_member(&self.hidden, uid, hidden);
+        self.save_prefs(|prefs| prefs.hidden_guys = list)
+    }
+
+    /// What notifies you about a guy (`gatewayId/agentId`), or with `None` about
+    /// everyone: that resets every guy to it, and new guys start from it.
+    pub fn set_notifications(&self, uid: Option<&str>, prefs: NotifyPrefs) -> anyhow::Result<()> {
+        let notifications = {
+            let mut n = self.notifications.lock().unwrap();
+            n.set(uid, prefs);
+            n.clone()
         };
+        self.save_prefs(|p| p.notifications = notifications)
+    }
+
+    fn save_prefs(&self, edit: impl FnOnce(&mut Prefs)) -> anyhow::Result<()> {
         let mut prefs = read_prefs(&self.app);
-        prefs.hidden_guys = list;
+        edit(&mut prefs);
         write_prefs(&self.app, &prefs)?;
         self.publish();
         Ok(())
@@ -219,6 +228,10 @@ impl Activity {
 
     fn is_hidden(&self, gateway: &str, agent_id: &str) -> bool {
         self.hidden.lock().unwrap().contains(&format!("{gateway}/{agent_id}"))
+    }
+
+    fn notify_prefs(&self, gateway: &str, agent_id: &str) -> NotifyPrefs {
+        self.notifications.lock().unwrap().for_guy(&format!("{gateway}/{agent_id}"))
     }
 
     // ---- gateway lifecycle (driven by the hub) ---------------------------------
@@ -583,6 +596,7 @@ impl Activity {
         }
         let mut hidden: Vec<String> = self.hidden.lock().unwrap().iter().cloned().collect();
         hidden.sort();
+        let notifications = self.notifications.lock().unwrap().clone();
         let faces = self.faces.lock().unwrap();
         let gateways = state
             .gateways
@@ -596,7 +610,7 @@ impl Activity {
             .collect();
         let mut with_faces: Vec<String> = faces.keys().cloned().collect();
         with_faces.sort();
-        Roster { gateways, hidden, faces: with_faces, updated_at: now_ms() }
+        Roster { gateways, hidden, notifications, faces: with_faces, updated_at: now_ms() }
     }
 
     /// Streamed text arrives in bursts across every running thread; one roster
@@ -687,7 +701,7 @@ impl Activity {
     /// A run ended in a thread the user isn't looking at: once the roster
     /// refresh lands, notify with the thread's last message.
     fn notify_reply_later(self: &Arc<Self>, gateway: String, key: String) {
-        if !notifiable_session(&key) || agent_id_from_key(&key).is_some_and(|a| self.is_hidden(&gateway, &a)) {
+        if !notifiable_session(&key) || agent_id_from_key(&key).is_some_and(|a| self.is_hidden(&gateway, &a) || !self.notify_prefs(&gateway, &a).replies) {
             return;
         }
         let this = self.clone();
@@ -723,11 +737,7 @@ impl Activity {
         let job = payload.get("job").cloned().unwrap_or(Value::Null);
         let name = job.get("name").and_then(Value::as_str).unwrap_or("Routine");
         let agent_id = job.get("agentId").and_then(Value::as_str).unwrap_or_default();
-        if !agent_id.is_empty() && self.is_hidden(gateway, agent_id) {
-            return;
-        }
-        // The run had nothing to report (Hermes' [SILENT]).
-        if payload.get("silent").and_then(Value::as_bool) == Some(true) {
+        if (!agent_id.is_empty() && self.is_hidden(gateway, agent_id)) || !routine_run_notifies(payload, self.notify_prefs(gateway, agent_id).routines) {
             return;
         }
         let status = payload.get("status").and_then(Value::as_str).unwrap_or("ok");
@@ -833,6 +843,78 @@ impl Activity {
 struct Prefs {
     #[serde(default)]
     hidden_guys: Vec<String>,
+    #[serde(default)]
+    notifications: Notifications,
+}
+
+/// What notifies you: everyone's setting, and the guys (`gatewayId/agentId`) set otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notifications {
+    #[serde(default)]
+    pub everyone: NotifyPrefs,
+    #[serde(default)]
+    pub guys: BTreeMap<String, NotifyPrefs>,
+}
+
+impl Notifications {
+    pub fn for_guy(&self, uid: &str) -> NotifyPrefs {
+        self.guys.get(uid).copied().unwrap_or(self.everyone)
+    }
+
+    /// Set one guy, or (`None`) everyone, which resets every guy to it.
+    fn set(&mut self, uid: Option<&str>, prefs: NotifyPrefs) {
+        match uid {
+            None => {
+                self.everyone = prefs;
+                self.guys.clear();
+            }
+            Some(uid) if prefs == self.everyone => {
+                self.guys.remove(uid);
+            }
+            Some(uid) => {
+                self.guys.insert(uid.to_string(), prefs);
+            }
+        }
+    }
+}
+
+/// What notifies you about one guy. Approvals always do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifyPrefs {
+    /// Their replies in the main chat and littleguys threads.
+    pub replies: bool,
+    pub routines: RoutineNotifications,
+}
+
+impl Default for NotifyPrefs {
+    fn default() -> Self {
+        Self { replies: true, routines: RoutineNotifications::All }
+    }
+}
+
+/// Which finished routine runs notify.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RoutineNotifications {
+    #[default]
+    All,
+    Failing,
+    Off,
+}
+
+/// Adds or removes `uid`, returning the set as a sorted list (for prefs.json).
+fn set_member(set: &Mutex<HashSet<String>>, uid: &str, on: bool) -> Vec<String> {
+    let mut set = set.lock().unwrap();
+    if on {
+        set.insert(uid.to_string());
+    } else {
+        set.remove(uid);
+    }
+    let mut list: Vec<String> = set.iter().cloned().collect();
+    list.sort();
+    list
 }
 
 fn prefs_path(app: &AppHandle) -> Option<std::path::PathBuf> {
@@ -910,6 +992,20 @@ pub fn agent_id_from_key(key: &str) -> Option<String> {
 /// Channel threads (Slack, Telegram…) already notify through their apps.
 fn notifiable_session(key: &str) -> bool {
     key.ends_with(":main") || key.contains(":dashboard:")
+}
+
+/// Whether a finished routine run (a `cron` "finished" event) is worth a notification:
+/// never when it had nothing to report (Hermes' [SILENT]), and with "failures" only
+/// when it failed.
+fn routine_run_notifies(payload: &Value, mode: RoutineNotifications) -> bool {
+    if payload.get("silent").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    match mode {
+        RoutineNotifications::All => true,
+        RoutineNotifications::Failing => payload.get("status").and_then(Value::as_str) == Some("error"),
+        RoutineNotifications::Off => false,
+    }
 }
 
 /// The conversation a routine run happens in, when it isn't its own
@@ -1071,6 +1167,48 @@ mod tests {
         assert!(!run_active(&json!({ "status": "running", "hasActiveRun": false })));
         assert!(!run_active(&json!({ "status": "done", "hasActiveRun": true })));
         assert!(!run_active(&json!({})));
+    }
+
+    #[test]
+    fn routines_notify_all_failures_or_never() {
+        use RoutineNotifications::{All, Failing, Off};
+        let run = |status: &str| json!({ "action": "finished", "status": status, "summary": "pending=2 new=0", "job": { "name": "parcel-watch" } });
+        assert!(routine_run_notifies(&run("ok"), All));
+        assert!(routine_run_notifies(&run("error"), All));
+        assert!(!routine_run_notifies(&run("ok"), Failing));
+        assert!(!routine_run_notifies(&run("skipped"), Failing));
+        assert!(routine_run_notifies(&run("error"), Failing));
+        assert!(!routine_run_notifies(&run("error"), Off));
+        // A run with nothing to say never notifies.
+        assert!(!routine_run_notifies(&json!({ "status": "ok", "silent": true }), All));
+    }
+
+    #[test]
+    fn everyone_sets_every_guy_and_guys_can_differ() {
+        let quiet = NotifyPrefs { replies: false, routines: RoutineNotifications::Failing };
+        let mut n = Notifications::default();
+        assert_eq!(n.for_guy("attic/fox"), NotifyPrefs::default());
+        n.set(Some("attic/fox"), quiet);
+        assert_eq!(n.for_guy("attic/fox"), quiet);
+        assert_eq!(n.for_guy("attic/owl"), NotifyPrefs::default());
+        // Back to what everyone gets: no longer set apart.
+        n.set(Some("attic/fox"), NotifyPrefs::default());
+        assert!(n.guys.is_empty());
+        n.set(Some("attic/fox"), quiet);
+        n.set(None, NotifyPrefs { replies: true, routines: RoutineNotifications::Off });
+        assert!(n.guys.is_empty());
+        assert_eq!(n.for_guy("attic/fox").routines, RoutineNotifications::Off);
+    }
+
+    #[test]
+    fn notification_prefs_default_to_everything() {
+        let prefs: Prefs = serde_json::from_str(r#"{ "hiddenGuys": ["attic/fox"] }"#).unwrap();
+        assert_eq!(prefs.notifications, Notifications::default());
+        let prefs: Prefs = serde_json::from_str(
+            r#"{ "notifications": { "everyone": { "replies": true, "routines": "all" }, "guys": { "attic/owl": { "replies": false, "routines": "failing" } } } }"#,
+        )
+        .unwrap();
+        assert_eq!(prefs.notifications.for_guy("attic/owl"), NotifyPrefs { replies: false, routines: RoutineNotifications::Failing });
     }
 
     #[test]

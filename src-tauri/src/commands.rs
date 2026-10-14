@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tauri::{AppHandle, State};
 
-use crate::activity::{Activity, Roster};
+use crate::activity::{Activity, NotifyPrefs, Roster};
 use crate::gateway::client::{ConnStatus, RpcError};
 use crate::gateways::{AcpConfig, ClaudeCodeConfig, GatewayEntry, HermesConfig};
 use crate::runtime::RuntimeKind;
@@ -168,6 +168,12 @@ pub async fn refresh_roster(activity: State<'_, Arc<Activity>>, gateway: Option<
 #[tauri::command]
 pub fn set_guy_hidden(activity: State<'_, Arc<Activity>>, uid: String, hidden: bool) -> Result<(), String> {
     activity.set_guy_hidden(&uid, hidden).map_err(|e| e.to_string())
+}
+
+/// What notifies you about a guy (`gatewayId/agentId`), or with no `uid` about everyone.
+#[tauri::command]
+pub fn set_notifications(activity: State<'_, Arc<Activity>>, uid: Option<String>, prefs: NotifyPrefs) -> Result<(), String> {
+    activity.set_notifications(uid.as_deref(), prefs).map_err(|e| e.to_string())
 }
 
 /// Give a guy (`gatewayId/agentId`) a photo for their face, or `None` to go back

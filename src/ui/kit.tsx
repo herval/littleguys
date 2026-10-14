@@ -90,6 +90,34 @@ export function Segmented<T extends string>({
   );
 }
 
+/** An on/off switch; `label` is its tooltip. */
+export function Switch({
+  on,
+  onChange,
+  label,
+  disabled,
+  className = "",
+}: {
+  on: boolean;
+  onChange: (on: boolean) => void;
+  label?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      role="switch"
+      aria-checked={on}
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+      title={label}
+      className={`relative h-[18px] w-[30px] shrink-0 rounded-full transition ${on ? "bg-[var(--color-ok)]" : "bg-[var(--color-ink-3)]/35"} disabled:opacity-50 ${className}`}
+    >
+      <span className={`absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white shadow transition-all ${on ? "left-[14px]" : "left-[2px]"}`} />
+    </button>
+  );
+}
+
 export function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
   return (
     <label className="block">
