@@ -58,6 +58,26 @@ littleguys for iPhone pairs with this Mac and reaches every bot on it (OpenClaw,
 - **What a paired phone can do:** everything littleguys can here: chat, OK commands, edit guys and routines. Remove a phone in Settings → Phones to cut it off at once.
 - **Security:** each session is end-to-end encrypted (Noise IK) with keys that never leave the two devices. Nothing listens until a phone is paired or a code is showing; "Let paired phones connect" turns it off. The wire format is [docs/BRIDGE-PROTOCOL.md](docs/BRIDGE-PROTOCOL.md).
 
+## Questions
+
+### Is littleguys an ACP client?
+Yes. littleguys speaks the [Agent Client Protocol](https://agentclientprotocol.com), so Codex, Gemini CLI, GitHub Copilot CLI and the other agents in the ACP registry are a click away (Goose, OpenCode and others that ship as a download, once they're installed), each a contact with its own chats. It starts the agent itself, in the folder you pick, or connects to an ACP server over WebSocket. It's listed on the protocol's [clients page](https://agentclientprotocol.com/get-started/clients). More: [littleguys.dev/acp](https://www.littleguys.dev/acp).
+
+### Does it follow Claude Code sessions already running in my terminal?
+Yes, since version 0.2. **Add a bot → Claude Code** installs a small littleguys plugin in Claude Code, and from then on every session on this Mac, in a terminal or in the background, is a thread you can follow live and reply to. A terminal session gets your reply with the next prompt you type there; its permission prompts stay in the terminal. Codex and other ACP agents are different: littleguys starts those itself, so a Codex session running in a terminal doesn't show up. More: [littleguys.dev/claude-code](https://www.littleguys.dev/claude-code).
+
+### Do I need OpenClaw to use it?
+No. littleguys works with Hermes Agent, Claude Code and any ACP agent without OpenClaw. If OpenClaw isn't on your Mac, the first screen offers to install it; skip that with **Add a gateway**, and pick Hermes, Claude Code or Agents (ACP).
+
+### Can it reach agents on other machines?
+Yes: several OpenClaw gateways at once, found on your tailnet and LAN, Hermes API servers, and ACP agents served over WebSocket, such as `goose serve`. With more than one machine, each guy is labeled with where it lives.
+
+### How is it different from the OpenClaw app, Hermes Desktop or the Codex app?
+Those are full apps built around one kind of agent each, and they do more: voice, terminals, git review, usage and cost tracking. littleguys does less on purpose: it's one small chat app for all of your agents, with nothing to configure. The [comparison](https://www.littleguys.dev/compare) has the details, with a source for each.
+
+### Does it need an account, a cloud service or telemetry?
+No. littleguys talks straight to your agents, on this Mac or over your own network. The only other things it fetches are its own updates, from GitHub, and the ACP registry's list of agents when you add one. Phone notifications go through [littleguys-relay](https://github.com/herval/littleguys-relay), sealed so the relay can't read them.
+
 ## Building from source
 
 The install script does it in one go. It installs whatever's missing (the Command Line Tools, Rust, and Node and pnpm if you don't have them), builds `main` in `~/.littleguys` and puts the app in `/Applications`. Run it again to update.
