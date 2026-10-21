@@ -191,8 +191,13 @@ pub async fn browser_screenshot(
         body["targetId"] = json!(t);
     }
     let query = profile.as_ref().map(|p| json!({ "profile": p })).unwrap_or_else(|| json!({}));
+    // A tab that isn't painting can hold a screenshot for a long time; give up well before the panel's next try would.
     let shot = client
-        .call("browser.request", json!({ "method": "POST", "path": "/screenshot", "query": query, "body": body }))
+        .call_with_timeout(
+            "browser.request",
+            json!({ "method": "POST", "path": "/screenshot", "query": query, "body": body }),
+            Duration::from_secs(20),
+        )
         .await?;
     let path = shot["path"].as_str().ok_or_else(|| RpcError::new("BAD_RESPONSE", "the gateway didn't return a screenshot"))?;
     let origin = client.http_origin().ok_or_else(|| RpcError::new("BAD_RESPONSE", "unknown gateway address"))?;

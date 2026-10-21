@@ -75,6 +75,8 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
   const evalOff = useRef(false);
   const keyQueue = useRef<Promise<unknown>>(Promise.resolve());
   const wheel = useRef({ dx: 0, dy: 0, timer: 0 as number | 0 });
+  // Reconnects since the last frame. Kept across restarts so a stream that keeps dropping gives up.
+  const attempts = useRef(0);
 
   const req = useCallback(
     <T,>(method: "GET" | "POST" | "DELETE", path: string, body?: object) => browser.request<T>(gw, method, path, { profile: profile ?? undefined, body }),
@@ -123,13 +125,15 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
     let poll = 0;
     let noFrames = 0;
     let live = false;
-    let retries = 0;
+    let stilling = false;
+    let target: string | undefined = targetId;
 
     const onMessage = (m: BrowserStreamMessage) => {
       if (cancelled) return;
       if (m.kind === "frame") {
         live = true;
-        clearInterval(poll); // stills may have been standing in until the tab painted
+        attempts.current = 0;
+        clearTimeout(poll); // stills may have been standing in until the tab painted
         const blob = new Blob([m.jpeg.slice()], { type: "image/jpeg" });
         showFrame({ src: URL.createObjectURL(blob), cssWidth: m.header.cssWidth, cssHeight: m.header.cssHeight });
         if (m.header.url) setUrl(m.header.url);
@@ -137,11 +141,15 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
       } else if (m.kind === "text") {
         if (m.data.url) setUrl(m.data.url);
         if (m.data.type === "meta") loadTabs().catch(() => {});
-        if (m.data.targetId) setTargetId(m.data.targetId);
+        if (m.data.targetId) setTargetId((target = m.data.targetId));
         if (m.data.type === "error") setError(m.data.message ?? "The browser stream reported an error.");
       } else if (m.kind === "ended" && m.code !== 1000) {
-        // Tab closed → pick another; gateway hiccup → try again shortly.
-        if (retries++ < 5) {
+        // A stream that never painted won't start to on a retry: stills stand in, and
+        // restarting would only cancel them. Tab closed → pick another; hiccup → try again.
+        if (!live && m.code !== 4004) {
+          clearTimeout(noFrames);
+          stills();
+        } else if (attempts.current++ < 5) {
           setTimeout(() => !cancelled && setRestart((n) => n + 1), m.code === 4004 ? 300 : 1500);
         } else {
           setPhase("error");
@@ -150,32 +158,39 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
       }
     };
 
-    const stills = async (target?: string) => {
+    const stills = async () => {
+      if (stilling) return;
+      stilling = true;
       setPhase("stills");
+      // The page's size maps clicks onto the picture; the first picture doesn't wait for it.
       let size = { w: 1280, h: 800 };
-      try {
-        const r = await req<{ result?: { w: number; h: number } }>("POST", "/act", {
-          kind: "evaluate",
-          targetId: target,
-          fn: "() => ({ w: innerWidth, h: innerHeight })",
-        });
-        if (r.result?.w) size = r.result;
-      } catch {
-        // keep the default size
-      }
+      req<{ result?: { w: number; h: number } }>("POST", "/act", {
+        kind: "evaluate",
+        targetId: target,
+        fn: "() => ({ w: innerWidth, h: innerHeight })",
+      })
+        .then((r) => {
+          if (r.result?.w) size = r.result;
+        })
+        .catch(() => {});
+      let shown = false;
+      // One screenshot at a time: a slow one shouldn't stack more behind it on the gateway.
       const tick = async () => {
         try {
           const shot = await core.browser.screenshot(gw, profile ?? undefined, target);
           if (cancelled || live) return;
+          shown = true;
+          setError(null);
           showFrame({ src: shot.src, cssWidth: size.w, cssHeight: size.h });
           if (shot.url) setUrl(shot.url);
         } catch (e) {
-          if (!cancelled && !live) setError(errorMessage(e));
+          if (cancelled || live) return;
+          setError(errorMessage(e));
+          if (!shown) return setPhase("error");
         }
+        if (!cancelled && !live) poll = window.setTimeout(tick, 1500);
       };
-      if (cancelled || live) return;
-      await tick();
-      if (!cancelled && !live) poll = window.setInterval(tick, 1500);
+      tick();
     };
 
     (async () => {
@@ -186,7 +201,7 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
         if (status.running === false) return setPhase("not-running");
         const pages = await loadTabs();
         if (cancelled) return;
-        const target = targetId && pages.some((t) => t.targetId === targetId) ? targetId : pages[0]?.targetId;
+        target = target && pages.some((t) => t.targetId === target) ? target : pages[0]?.targetId;
         if (!target) return setPhase("not-running");
         setTargetId(target);
         const started = await core.browser.stream(gw, { profile: profile ?? undefined, targetId: target, maxWidth: 1600, quality: 70 }, onMessage);
@@ -195,10 +210,10 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
         if (started.url) setUrl(started.url);
         // Chrome only paints the tab in front of a visible window: a background tab, a
         // minimized window or a sleeping display sends no frames. Show stills until one comes.
-        noFrames = window.setTimeout(() => !cancelled && !live && stills(target), 1500);
+        noFrames = window.setTimeout(() => !cancelled && !live && stills(), 1500);
       } catch (e) {
         if (cancelled) return;
-        if (isUnsupported(e)) return stills(targetId);
+        if (isUnsupported(e)) return stills();
         setPhase("error");
         setError(errorMessage(e));
       }
@@ -208,7 +223,7 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
       cancelled = true;
       stop?.();
       clearTimeout(noFrames);
-      clearInterval(poll);
+      clearTimeout(poll);
     };
     // targetId changes come from the stream itself; switching tabs bumps `restart`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -270,11 +285,16 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
     keyQueue.current = keyQueue.current.then(() => act({ kind: "press", key }));
   };
 
+  const reconnect = () => {
+    attempts.current = 0;
+    setRestart((n) => n + 1);
+  };
+
   const startBrowser = async () => {
     setPhase("starting");
     try {
       await req("POST", "/start");
-      setRestart((n) => n + 1);
+      reconnect();
     } catch (e) {
       setPhase("error");
       setError(errorMessage(e));
@@ -284,7 +304,7 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
   const switchTab = async (id: string) => {
     setTargetId(id);
     await req("POST", "/tabs/focus", { targetId: id }).catch(() => {});
-    setRestart((n) => n + 1);
+    reconnect();
   };
 
   const navigate = async () => {
@@ -462,7 +482,7 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
                   <p className="font-display text-[14px] font-semibold">The browser view stopped</p>
                   <p className="selectable mt-1 max-w-[280px] text-[12px] text-[var(--color-ink-3)]">{error}</p>
                   <button
-                    onClick={() => setRestart((n) => n + 1)}
+                    onClick={reconnect}
                     className="mt-3 rounded-full bg-[var(--color-chip)] px-3.5 py-1.5 text-[12px] font-medium hover:bg-[var(--guy-wash-strong)]"
                   >
                     Reconnect
@@ -470,7 +490,12 @@ export function BrowserPanel({ guy }: { guy: Guy }) {
                 </>
               ) : (
                 <p className="flex items-center gap-2 text-[12px] text-[var(--color-ink-3)]">
-                  <Spinner size={12} /> {phase === "paused" ? "Paused while littleguys is hidden" : `Connecting to ${name}'s browser`}
+                  <Spinner size={12} />{" "}
+                  {phase === "paused"
+                    ? "Paused while littleguys is hidden"
+                    : phase === "stills"
+                      ? `Getting a picture of ${name}'s browser`
+                      : `Connecting to ${name}'s browser`}
                 </p>
               )}
             </div>

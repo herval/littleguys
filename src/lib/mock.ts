@@ -825,6 +825,11 @@ export const mockBackend: Backend = {
         const ready = new TextEncoder().encode(JSON.stringify({ type: "ready", targetId: "t1", url: browserState.url, title: browserState.title }));
         channel.onmessage(new Uint8Array([0, ...ready]).buffer);
         if (!params.has("stills")) streams.set(id, window.setInterval(async () => channel.onmessage(await mockFrame()), 500));
+        // ?stills=drop: the stream closes without ever sending a frame.
+        else if (params.get("stills") === "drop") {
+          const ended = new TextEncoder().encode(JSON.stringify({ code: 1011, reason: "no frames" }));
+          window.setTimeout(() => channel.onmessage(new Uint8Array([2, ...ended]).buffer), 2500);
+        }
         return { id, targetId: "t1", url: browserState.url } as T;
       }
       case "browser_screenshot":
