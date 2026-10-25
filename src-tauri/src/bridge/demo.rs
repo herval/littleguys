@@ -32,6 +32,8 @@ struct State {
     history: HashMap<String, Vec<Value>>,
     approvals: Vec<Value>,
     enabled: HashMap<String, bool>,
+    /// Photos picked for guys (`gateway/agentId`), as littleguys keeps them.
+    faces: HashMap<String, String>,
 }
 
 pub struct DemoHost {
@@ -98,7 +100,7 @@ impl DemoHost {
         let enabled = [OPENCLAW, HERMES, CLAUDE].iter().map(|id| (id.to_string(), true)).collect();
         Self {
             events: broadcast::channel(4096).0,
-            state: Mutex::new(State { sessions, history, approvals, enabled }),
+            state: Mutex::new(State { sessions, history, approvals, enabled, faces: HashMap::new() }),
             word_delay: Duration::from_millis(80),
         }
     }
@@ -275,12 +277,38 @@ impl BridgeHost for Demo {
 
     fn call(&self, gateway: &str, method: &str, params: Value, _timeout: Option<Duration>) -> BoxFuture<'static, Result<Value, RpcError>> {
         let host = self.0;
-        let result = if method == "chat.send" && host.state.lock().unwrap().enabled.get(gateway).copied().unwrap_or(false) {
+        let mut result = if method == "chat.send" && host.state.lock().unwrap().enabled.get(gateway).copied().unwrap_or(false) {
             host.send(gateway, &params)
         } else {
             host.answer(gateway, method, &params)
         };
+        // Picked photos, as AppHost adds them.
+        if let (Ok(answer), "agents.list") = (&mut result, method) {
+            let faces = host.state.lock().unwrap().faces.clone();
+            for agent in answer["agents"].as_array_mut().into_iter().flatten() {
+                if let Some(face) = agent["id"].as_str().and_then(|id| faces.get(&format!("{gateway}/{id}"))) {
+                    agent["identity"]["avatarUrl"] = json!(face);
+                    agent["littleguysFace"] = json!(true);
+                }
+            }
+        }
         Box::pin(async move { result })
+    }
+
+    fn set_face(&self, gateway: &str, agent_id: &str, face: Option<String>) -> Result<(), RpcError> {
+        if face.as_deref().is_some_and(|f| !f.starts_with("data:image/")) {
+            return Err(RpcError::new("INVALID_PARAMS", "That photo can't be used."));
+        }
+        {
+            let faces = &mut self.0.state.lock().unwrap().faces;
+            let uid = format!("{gateway}/{agent_id}");
+            match face {
+                Some(face) => faces.insert(uid, face),
+                None => faces.remove(&uid),
+            };
+        }
+        self.0.emit(gateway, "agents.changed", json!({ "agentId": agent_id }));
+        Ok(())
     }
 
     fn reconnect(&self, _gateway: &str) -> Result<(), RpcError> {

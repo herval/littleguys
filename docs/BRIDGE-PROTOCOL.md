@@ -146,6 +146,7 @@ Only the phone sends `req`. Only the Mac sends `event`.
 | `bot.call` | `{gateway, method, params?, timeoutMs?}` | the runtime's result. The runtime's error comes back as the `res` error, as-is. |
 | `bot.reconnect` | `{gateway}` | `{}` |
 | `bot.media` | `{gateway, source, sessionKey?, agentId?}` | `{available: true, stream, mimeType?, sizeBytes?}` or `{available: false, code?, reason?}` |
+| `guy.face` | `{gateway, agentId, face: string \| null}` | `{}`, or `INVALID_PARAMS` for a picture the Mac won't keep. `UNKNOWN_METHOD` from a Mac that's too old. |
 | `phone.forget` | `{}` | `{}`. The Mac drops this phone, then closes with 4010. |
 | `push.register` | `{registrationId, relayKey, boxKey, environment}` | `{}`, or `NOT_REGISTERED` / `NO_RELAY` ([Push](#push)) |
 | `push.unregister` | `{}` | `{}` |
@@ -153,6 +154,11 @@ Only the phone sends `req`. Only the Mac sends `event`.
 **`bot.call`:**
 - An unknown `gateway` → `UNKNOWN_GATEWAY`.
 - The Mac's default timeout is the runtime's own. `timeoutMs` overrides it, capped at 10 minutes.
+
+**Guys' pictures:**
+- Photos picked in littleguys (on the Mac, or on a phone with `guy.face`) are kept on the Mac, never sent to the bot.
+- They're the guys' faces in `bot.call` `agents.list` results: `identity.avatarUrl` is the photo (a `data:image/png|jpeg|webp;base64,…` URL under 100,000 characters), and `littleguysFace: true` marks it as one littleguys can take away (`face: null`).
+- A picture changing sends `bot.event` `agents.changed` (`{agentId}`) for that bot, so phones list its guys again.
 
 **`bot.media`:**
 - For OpenClaw bots, the Mac does what `gw_media` does (an authorized `meta=1` request, then the ticketed URL). Instead of returning the URL, it downloads the bytes and sends them as stream records on `stream`.

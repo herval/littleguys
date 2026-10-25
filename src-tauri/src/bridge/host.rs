@@ -74,6 +74,11 @@ pub trait BridgeHost: Send + Sync + 'static {
         agent_id: Option<&str>,
     ) -> BoxFuture<'static, Result<MediaFetch, RpcError>>;
     fn subscribe(&self) -> broadcast::Receiver<HostEvent>;
+    /// Give a guy a photo picked on the phone (a small `data:image/…` URL), or
+    /// take theirs away with `None`. Kept on this Mac, like one picked here.
+    fn set_face(&self, _gateway: &str, _agent_id: &str, _face: Option<String>) -> Result<(), RpcError> {
+        Err(RpcError::new("UNSUPPORTED", "This Mac can't set guys' pictures."))
+    }
 }
 
 /// A `ConnStatus` as phones see it ("BotStatus"): Mac-only fields dropped,

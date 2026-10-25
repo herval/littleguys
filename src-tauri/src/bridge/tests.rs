@@ -104,6 +104,18 @@ async fn pairs_then_reconnects_and_talks_to_bots() {
     let err = phone.request("nope", json!({})).await.unwrap_err();
     assert_eq!(err["code"], "UNKNOWN_METHOD");
 
+    // A photo picked on the phone is the guy's face from then on, marked as one littleguys keeps.
+    let photo = "data:image/png;base64,iVBORw0KGgo=";
+    phone.request("guy.face", json!({ "gateway": OPENCLAW, "agentId": "fox", "face": photo })).await.unwrap();
+    let agents = phone.request("bot.call", json!({ "gateway": OPENCLAW, "method": "agents.list" })).await.unwrap();
+    assert_eq!(agents["agents"][1]["identity"]["avatarUrl"], photo);
+    assert_eq!(agents["agents"][1]["littleguysFace"], true);
+    let err = phone.request("guy.face", json!({ "gateway": OPENCLAW, "agentId": "fox", "face": "https://x/y.png" })).await.unwrap_err();
+    assert_eq!(err["code"], "INVALID_PARAMS");
+    phone.request("guy.face", json!({ "gateway": OPENCLAW, "agentId": "fox", "face": null })).await.unwrap();
+    let agents = phone.request("bot.call", json!({ "gateway": OPENCLAW, "method": "agents.list" })).await.unwrap();
+    assert!(agents["agents"][1].get("littleguysFace").is_none());
+
     // chat.send streams the reply as bot.events.
     let sent = phone
         .request("bot.call", json!({ "gateway": OPENCLAW, "method": "chat.send",

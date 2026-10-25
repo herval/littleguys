@@ -450,6 +450,11 @@ impl Session {
                 host.reconnect(param(&params, "gateway")?)?;
                 Ok(json!({}))
             }
+            "guy.face" => {
+                let face = params["face"].as_str().map(str::to_string);
+                host.set_face(param(&params, "gateway")?, param(&params, "agentId")?, face)?;
+                Ok(json!({}))
+            }
             "push.register" => self.inner.register_push(&self.phone, &params).await,
             "push.unregister" => {
                 self.inner.set_push(&self.phone, None);

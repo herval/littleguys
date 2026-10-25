@@ -47,13 +47,21 @@ impl BridgeHost for AppHost {
 
     fn call(&self, gateway: &str, method: &str, params: Value, timeout: Option<Duration>) -> BoxFuture<'static, Result<Value, RpcError>> {
         let client = self.hub.client(gateway);
+        let activity = self.activity.clone();
         let (gateway, method) = (gateway.to_string(), method.to_string());
         Box::pin(async move {
             let client = client.ok_or_else(|| unknown(&gateway))?;
-            match timeout {
+            let mut result = match timeout {
                 Some(t) => client.call_with_timeout(&method, params, t).await,
                 None => client.call(&method, params).await,
+            }?;
+            // The photos picked in littleguys are the guys' faces on the phone too.
+            if method == "agents.list" {
+                if let Some(agents) = result.get_mut("agents").and_then(Value::as_array_mut) {
+                    activity.faces_for_phone(&gateway, agents);
+                }
             }
+            Ok(result)
         })
     }
 
@@ -114,6 +122,13 @@ impl BridgeHost for AppHost {
             let body = res.bytes_stream().map(|chunk| chunk.map(|b| b.to_vec()).map_err(|e| e.to_string())).boxed();
             Ok(MediaFetch::Available { mime_type, size_bytes, body })
         })
+    }
+
+    fn set_face(&self, gateway: &str, agent_id: &str, face: Option<String>) -> Result<(), RpcError> {
+        self.hub.client(gateway).ok_or_else(|| unknown(gateway))?;
+        self.activity
+            .set_guy_face(&format!("{gateway}/{agent_id}"), face)
+            .map_err(|e| RpcError::new("INVALID_PARAMS", e.to_string()))
     }
 
     fn subscribe(&self) -> broadcast::Receiver<HostEvent> {

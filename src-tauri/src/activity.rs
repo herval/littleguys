@@ -211,7 +211,23 @@ impl Activity {
         };
         write_faces(&self.app, &faces)?;
         self.publish();
+        // Paired phones keep their own rosters: tell them to look at this bot's guys again.
+        if let Some((gateway, agent_id)) = uid.split_once('/') {
+            let _ = self.bridge.send(crate::bridge::HostEvent::Event {
+                gateway: gateway.to_string(),
+                name: "agents.changed".to_string(),
+                payload: json!({ "agentId": agent_id }),
+            });
+        }
         Ok(())
+    }
+
+    /// A bot's `agents.list` rows as a paired phone gets them: with the photos
+    /// picked in littleguys, each marked `littleguysFace` (a phone can take it away).
+    pub fn faces_for_phone(&self, gateway: &str, agents: &mut [Value]) {
+        let faces = self.faces.lock().unwrap();
+        apply_faces(agents, gateway, &faces);
+        mark_faces(agents, gateway, &faces);
     }
 
     /// The workspace folder of a guy whose gateway runs on this Mac (from `agents.list`).
@@ -974,6 +990,15 @@ fn apply_faces(agents: &mut [Value], gateway: &str, faces: &HashMap<String, Stri
     }
 }
 
+/// Which guys' faces are photos picked in littleguys (`apply_faces` put them there).
+fn mark_faces(agents: &mut [Value], gateway: &str, faces: &HashMap<String, String>) {
+    for agent in agents.iter_mut().filter(|a| a.is_object()) {
+        if agent.get("id").and_then(Value::as_str).is_some_and(|id| faces.contains_key(&format!("{gateway}/{id}"))) {
+            agent["littleguysFace"] = json!(true);
+        }
+    }
+}
+
 fn approval_id(payload: &Value) -> Option<String> {
     payload
         .get("id")
@@ -1217,6 +1242,22 @@ mod tests {
         assert!(notifiable_session("agent:main:dashboard:abc"));
         assert!(!notifiable_session("agent:main:slack:channel:C1"));
         assert!(!notifiable_session("agent:main:cron:job:run:1"));
+    }
+
+    #[test]
+    fn phones_learn_which_faces_are_picked_photos() {
+        let photo = "data:image/png;base64,iVBORw0KGgo=".to_string();
+        let faces = HashMap::from([("attic/fox".to_string(), photo.clone())]);
+        let mut agents = vec![
+            json!({ "id": "fox", "identity": { "emoji": "🦊" } }),
+            json!({ "id": "owl", "identity": { "avatarUrl": "https://example.com/owl.png" } }),
+        ];
+        apply_faces(&mut agents, "attic", &faces);
+        mark_faces(&mut agents, "attic", &faces);
+        assert_eq!(agents[0]["identity"]["avatarUrl"], photo.as_str());
+        assert_eq!(agents[0]["littleguysFace"], true);
+        // The bot's own face isn't one littleguys can take away.
+        assert!(agents[1].get("littleguysFace").is_none());
     }
 
     #[test]
