@@ -3,6 +3,10 @@
 //! few hours, downloads and installs in the background, then restarts the app
 //! the next time it's idle with every window closed. The tray menu and
 //! Settings offer "Restart to update" in the meantime.
+//!
+//! On Windows installing means running the new installer, which quits the app
+//! at once; so there it only downloads in the background, and runs the
+//! installer (which starts the new version) at that same idle moment.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,6 +38,9 @@ pub struct UpdateState {
 pub struct Updates {
     state: Mutex<UpdateState>,
     running: tokio::sync::Mutex<()>,
+    /// Windows: the downloaded update, until it's installed.
+    #[cfg(windows)]
+    downloaded: Mutex<Option<(tauri_plugin_updater::Update, Vec<u8>)>>,
 }
 
 impl Updates {
@@ -43,6 +50,8 @@ impl Updates {
         Arc::new(Self {
             state: Mutex::new(UpdateState { current, phase, version: None, error: None, checked_at: None }),
             running: tokio::sync::Mutex::new(()),
+            #[cfg(windows)]
+            downloaded: Mutex::new(None),
         })
     }
 
@@ -78,7 +87,10 @@ impl Updates {
                     .notification()
                     .builder()
                     .title(format!("littleguys {version} is ready"))
-                    .body("It'll restart itself next time you're away, or restart now from the menu bar.")
+                    .body(format!(
+                        "It'll restart itself next time you're away, or restart now from the {}.",
+                        crate::platform::TRAY
+                    ))
                     .show();
             }
             Ok(None) => self.set(app, |s| {
@@ -103,10 +115,37 @@ impl Updates {
         let version = update.version.clone();
         log::info!("downloading littleguys {version}");
         self.set(app, |s| (s.phase, s.version) = ("downloading", Some(version.clone())));
-        update.download_and_install(|_, _| {}, || {}).await?;
-        log::info!("installed littleguys {version}; restarts when idle");
+        #[cfg(windows)]
+        {
+            let bytes = update.download(|_, _| {}, || {}).await?;
+            *self.downloaded.lock().unwrap() = Some((update, bytes));
+            log::info!("downloaded littleguys {version}; installs when idle");
+        }
+        #[cfg(not(windows))]
+        {
+            update.download_and_install(|_, _| {}, || {}).await?;
+            log::info!("installed littleguys {version}; restarts when idle");
+        }
         Ok(Some(version))
     }
+}
+
+/// Start the installed update: relaunch (macOS), or run the downloaded
+/// installer, which quits littleguys and opens the new version (Windows).
+pub fn restart(app: &AppHandle) {
+    #[cfg(windows)]
+    {
+        let updates = app.state::<Arc<Updates>>();
+        let downloaded = updates.downloaded.lock().unwrap().take();
+        if let Some((update, bytes)) = downloaded {
+            // Only returns if the installer didn't start.
+            let error = update.install(&bytes).map_err(|e| e.to_string()).err().unwrap_or_default();
+            log::warn!("could not start the littleguys {} installer: {error}", update.version);
+            updates.set(app, |s| (s.phase, s.version, s.error) = ("error", None, Some(error)));
+            return;
+        }
+    }
+    app.restart();
 }
 
 /// Background loop: periodic checks, then a quiet restart once an update is
@@ -122,7 +161,7 @@ pub fn start(app: AppHandle, updates: Arc<Updates>, tray: TrayAnimator) {
             if updates.state().phase == "ready" {
                 if is_idle(&app, &tray) {
                     log::info!("restarting into the installed update");
-                    app.restart();
+                    restart(&app);
                 }
             } else if tokio::time::Instant::now() >= next_check {
                 updates.check(&app).await;

@@ -14,6 +14,14 @@ pub const COMPUTER: &str = "PC";
 #[cfg(all(unix, not(target_os = "macos")))]
 pub const COMPUTER: &str = "computer";
 
+/// Where littleguys' icon lives ("restart now from the menu bar").
+#[cfg(target_os = "macos")]
+pub const TRAY: &str = "menu bar";
+#[cfg(windows)]
+pub const TRAY: &str = "taskbar";
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const TRAY: &str = "panel";
+
 // ---- PATH ---------------------------------------------------------------------------------
 
 #[cfg(unix)]

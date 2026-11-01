@@ -29,6 +29,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  # The release's text, and the notes in latest.json (the Windows build writes it last).
+  RELEASE_BODY: "On a Mac, install with `brew install herval/tap/littleguys`, or download the .dmg below. On Windows, download the -setup.exe. Already running littleguys? It updates itself."
+
 jobs:
   app:
     runs-on: macos-latest
@@ -120,7 +124,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: littleguys ${{ github.ref_name }}
-          releaseBody: "On a Mac, install with `brew install herval/tap/littleguys`, or download the .dmg below. On Windows, download the -setup.exe. Already running littleguys? It updates itself."
+          releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: true
           args: --target universal-apple-darwin --config src-tauri/tauri.release.conf.json
 
@@ -163,6 +167,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.app.outputs.release_id }}
+          # Not to make a release (releaseId is the draft above): latest.json links
+          # the installer by this tag, and carries this body as its notes.
+          tagName: ${{ github.ref_name }}
+          releaseBody: ${{ env.RELEASE_BODY }}
           args: --config src-tauri/tauri.release.conf.json
 
   publish:

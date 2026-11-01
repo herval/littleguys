@@ -123,7 +123,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => windows::open_main(app, None),
                     "quit" => app.exit(0),
-                    "restart-update" => app.restart(),
+                    "restart-update" => updater::restart(app),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {

@@ -262,5 +262,5 @@ pub async fn update_check(app: AppHandle, updates: State<'_, Arc<Updates>>) -> R
 /// Relaunch into an installed update.
 #[tauri::command]
 pub fn update_restart(app: AppHandle) {
-    app.restart();
+    crate::updater::restart(&app);
 }
