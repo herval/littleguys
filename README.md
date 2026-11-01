@@ -1,6 +1,6 @@
 # littleguys
 
-littleguys is a small, free, open-source Mac app for talking to your AI agents, WhatsApp-style: [OpenClaw](https://openclaw.ai), [Hermes](https://github.com/NousResearch/hermes-agent), Claude Code, Codex and any [ACP](https://agentclientprotocol.com) agent, on every machine, are contacts with their own chats, and a little guy in the menu bar shows who needs you. See it in action at [littleguys.dev](https://www.littleguys.dev), or watch the [51-second intro](https://www.youtube.com/watch?v=5LiTutHng-k).
+littleguys is a small, free, open-source Mac and Windows app for talking to your AI agents, WhatsApp-style: [OpenClaw](https://openclaw.ai), [Hermes](https://github.com/NousResearch/hermes-agent), Claude Code, Codex and any [ACP](https://agentclientprotocol.com) agent, on every machine, are contacts with their own chats, and a little guy in the menu bar (or taskbar) shows who needs you. See it in action at [littleguys.dev](https://www.littleguys.dev), or watch the [51-second intro](https://www.youtube.com/watch?v=5LiTutHng-k).
 
 <p align="center">
   <img src="docs/littleguys.gif" width="800" alt="The littleguys menu-bar popover listing guys with a quick reply, then the chat window with a guy at work">
