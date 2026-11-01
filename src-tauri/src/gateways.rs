@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::openclaw::config::Credential;
+use crate::platform::tailscale_cli;
 use crate::runtime::RuntimeKind;
 
 pub const OPENCLAW_GATEWAY_ID: &str = "openclaw";
@@ -344,23 +345,12 @@ pub async fn discover() -> Vec<Discovered> {
     out
 }
 
-fn tailscale_cli() -> Option<PathBuf> {
-    [
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-        "/usr/local/bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists())
-}
-
 /// MagicDNS names of online tailnet machines (this Mac included).
 pub async fn tailnet_hosts() -> Vec<String> {
     let Some(cli) = tailscale_cli() else { return vec![] };
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::process::Command::new(cli).args(["status", "--json"]).output(),
+        crate::platform::command(cli).args(["status", "--json"]).output(),
     )
     .await;
     let Ok(Ok(output)) = output else { return vec![] };

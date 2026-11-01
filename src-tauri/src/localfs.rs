@@ -369,6 +369,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // making symlinks on Windows needs Developer Mode
     fn symlinks_are_skipped_and_cant_escape() {
         let ws = Scratch::new();
         let outside = Scratch::new();

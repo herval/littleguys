@@ -123,9 +123,22 @@ cd src-tauri && cargo run --example bridge_demo                         # preten
 cd src-tauri && cargo run --example bridge_probe -- pair '<link>'       # then: bots | call <bot> <method> [json] | events
 ```
 
+### Building on Windows
+
+littleguys also builds on Windows 10 and 11 (x64). You need Rust (stable, the MSVC toolchain, with Visual Studio's C++ build tools), Node 22+ and pnpm; WebView2 comes with Windows. There's no `make` there, so use pnpm and cargo directly:
+
+```powershell
+pnpm install
+pnpm tauri dev                     # app + hot-reloading UI
+pnpm tauri build --bundles nsis    # installer in src-tauri\target\release\bundle\nsis\
+cd src-tauri; cargo test           # Rust tests
+```
+
+On Windows the little guy lives in the taskbar's notification area, Claude Code's hooks reach littleguys on a local port that only answers with a secret (macOS uses a Unix socket), and OpenClaw installs with its PowerShell installer. Every push to `main` runs `.github/workflows/windows.yml`, which runs the tests on Windows and keeps an unsigned installer in the run's artifacts.
+
 ### Releases
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds the universal app, signs it with a Developer ID and notarizes it. It then publishes the `.dmg` and the signed update bundle to GitHub Releases, along with the `latest.json` the in-app updater reads (`src-tauri/src/updater.rs`), and bumps the cask in [herval/homebrew-tap](https://github.com/herval/homebrew-tap).
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds the universal app, signs it with a Developer ID and notarizes it, then builds the Windows installer. It then publishes the `.dmg`, the `-setup.exe` and their signed update bundles to GitHub Releases, along with the `latest.json` the in-app updater reads (`src-tauri/src/updater.rs`), and bumps the cask in [herval/homebrew-tap](https://github.com/herval/homebrew-tap).
 
 The workflow's credentials live in the repo's GitHub secrets. `make release-secrets` sets them up once: it gets a Developer ID certificate from Apple (keeping the key in your login keychain), checks an app-specific password for notarization, stores the updater key and adds a deploy key to the tap. To cut a release, set the version in `src-tauri/tauri.conf.json`, commit, and push a matching tag:
 
@@ -143,13 +156,14 @@ src-tauri/            Rust core — owns the gateway connection so the menu bar 
   gateways.rs         saved gateways, address normalization, Tailscale/Bonjour discovery
   hub.rs              one GatewayClient per saved gateway (add / rename / disable / remove)
   runtime/            OpenClaw, Hermes and ACP adapters behind one interface
-  openclaw/runtime.rs finds the CLI (login-shell PATH), launchd service state, /health
+  openclaw/runtime.rs finds the CLI, the gateway service's state (launchd, or `openclaw gateway status`), /health
   doctor.rs           install / update / start / onboard
   activity.rs         per-gateway roster (guys + threads + running + approvals) → tray mood, notifications
   bridge/             paired iPhones: pairing, the Noise session, every bot passed through (BRIDGE-PROTOCOL.md)
   tray.rs             animated template sprite (frames from scripts/gen-icons.mjs)
   updater.rs          self-update from GitHub releases, restarts when idle
-  windows.rs          popover (vibrancy, anchored to the tray) + main window
+  windows.rs          popover (vibrancy or Acrylic, anchored to the tray) + main window
+  platform.rs         what differs on Windows: PATH and programs, private files, the computer's name
 src/                  React + Tailwind
   lib/gateway.ts        typed RPC wrappers (types from @openclaw/gateway-protocol)
   stores/               zustand: app (status, roster, selection), chat (transcripts + live runs)
@@ -162,6 +176,7 @@ src/                  React + Tailwind
 ## Known gaps
 
 - Clicking a notification doesn't jump to the thread yet. Notifications go through `tauri-plugin-notification`, which has no click callbacks on macOS.
+- Windows builds aren't code-signed yet, so SmartScreen warns the first time the installer runs. Linux isn't supported yet.
 - "Their own browser" is soft enforcement. OpenClaw has no per-agent browser binding, so a guy gets a named managed Chrome profile plus an `AGENTS.md` instruction to use it.
 
 ## License

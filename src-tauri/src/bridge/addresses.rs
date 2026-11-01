@@ -2,11 +2,12 @@
 //! name and address (from the Tailscale CLI).
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::platform::tailscale_cli;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -81,23 +82,12 @@ pub fn is_tailnet(ip: IpAddr) -> bool {
     }
 }
 
-fn tailscale_cli() -> Option<PathBuf> {
-    [
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-        "/usr/local/bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists())
-}
-
 /// This Mac's MagicDNS name and tailnet IPv4 address, when Tailscale is running.
 async fn tailnet_self() -> Option<(Option<String>, Option<Ipv4Addr>)> {
     let cli = tailscale_cli()?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::process::Command::new(cli).args(["status", "--json"]).output(),
+        crate::platform::command(cli).args(["status", "--json"]).output(),
     )
     .await
     .ok()?

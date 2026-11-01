@@ -60,7 +60,7 @@ pub mod claudecode;
 pub mod hermes;
 pub mod scheduler;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -369,10 +369,7 @@ pub async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, RpcErr
     tokio::task::spawn_blocking(work).await.map_err(|e| RpcError::new("INTERNAL", e.to_string()))?
 }
 
-pub fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-}
+pub use crate::platform::is_executable;
 
 pub fn parse_iso_ms(s: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis().max(0) as u64)

@@ -1,5 +1,6 @@
 import { Camera, Check, Globe, ImagePlus } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { COMPUTER } from "../lib/platform";
 import { photoToAvatar } from "../lib/avatarImage";
 import { agents as agentsApi, models as modelsApi } from "../lib/gateway";
 import { hasPicture, pictureHome, setPicture } from "../lib/guyPicture";
@@ -237,7 +238,7 @@ export function GuyEditor({ uid }: { uid: string | null }) {
             hint={
               pictureHome(roster, { gatewayId: gw }) === "openclaw"
                 ? "Saved in their workspace, so OpenClaw shows it too."
-                : `Kept in littleguys on this Mac: ${hostName ?? "their gateway"} is on another computer.`
+                : `Kept in littleguys on this ${COMPUTER}: ${hostName ?? "their gateway"} is on another computer.`
             }
           >
             <div className="flex items-center gap-2">

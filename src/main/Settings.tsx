@@ -1,5 +1,6 @@
 import { Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { shortcut } from "../lib/platform";
 import { needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
 import { core, errorMessage, isTauri, listen } from "../lib/ipc";
 import type { GatewayRoster, UpdateState } from "../lib/types";
@@ -94,7 +95,7 @@ export function Settings() {
                   />
                 </Row>
                 <Row label="Open littleguys">
-                  <kbd className="rounded bg-[var(--color-chip)] px-1.5 py-0.5 text-[11px]">⇧⌘L</kbd>
+                  <kbd className="rounded bg-[var(--color-chip)] px-1.5 py-0.5 text-[11px]">{shortcut("L", true)}</kbd>
                 </Row>
                 <UpdateRow />
               </div>

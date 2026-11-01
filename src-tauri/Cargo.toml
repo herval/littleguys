@@ -58,6 +58,10 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
 mac-notification-sys = "0.6"
 
+[target.'cfg(windows)'.dependencies]
+# Toasts that open the chat when clicked (the notification plugin ignores clicks).
+tauri-winrt-notification = "0.8"
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -1,10 +1,11 @@
-//! The two windows: the dropdown popover anchored under the menu-bar guy, and
-//! the main chat window that folds back into the menu bar when closed.
+//! The two windows: the dropdown popover anchored under the menu-bar guy (on
+//! Windows, above the taskbar's), and the main chat window that folds back into
+//! the menu bar when closed.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
-use tauri::{ActivationPolicy, AppHandle, Emitter, Manager, WebviewWindow, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WindowEvent};
 use tauri_plugin_positioner::{Position, WindowExt};
 
 use crate::gateway::identity::now_ms;
@@ -33,6 +34,9 @@ pub fn setup(app: &AppHandle) {
             use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
             let _ = apply_vibrancy(&popover, NSVisualEffectMaterial::Popover, Some(NSVisualEffectState::Active), Some(12.0));
         }
+        // Windows 11 flyouts use Acrylic; Windows 10 gets the older acrylic blur, tinted.
+        #[cfg(windows)]
+        let _ = window_vibrancy::apply_acrylic(&popover, Some(acrylic_tint(&popover)));
         let _ = popover.set_visible_on_all_workspaces(true);
         let handle = popover.clone();
         popover.on_window_event(move |event| {
@@ -48,6 +52,11 @@ pub fn setup(app: &AppHandle) {
             use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
             let _ = apply_vibrancy(&main, NSVisualEffectMaterial::Sidebar, Some(NSVisualEffectState::FollowsWindowActiveState), None);
         }
+        // Mica (Windows 11), else acrylic (Windows 10): the page is see-through.
+        #[cfg(windows)]
+        if window_vibrancy::apply_mica(&main, None).is_err() {
+            let _ = window_vibrancy::apply_acrylic(&main, Some(acrylic_tint(&main)));
+        }
         let app_handle = app.clone();
         let handle = main.clone();
         main.on_window_event(move |event| match event {
@@ -59,6 +68,7 @@ pub fn setup(app: &AppHandle) {
             WindowEvent::Focused(focused) => {
                 let _ = handle.emit("lg:main-focus", *focused);
             }
+            WindowEvent::ThemeChanged(_) => crate::tray::read_taskbar_theme(),
             _ => {}
         });
     }
@@ -76,8 +86,17 @@ pub fn toggle_popover(app: &AppHandle) {
     show_popover(&popover);
 }
 
-fn show_popover(popover: &WebviewWindow) {
+/// Where the popover goes: under the menu-bar guy on macOS; above the tray icon
+/// on Windows (the taskbar is usually at the bottom; below it when it's at the top).
+fn place_popover(popover: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
     let _ = popover.move_window(Position::TrayBottomCenter);
+    #[cfg(not(target_os = "macos"))]
+    let _ = popover.move_window_constrained(Position::TrayCenter);
+}
+
+fn show_popover(popover: &WebviewWindow) {
+    place_popover(popover);
     let _ = popover.show();
     let _ = popover.set_focus();
     let _ = popover.emit("lg:popover-shown", ());
@@ -95,7 +114,7 @@ pub fn fit_popover(app: &AppHandle, height: f64) {
     let height = height.clamp(160.0, 640.0);
     let _ = popover.set_size(tauri::LogicalSize::new(340.0, height));
     if popover.is_visible().unwrap_or(false) {
-        let _ = popover.move_window(Position::TrayBottomCenter);
+        place_popover(&popover);
     }
 }
 
@@ -113,13 +132,29 @@ pub fn open_main(app: &AppHandle, nav: Option<Navigate>) {
 
 /// The app lives in the menu bar; it only shows in the Dock / ⌘Tab while the
 /// main window is open.
+/// (Windows and Linux: the window's taskbar button already comes and goes with it.)
 pub fn set_dock_visible(app: &AppHandle, visible: bool) {
-    let policy = if visible { ActivationPolicy::Regular } else { ActivationPolicy::Accessory };
-    let _ = app.set_activation_policy(policy);
     #[cfg(target_os = "macos")]
-    if visible {
-        // Switching to Regular doesn't activate the app by itself.
-        let _ = app.run_on_main_thread(activate_app);
+    {
+        use tauri::ActivationPolicy;
+        let policy = if visible { ActivationPolicy::Regular } else { ActivationPolicy::Accessory };
+        let _ = app.set_activation_policy(policy);
+        if visible {
+            // Switching to Regular doesn't activate the app by itself.
+            let _ = app.run_on_main_thread(activate_app);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, visible);
+}
+
+/// Windows 10's acrylic takes a tint (Windows 11 picks its own): the theme's
+/// window color, mostly opaque so text stays readable.
+#[cfg(windows)]
+fn acrylic_tint(window: &WebviewWindow) -> (u8, u8, u8, u8) {
+    match window.theme() {
+        Ok(tauri::Theme::Dark) => (32, 30, 29, 216),
+        _ => (243, 241, 239, 216),
     }
 }
 

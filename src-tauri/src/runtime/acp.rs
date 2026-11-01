@@ -67,9 +67,6 @@ const LOCAL_DISCONNECTED: i64 = -1;
 const LOCAL_TIMEOUT: i64 = -2;
 const LOCAL_NOT_CONNECTED: i64 = -3;
 
-const SIGTERM: i32 = 15;
-const SIGKILL: i32 = 9;
-
 // ============================================================================
 // Public client
 // ============================================================================
@@ -762,7 +759,7 @@ async fn serve_stdio(inner: &Arc<Inner>, gen: u64) -> Outcome {
         Ok(cwd) => cwd,
         Err(message) => return Outcome::Fatal(message),
     };
-    let mut cmd = tokio::process::Command::new(&program);
+    let mut cmd = crate::platform::command(&program);
     cmd.args(&config.args)
         .current_dir(&cwd)
         .env("PATH", login_path())
@@ -770,9 +767,9 @@ async fn serve_stdio(inner: &Arc<Inner>, gen: u64) -> Outcome {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        // Own process group, so `npx` and whatever it spawns go down together.
-        .process_group(0);
+        .kill_on_drop(true);
+    // Own process group, so `npx` and whatever it spawns go down together.
+    crate::platform::own_process_group(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => return Outcome::Fatal(format!("Couldn't start `{command}`: {e}")),
@@ -945,30 +942,19 @@ async fn serve_ws(inner: &Arc<Inner>, gen: u64) -> Outcome {
     outcome
 }
 
-fn signal_group(pid: u32, signal: i32) {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: kill(2) has no memory-safety preconditions; a negative pid
-    // targets the process group we created with process_group(0).
-    unsafe {
-        kill(-(pid as i32), signal);
-    }
-}
-
-/// SIGTERM the agent's process group, then SIGKILL if it lingers.
+/// Ask the agent's process group to stop, then make it if it lingers.
 async fn terminate(child: &mut tokio::process::Child, pid: Option<u32>) {
     if let Some(pid) = pid {
-        signal_group(pid, SIGTERM);
+        crate::platform::stop_tree(pid, false);
     }
     if tokio::time::timeout(Duration::from_secs(3), child.wait()).await.is_err() {
         if let Some(pid) = pid {
-            signal_group(pid, SIGKILL);
+            crate::platform::stop_tree(pid, true);
         }
         let _ = child.kill().await;
     } else if let Some(pid) = pid {
         // The leader is gone; make sure helpers it spawned are too.
-        signal_group(pid, SIGKILL);
+        crate::platform::stop_tree(pid, true);
     }
 }
 
@@ -1020,15 +1006,10 @@ fn exit_message(name: &str, status: Option<std::process::ExitStatus>, tail: &str
 
 /// Absolute path for `command`, searching the login-shell PATH.
 fn resolve_program(command: &str) -> Option<PathBuf> {
-    let expanded = expand_tilde(command);
-    if command.contains('/') {
-        return is_executable(&expanded).then_some(expanded);
+    if crate::platform::is_path_like(command) {
+        return crate::platform::program_candidates(&expand_tilde(command)).into_iter().find(|p| is_executable(p));
     }
-    login_path()
-        .split(':')
-        .filter(|d| !d.is_empty())
-        .map(|dir| Path::new(dir).join(command))
-        .find(|candidate| is_executable(candidate))
+    crate::platform::find_program(command)
 }
 
 fn missing_program_hint(command: &str) -> String {
@@ -2434,7 +2415,7 @@ impl Inner {
             .ok_or_else(|| bad_request("name is required"))?
             .to_string();
         if !self.is_local() {
-            return Err(bad_request(&format!("{name} isn't a skill on this Mac")));
+            return Err(bad_request(&format!("{name} isn't a skill on this {}", crate::platform::COMPUTER)));
         }
         let dirs = self.skill_dirs();
         blocking(move || {
@@ -3944,12 +3925,11 @@ impl Store {
     /// Append messages (creating the transcript even when there are none).
     fn append_all(&self, key: &str, messages: &[Value]) {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let path = self.transcript_path(key);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&path);
+        let file = crate::platform::private_file().create(true).append(true).open(&path);
         let mut file = match file {
             Ok(f) => f,
             Err(e) => {

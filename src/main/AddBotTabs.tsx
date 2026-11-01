@@ -1,6 +1,7 @@
 // "Add a bot" tabs for runtimes other than OpenClaw: Hermes, Claude Code and ACP agents.
 import { Check, ChevronRight, Folder, Laptop, Network, RefreshCw, Terminal } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { COMPUTER } from "../lib/platform";
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { core, errorMessage, isTauri } from "../lib/ipc";
 import type { ClaudeCodeProbe, HermesProbe, RegistryAgent } from "../lib/types";
@@ -72,11 +73,11 @@ export function HermesTab({ onAdded }: { onAdded: (id: string) => void }) {
       <div className="rounded-xl border border-[var(--color-line)]">
         {found === null ? (
           <div className="flex items-center gap-2 px-3.5 py-4 text-[12.5px] text-[var(--color-ink-3)]">
-            <Spinner /> Looking for Hermes on this Mac and your tailnet…
+            <Spinner /> Looking for Hermes on this {COMPUTER} and your tailnet…
           </div>
         ) : found.length === 0 ? (
           <p className="px-3.5 py-4 text-[12.5px] text-[var(--color-ink-3)]">
-            No Hermes found. On this Mac, start it with <span className="font-mono">hermes serve</span>. For another machine, turn on its API
+            No Hermes found. On this {COMPUTER}, start it with <span className="font-mono">hermes serve</span>. For another machine, turn on its API
             server (<span className="font-mono">API_SERVER_ENABLED=true</span> and an <span className="font-mono">API_SERVER_KEY</span> in{" "}
             <span className="font-mono">~/.hermes/.env</span>) and add it below.
           </p>
@@ -89,7 +90,7 @@ export function HermesTab({ onAdded }: { onAdded: (id: string) => void }) {
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="font-medium">
-                    {h.mode === "local" ? "Hermes on this Mac" : `Hermes API server`}
+                    {h.mode === "local" ? `Hermes on this ${COMPUTER}` : `Hermes API server`}
                     {h.version && <span className="ml-1.5 text-[11px] font-normal text-[var(--color-ink-3)]">v{h.version}</span>}
                   </p>
                   <p className="truncate font-mono text-[11px] text-[var(--color-ink-3)]">{h.url}</p>
@@ -128,7 +129,7 @@ export function HermesTab({ onAdded }: { onAdded: (id: string) => void }) {
           <div className="flex gap-2">
             <select className={`${inputBase} w-auto`} value={mode} onChange={(e) => setMode(e.target.value as "local" | "api")}>
               <option value="api">Remote API server</option>
-              <option value="local">This Mac (hermes serve)</option>
+              <option value="local">This {COMPUTER} (hermes serve)</option>
             </select>
             <input
               className={inputClass}
@@ -194,7 +195,7 @@ export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
         <img src={claudeFace} alt="" className="h-8 w-8 shrink-0 rounded-lg" />
         <div className="min-w-0 flex-1">
           <p className="font-medium">
-            Claude Code on this Mac
+            Claude Code on this {COMPUTER}
             {probe?.version && <span className="ml-1.5 text-[11px] font-normal text-[var(--color-ink-3)]">v{probe.version}</span>}
           </p>
           <p className="text-[11.5px] text-[var(--color-ink-3)]">
@@ -350,7 +351,7 @@ export function AcpTab({ onAdded }: { onAdded: (id: string) => void }) {
         <Terminal size={13} /> Something else — a command or an ACP server URL
       </button>
       <p className="mt-4 text-[11.5px] text-[var(--color-ink-3)]">
-        Agents run on this Mac while littleguys is open and use your existing login for that tool. littleguys runs their routines.
+        Agents run on this {COMPUTER} while littleguys is open and use your existing login for that tool. littleguys runs their routines.
       </p>
     </div>
   );
@@ -429,7 +430,7 @@ function AcpForm({ agent, onBack, onAdded }: { agent: RegistryAgent | "custom"; 
         <Field label="How does it run?">
           <div className="flex gap-2">
             <select className={`${inputBase} w-auto`} value={how} onChange={(e) => setHow(e.target.value as "command" | "url")}>
-              <option value="command">Command on this Mac</option>
+              <option value="command">Command on this {COMPUTER}</option>
               <option value="url">ACP server (WebSocket)</option>
             </select>
             {how === "command" ? (

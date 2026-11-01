@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { FILE_MANAGER } from "../lib/platform";
 import { workspace } from "../lib/gateway";
 import { gatewayOf, guyHue, guyName, isOnThisMac, sessionsFor, shortTime } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
@@ -310,7 +311,7 @@ function WorkspacePath({
         }
         core.revealPath(path).catch((e) => flash(errorMessage(e)));
       }}
-      title={local ? `Show ${path} in Finder` : `${path} on ${gatewayName}. Click to copy.`}
+      title={local ? `Show ${path} in ${FILE_MANAGER}` : `${path} on ${gatewayName}. Click to copy.`}
       className="mx-2 mb-2 flex items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11.5px] text-[var(--color-ink-2)] transition hover:bg-[var(--color-chip)]"
     >
       <FolderOpen size={13} className="shrink-0 opacity-70" />
@@ -492,7 +493,7 @@ export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: stri
             </IconButton>
           )}
           {absolute && local && (
-            <IconButton label="Show in Finder" onClick={() => core.revealPath(absolute).catch(() => {})}>
+            <IconButton label={`Show in ${FILE_MANAGER}`} onClick={() => core.revealPath(absolute).catch(() => {})}>
               <FolderOpen size={13} />
             </IconButton>
           )}
@@ -520,7 +521,7 @@ export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: stri
                 onClick={() => core.revealPath(absolute).catch(() => {})}
                 className="mt-3 text-[12.5px] font-medium text-[var(--guy-ink)] hover:underline"
               >
-                Show it in Finder
+                Show it in {FILE_MANAGER}
               </button>
             )}
           </div>

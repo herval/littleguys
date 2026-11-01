@@ -1,5 +1,6 @@
 import { ChevronRight } from "lucide-react";
 import { useMemo } from "react";
+import { shortcut } from "../lib/platform";
 import { activityFor, cleanPreview, guyName, hasMainChat, isMultiGateway, shortTime, threadKind, threadTitle } from "../lib/guys";
 import type { Guy, Roster } from "../lib/types";
 import { recentGuys, useApp } from "../stores/app";
@@ -64,7 +65,7 @@ function GuyCard({
   return (
     <button
       onClick={onSelect}
-      title={`${guyName(guy)}${showGateway ? ` on ${guy.gatewayName}` : ""}${index < 9 ? ` (⌘${index + 1})` : ""}`}
+      title={`${guyName(guy)}${showGateway ? ` on ${guy.gatewayName}` : ""}${index < 9 ? ` (${shortcut(String(index + 1))})` : ""}`}
       className={`flex w-full items-center gap-3 rounded-xl pl-2 text-left outline-none transition ${
         selected ? "bg-[var(--color-chip)]" : "hover:bg-[var(--color-chip)]"
       }`}

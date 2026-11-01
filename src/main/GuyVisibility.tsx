@@ -1,5 +1,6 @@
 import { Eye, EyeOff } from "lucide-react";
 import { useMemo, useState } from "react";
+import { TRAY } from "../lib/platform";
 import { allGuys, guyName, isMultiGateway } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { Guy } from "../lib/types";
@@ -66,7 +67,7 @@ export function GuyVisibility() {
         })}
       </div>
       <p className="mt-1.5 text-[11px] text-[var(--color-ink-3)]">
-        Hidden guys stay on their gateway; they just don't appear in the menu bar or the stories row, and won't notify you — except when they
+        Hidden guys stay on their gateway; they just don't appear in the {TRAY} or the stories row, and won't notify you — except when they
         need your OK.
       </p>
       {error && <p className="mt-1 text-[11.5px] text-[var(--color-bad)]">{error}</p>}

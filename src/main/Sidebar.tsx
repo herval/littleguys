@@ -22,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { COMPUTER, IS_MAC, shortcut } from "../lib/platform";
 import { photoToAvatar } from "../lib/avatarImage";
 import { sessions as sessionsApi } from "../lib/gateway";
 import { hasPicture, setPicture } from "../lib/guyPicture";
@@ -83,7 +84,7 @@ function SidebarTop({ back }: { back: boolean }) {
   const setSettingsOpen = useApp((s) => s.setSettingsOpen);
   const canAdd = useApp((s) => s.roster.gateways.some((g) => g.loaded) || s.roster.gateways.length > 1);
   return (
-    <div data-tauri-drag-region className="flex h-14 shrink-0 items-center gap-0.5 pl-[84px] pr-2">
+    <div data-tauri-drag-region className={`flex h-14 shrink-0 items-center gap-0.5 ${IS_MAC ? "pl-[84px]" : "pl-2"} pr-2`}>
       {back && (
         <button
           onClick={() => browse(null)}
@@ -99,7 +100,7 @@ function SidebarTop({ back }: { back: boolean }) {
           <Plus size={16} />
         </IconButton>
       )}
-      <IconButton label="Settings (⌘,)" onClick={() => setSettingsOpen(true)}>
+      <IconButton label={`Settings (${shortcut(",")})`} onClick={() => setSettingsOpen(true)}>
         <SettingsIcon size={15} />
       </IconButton>
     </div>
@@ -180,7 +181,7 @@ function GuyHeader({ guy }: { guy: Guy }) {
     act.running
       ? "working…"
       : isClaudeCode
-        ? "every session on this Mac"
+        ? `every session on this ${COMPUTER}`
         : isAcp
           ? guy.gatewayName
           : model
@@ -367,7 +368,7 @@ function ThreadList({ guy }: { guy: Guy }) {
       <div className="flex items-center justify-between pb-1 pl-4 pr-2.5">
         <h3 className="font-display text-[13px] font-semibold">Threads</h3>
         {caps.newThreads && (
-          <IconButton label="New thread (⌘N)" onClick={newThread} disabled={creating}>
+          <IconButton label={`New thread (${shortcut("N")})`} onClick={newThread} disabled={creating}>
             <SquarePen size={14} />
           </IconButton>
         )}
@@ -405,7 +406,7 @@ function ThreadList({ guy }: { guy: Guy }) {
         {caps.pastSessions && (
           <button
             onClick={() => openPast(guy.uid)}
-            title="Sessions from every folder on this Mac, including ones you ran in a terminal"
+            title={`Sessions from every folder on this ${COMPUTER}, including ones you ran in a terminal`}
             className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${
               pastShown ? "bg-[var(--color-accent)] text-white shadow-sm" : "text-[var(--color-ink-2)] hover:bg-[var(--color-chip)]"
             }`}

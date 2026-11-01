@@ -2,6 +2,7 @@
 // changed on the gateway host.
 import { Check, Copy } from "lucide-react";
 import { useState } from "react";
+import { COMPUTER } from "../lib/platform";
 import { core, errorMessage } from "../lib/ipc";
 import type { ConnStatus } from "../lib/types";
 import { Button, Field, inputBase, inputClass, Spinner } from "../ui/kit";
@@ -48,7 +49,7 @@ export function PairingFix({ status, compact = false }: { status: ConnStatus; co
       </p>
       {!compact && (
         <p className="mt-1 text-[11.5px] text-[var(--color-ink-3)]">
-          This Mac shows up as “littleguys” (device {status.deviceId.slice(0, 8)}…). You can also approve it from OpenClaw's Control UI.
+          This {COMPUTER} shows up as “littleguys” (device {status.deviceId.slice(0, 8)}…). You can also approve it from OpenClaw's Control UI.
         </p>
       )}
     </div>
@@ -75,7 +76,7 @@ export function ProxyFix({ status, compact = false }: { status: ConnStatus; comp
         before a token or setup code is even sent. This tells it to trust that route; its token and device approval still apply.
       </p>
       <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-[var(--color-ink-3)]">
-        <Spinner size={11} /> littleguys tries again every 30 seconds; you'll still approve this Mac once.
+        <Spinner size={11} /> littleguys tries again every 30 seconds; you'll still approve this {COMPUTER} once.
       </p>
     </div>
   );
@@ -122,7 +123,7 @@ export function CredentialFix({ status }: { status: ConnStatus }) {
     return (
       <Field
         label={`${status.gatewayName || "Hermes"} API key`}
-        hint={<>The API_SERVER_KEY from that machine's ~/.hermes/.env. Kept on this Mac only.</>}
+        hint={<>The API_SERVER_KEY from that machine's ~/.hermes/.env. Kept on this {COMPUTER} only.</>}
       >
         <div className="flex gap-2">
           <input type="password" className={inputClass} value={value} onChange={(e) => setValue(e.target.value)} placeholder="API key" />
@@ -139,7 +140,7 @@ export function CredentialFix({ status }: { status: ConnStatus }) {
         label={`${status.gatewayName || "Gateway"} ${kind}`}
         hint={
           <>
-            On that machine: <span className="font-mono">openclaw config get gateway.auth.token</span>. Kept on this Mac only, and only
+            On that machine: <span className="font-mono">openclaw config get gateway.auth.token</span>. Kept on this {COMPUTER} only, and only
             needed once — after approval littleguys uses its own device key.
           </>
         }
@@ -194,7 +195,7 @@ export function SetupCodeFix({ onConnected }: { onConnected?: (gatewayId: string
         hint={
           <>
             From OpenClaw's Control UI (Devices → pair) or <span className="font-mono">openclaw qr --setup-code-only</span> on the gateway. Codes
-            expire after ~10 minutes; you'll still approve this Mac once.
+            expire after ~10 minutes; you'll still approve this {COMPUTER} once.
           </>
         }
       >

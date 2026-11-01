@@ -655,14 +655,4 @@ fn encode_query(s: &str) -> String {
         .collect()
 }
 
-/// This Mac's name, as people see it (System Settings → General → Sharing).
-pub fn computer_name() -> String {
-    std::process::Command::new("/usr/sbin/scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "Mac".into())
-}
+pub use crate::platform::computer_name;

@@ -1,6 +1,7 @@
 # Push a tag like v0.1.1 (matching the version in src-tauri/tauri.conf.json) and
 # this builds the universal app, signs it with the Developer ID certificate,
-# notarizes it, and publishes the .dmg plus the signed update bundle and
+# notarizes it, then builds the Windows installer (not code-signed yet), and
+# publishes the .dmg, the -setup.exe, their signed update bundles and
 # latest.json (what the in-app updater reads). It then bumps the cask in
 # herval/homebrew-tap.
 #
@@ -31,6 +32,8 @@ concurrency:
 jobs:
   app:
     runs-on: macos-latest
+    outputs:
+      release_id: ${{ steps.build.outputs.releaseId }}
     steps:
       - uses: actions/checkout@v4
 
@@ -103,6 +106,7 @@ jobs:
       # Builds into a draft so a failed build or notarization never leaves a
       # half-empty release where the updater can see it.
       - uses: tauri-apps/tauri-action@v0
+        id: build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -116,7 +120,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: littleguys ${{ github.ref_name }}
-          releaseBody: "Install with `brew install herval/tap/littleguys`, or download the .dmg below. Already running littleguys? It updates itself."
+          releaseBody: "On a Mac, install with `brew install herval/tap/littleguys`, or download the .dmg below. On Windows, download the -setup.exe. Already running littleguys? It updates itself."
           releaseDraft: true
           args: --target universal-apple-darwin --config src-tauri/tauri.release.conf.json
 
@@ -128,13 +132,50 @@ jobs:
           spctl --assess --type execute --verbose=2 "$app"
           xcrun stapler validate "$app"
 
+  # After the Mac build, into the same draft: one build at a time, so each adds
+  # its platform to latest.json instead of both writing it at once.
+  windows:
+    needs: app
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          releaseId: ${{ needs.app.outputs.release_id }}
+          args: --config src-tauri/tauri.release.conf.json
+
+  publish:
+    needs: [app, windows]
+    runs-on: ubuntu-latest
+    steps:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   homebrew:
-    needs: app
+    needs: publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

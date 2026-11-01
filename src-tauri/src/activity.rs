@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 use tauri_plugin_notification::NotificationExt;
 
 use crate::bridge::NoticeKind;
@@ -810,8 +810,9 @@ impl Activity {
         self.push_to_phones(NoticeKind::Approval, &title, &body, gateway, key, approval_id(payload));
     }
 
-    /// Shows a notification; clicking it opens `nav` (macOS only — the notification
-    /// plugin ignores clicks on desktop, so there it goes through mac-notification-sys).
+    /// Shows a notification; clicking it opens `nav` (macOS and Windows — the
+    /// notification plugin ignores clicks on desktop, so those go through
+    /// mac-notification-sys and Windows toasts directly).
     fn show_notification(&self, title: &str, body: &str, nav: Navigate) {
         #[cfg(target_os = "macos")]
         {
@@ -832,7 +833,25 @@ impl Activity {
                 Err(e) => log::warn!("notification failed: {e}"),
             });
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            use tauri_winrt_notification::Toast;
+            // Toasts carry the installed app's identity; a build run from target\ has
+            // none (no Start menu shortcut), so it borrows PowerShell's, like the plugin.
+            let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            let unbundled = exe_dir.is_some_and(|d| d.ends_with("target\\debug") || d.ends_with("target\\release"));
+            let app_id = if unbundled { Toast::POWERSHELL_APP_ID.to_string() } else { self.app.config().identifier.clone() };
+            let app = self.app.clone();
+            let toast = Toast::new(&app_id).title(title).text1(body).on_activated(move |_| {
+                let (handle, nav) = (app.clone(), nav.clone());
+                let _ = app.run_on_main_thread(move || crate::windows::open_main(&handle, Some(nav)));
+                Ok(())
+            });
+            if let Err(e) = toast.show() {
+                log::warn!("notification failed: {e}");
+            }
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = nav;
             if let Err(e) = self.app.notification().builder().title(title).body(body).show() {

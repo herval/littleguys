@@ -1,5 +1,6 @@
 import { ChevronRight, Plus, RotateCw, Stethoscope } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { COMPUTER } from "../lib/platform";
 import { core, errorMessage, listen } from "../lib/ipc";
 import type { ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
 import { needsProxyFix, statusLabel } from "../lib/guys";
@@ -151,7 +152,7 @@ function subline(status: ConnStatus | null): string {
     case "offline":
       return status.mode === "remote"
         ? `Can't reach ${hostOf(status.url)}. Is it powered on and on your network/tailnet?`
-        : "OpenClaw's gateway isn't running on this Mac.";
+        : `OpenClaw's gateway isn't running on this ${COMPUTER}.`;
     case "no-config":
       return "littleguys runs on OpenClaw. It'll install and set it up for you — no terminal needed.";
     case "error":
@@ -269,7 +270,7 @@ function OnboardForm({ running, onSubmit }: { running: boolean; onSubmit: (choic
         </select>
       </Field>
       {provider.needsKey && (
-        <Field label="API key" hint="Stored in OpenClaw's config on this Mac.">
+        <Field label="API key" hint={`Stored in OpenClaw's config on this ${COMPUTER}.`}>
           <input type="password" className={inputClass} value={key} onChange={(e) => setKey(e.target.value)} placeholder={provider.placeholder} disabled={running} />
         </Field>
       )}

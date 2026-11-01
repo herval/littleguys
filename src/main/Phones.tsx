@@ -1,5 +1,6 @@
 import { Bell, Pencil, QrCode, Smartphone, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { COMPUTER } from "../lib/platform";
 import { bridge, type BridgeState, type PhoneState } from "../lib/bridge";
 import { relativeTime } from "../lib/guys";
 import { errorMessage } from "../lib/ipc";
@@ -35,7 +36,7 @@ export function Phones() {
       </div>
       {state.phones.length === 0 ? (
         <p className="rounded-xl border border-dashed border-[var(--color-line)] px-3.5 py-3 text-[12px] text-[var(--color-ink-3)]">
-          Use your guys from your iPhone. Your phone connects to this Mac over Wi-Fi, or from anywhere with Tailscale.
+          Use your guys from your iPhone. Your phone connects to this {COMPUTER} over Wi-Fi, or from anywhere with Tailscale.
         </p>
       ) : (
         <div className="rounded-xl border border-[var(--color-line)]">
@@ -76,7 +77,7 @@ function PhoneRow({
     ? p.via === "tailscale"
       ? "Connected over Tailscale"
       : p.via === "local"
-        ? "Connected on this Mac"
+        ? `Connected on this ${COMPUTER}`
         : "Connected over Wi-Fi"
     : !enabled
       ? "Can't connect while phones are turned off"
@@ -120,7 +121,7 @@ function PhoneRow({
       <IconButton
         label="Remove"
         onClick={async () => {
-          if (await confirmAction(`Remove ${p.name}? It won't reach your guys through this Mac until you pair it again.`, "littleguys", "Remove"))
+          if (await confirmAction(`Remove ${p.name}? It won't reach your guys through this ${COMPUTER} until you pair it again.`, "littleguys", "Remove"))
             run(() => bridge.removePhone(p.key));
         }}
       >

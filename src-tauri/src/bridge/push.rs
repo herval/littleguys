@@ -221,7 +221,7 @@ pub type Delivery = (String, Result<Value, String>);
 impl Inner {
     /// `push.register`: trust the registration once the relay confirms the phone owns it.
     pub(crate) async fn register_push(&self, phone: &str, params: &Value) -> Result<Value, RpcError> {
-        let relay = self.relay_url().ok_or_else(|| RpcError::new("NO_RELAY", "Push isn't set up on this Mac."))?;
+        let relay = self.relay_url().ok_or_else(|| RpcError::new("NO_RELAY", format!("Push isn't set up on this {}.", crate::platform::COMPUTER)))?;
         let field = |k: &str| {
             params[k].as_str().filter(|s| !s.is_empty()).map(str::to_string).ok_or_else(|| RpcError::new("INVALID_PARAMS", format!("{k} is required")))
         };

@@ -806,10 +806,10 @@ async fn connect_local(inner: &Arc<Inner>) -> Outcome {
 
     let Some(token) = local_token(inner, &base).await else {
         return if auth_required {
-            Outcome::Auth(
-                "This Hermes backend requires signing in (it isn't bound to this Mac only). Use Hermes' API server (API mode) for remote machines."
-                    .into(),
-            )
+            Outcome::Auth(format!(
+                "This Hermes backend requires signing in (it isn't bound to this {} only). Use Hermes' API server (API mode) for remote machines.",
+                crate::platform::COMPUTER
+            ))
         } else {
             Outcome::Fatal("Couldn't get a session token from Hermes.".into())
         };

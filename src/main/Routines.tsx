@@ -1,5 +1,6 @@
 import { CalendarClock, ChevronRight, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { COMPUTER } from "../lib/platform";
 import { cron } from "../lib/gateway";
 import { capsOf, gatewayOf, guyName, hasMainChat, relativeTime, sessionsFor, threadKind, threadTitle } from "../lib/guys";
 import { errorMessage, listen } from "../lib/ipc";
@@ -68,7 +69,7 @@ export function RoutinesPanel({ guy }: { guy: Guy }) {
           <h3 className="text-[13.5px] font-semibold">Routines</h3>
           <p className="text-[11px] text-[var(--color-ink-3)]">
             Things {guyName(agent)} does on a schedule
-            {runsLocally ? " · run by littleguys on this Mac, while it's open" : ""}
+            {runsLocally ? ` · run by littleguys on this ${COMPUTER}, while it's open` : ""}
           </p>
         </div>
         <Button variant="primary" size="sm" onClick={() => setEditing("new")}>

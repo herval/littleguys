@@ -1,5 +1,6 @@
 import { Folder, History, RotateCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { COMPUTER } from "../lib/platform";
 import { sessions as sessionsApi } from "../lib/gateway";
 import { guyName, relativeTime } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
@@ -84,7 +85,7 @@ export function PastSessions({ guy }: { guy: Guy }) {
         <div data-tauri-drag-region className="min-w-0 flex-1">
           <h3 className="font-display text-[14.5px] font-semibold leading-tight">Resume a session</h3>
           <p className="mt-0.5 truncate text-[11.5px] leading-tight text-[var(--color-ink-3)]">
-            {guyName(guy)}'s sessions from every folder on this Mac, including ones from a terminal
+            {guyName(guy)}'s sessions from every folder on this {COMPUTER}, including ones from a terminal
           </p>
         </div>
         <IconButton

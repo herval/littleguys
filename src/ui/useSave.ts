@@ -4,6 +4,7 @@
 // that's already on this Mac.
 import { Check, Download, FolderOpen, type LucideIcon, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { FILE_MANAGER } from "../lib/platform";
 import { core, errorMessage } from "../lib/ipc";
 
 type SaveStatus =
@@ -69,7 +70,7 @@ export function saveLabel(save: Save): string {
     case "saved":
       return "Saved";
     case "done":
-      return "Show in Finder";
+      return `Show in ${FILE_MANAGER}`;
     case "failed":
       return "Couldn't save";
     default:

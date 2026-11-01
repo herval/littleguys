@@ -6,14 +6,16 @@
 
 ## Releasing
 
-A `v*` tag runs `.github/workflows/release.yml`. It builds the universal app, signs it with the Developer ID, notarizes it, and publishes the GitHub release: the `.dmg`, the update bundle and `latest.json`, which the in-app updater reads. It then pushes the cask to herval/homebrew-tap, which is what `brew install herval/tap/littleguys` installs.
+A `v*` tag runs `.github/workflows/release.yml`. It builds the universal app, signs it with the Developer ID, notarizes it, then builds the Windows installer into the same draft (not code-signed yet, so SmartScreen warns on first run). It publishes the GitHub release: the `.dmg`, the `-setup.exe`, their update bundles and `latest.json`, which the in-app updater reads. It then pushes the cask to herval/homebrew-tap, which is what `brew install herval/tap/littleguys` installs.
+
+Every push to `main` also runs `.github/workflows/windows.yml`: the Rust tests on Windows and an unsigned installer under the run's Artifacts.
 
 To cut one (vX.Y.Z):
 1. Set the version in `src-tauri/tauri.conf.json`, `package.json` and `src-tauri/Cargo.toml`. The workflow fails if the tag doesn't match `tauri.conf.json`. Run `cd src-tauri && cargo check` so `Cargo.lock` picks up the new version.
 2. Commit just those files ("Release vX.Y.Z"), then `git tag vX.Y.Z && git push origin main vX.Y.Z`.
-3. Watch the run (`gh run list --workflow release.yml`, then `gh run watch <id>`). It takes about 25 minutes. Credentials are checked in the first minute, and most of the rest is the Rust build and Apple's notarization queue.
+3. Watch the run (`gh run list --workflow release.yml`, then `gh run watch <id>`). It takes about 45 minutes: the Mac build (about 25, most of it the Rust build and Apple's notarization queue), then the Windows one. Credentials are checked in the first minute.
 4. Check it shipped:
-   - The release has `littleguys_X.Y.Z_universal.dmg`, `littleguys_universal.app.tar.gz` (+ `.sig`) and `latest.json`.
+   - The release has `littleguys_X.Y.Z_universal.dmg`, `littleguys_universal.app.tar.gz` (+ `.sig`), `littleguys_X.Y.Z_x64-setup.exe` (+ `.sig`) and `latest.json`, which lists both `darwin-*` and `windows-x86_64`.
    - `Casks/littleguys.rb` in herval/homebrew-tap has the new version, and its sha256 matches the `.dmg`'s.
 
 If it fails:

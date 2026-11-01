@@ -1,5 +1,6 @@
 import { Settings as SettingsIcon } from "lucide-react";
 import { useEffect } from "react";
+import { isModKey, shortcut } from "../lib/platform";
 import { capsOf, liveGateways } from "../lib/guys";
 import { core, listen } from "../lib/ipc";
 import { recentGuys, useApp, useSelectedGuy } from "../stores/app";
@@ -48,15 +49,15 @@ export function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey && e.key === ",") {
+      if (isModKey(e) && e.key === ",") {
         e.preventDefault();
         useApp.getState().setSettingsOpen(true);
       }
-      if (e.metaKey && e.key === "n") {
+      if (isModKey(e) && e.key === "n") {
         e.preventDefault();
         document.dispatchEvent(new CustomEvent("lg:new-thread"));
       }
-      if (e.metaKey && /^[1-9]$/.test(e.key)) {
+      if (isModKey(e) && /^[1-9]$/.test(e.key)) {
         const { roster, order, selectGuy } = useApp.getState();
         const guy = recentGuys(roster, order)[Number(e.key) - 1];
         if (guy) selectGuy(guy.uid);
@@ -99,7 +100,7 @@ export function App() {
         ) : (
           <main className="flex min-w-0 flex-1 flex-col bg-[var(--color-pane-solid)]">
             <div data-tauri-drag-region className="flex h-14 shrink-0 items-center justify-end px-3">
-              <IconButton label="Settings (⌘,)" onClick={() => useApp.getState().setSettingsOpen(true)}>
+              <IconButton label={`Settings (${shortcut(",")})`} onClick={() => useApp.getState().setSettingsOpen(true)}>
                 <SettingsIcon size={15} />
               </IconButton>
             </div>

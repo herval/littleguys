@@ -225,8 +225,8 @@ fn admit(inner: &Inner, ip: IpAddr, phone_key: &str, msg1: &Value) -> Result<Adm
         let check = inner.pairings.lock().unwrap().check(&proof, phone_key, &inner.keys.noise_b64(), now_ms());
         return match check {
             ProofCheck::Match(secret_id) => Ok(Admission::Pairing { secret_id }),
-            ProofCheck::Expired => Err(json!({ "code": "PAIRING_EXPIRED", "message": "That code expired. Make a new one on your Mac." })),
-            ProofCheck::Bad => Err(json!({ "code": "BAD_PROOF", "message": "That code isn't from this Mac." })),
+            ProofCheck::Expired => Err(json!({ "code": "PAIRING_EXPIRED", "message": format!("That code expired. Make a new one on your {}.", crate::platform::COMPUTER) })),
+            ProofCheck::Bad => Err(json!({ "code": "BAD_PROOF", "message": format!("That code isn't from this {}.", crate::platform::COMPUTER) })),
         };
     }
     if inner.is_paired(phone_key) {

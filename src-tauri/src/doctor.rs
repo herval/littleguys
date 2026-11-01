@@ -15,7 +15,12 @@ use crate::hub::Hub;
 use crate::openclaw::config::{self, GatewayMode};
 use crate::openclaw::runtime;
 
+/// OpenClaw's official installers: the CLI and its own Node in ~/.openclaw
+/// (macOS, Linux), or the CLI via npm, bringing Node.js if needed (Windows).
+#[cfg(not(windows))]
 const INSTALLER_URL: &str = "https://openclaw.ai/install-cli.sh";
+#[cfg(windows)]
+const INSTALLER_URL: &str = "https://openclaw.ai/install.ps1";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,8 +85,9 @@ pub async fn doctor_check(hub: State<'_, Arc<Hub>>) -> Result<DoctorReport, Stri
     if endpoint.mode == GatewayMode::Local {
         let port = endpoint.port.unwrap_or(config::DEFAULT_GATEWAY_PORT);
         report.gateway_healthy = Some(runtime::health_ok(port).await);
-        report.service_installed = runtime::service_plist().is_some_and(|p| p.exists());
-        report.service = runtime::service_state().await;
+        let service = runtime::gateway_service(report.cli_path.as_deref().map(std::path::Path::new)).await;
+        report.service_installed = service.installed;
+        report.service = service.state;
         if report.gateway_healthy == Some(false) {
             report.log_tail = runtime::gateway_log_path().and_then(|p| runtime::tail_file(&p, 30));
         }
@@ -104,7 +110,11 @@ fn diagnose(r: &DoctorReport, status: &crate::gateway::client::ConnStatus, crede
         issues.push(Issue {
             id: "no-cli",
             title: "OpenClaw isn't installed".into(),
-            detail: "littleguys runs on OpenClaw. Install it (about 2 minutes) — it goes in ~/.openclaw and doesn't need admin rights.".into(),
+            detail: if cfg!(windows) {
+                "littleguys runs on OpenClaw. Install it (a few minutes); it brings Node.js along if you don't have it.".into()
+            } else {
+                "littleguys runs on OpenClaw. Install it (about 2 minutes) — it goes in ~/.openclaw and doesn't need admin rights.".into()
+            },
             fix: Some("install"),
         });
     } else if (outdated || log_says_newer) && local && !r.connected {
@@ -179,7 +189,7 @@ fn progress(app: &AppHandle, step: &str, line: &str) {
     let _ = app.emit("lg:doctor-progress", serde_json::json!({ "step": step, "line": line }));
 }
 
-/// Install OpenClaw with the official installer (node + CLI in ~/.openclaw).
+/// Install OpenClaw with the official installer (see [`INSTALLER_URL`]).
 #[tauri::command]
 pub async fn doctor_install_openclaw(app: AppHandle, hub: State<'_, Arc<Hub>>, version: Option<String>) -> Result<(), String> {
     let client = openclaw(&hub)?;
@@ -191,14 +201,32 @@ pub async fn doctor_install_openclaw(app: AppHandle, hub: State<'_, Arc<Hub>>, v
         .text()
         .await
         .map_err(|e| e.to_string())?;
-    let tmp = std::env::temp_dir().join(format!("littleguys-install-{}.sh", uuid::Uuid::new_v4()));
+    let ext = if cfg!(windows) { "ps1" } else { "sh" };
+    let tmp = std::env::temp_dir().join(format!("littleguys-install-{}.{ext}", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, script).map_err(|e| e.to_string())?;
 
-    let mut cmd = runtime::command(std::path::Path::new("/bin/bash"));
-    cmd.arg(&tmp).arg("--json");
-    if let Some(v) = version.filter(|v| !v.trim().is_empty()) {
-        cmd.args(["--version", v.trim()]);
-    }
+    let version = version.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    #[cfg(not(windows))]
+    let cmd = {
+        let mut cmd = runtime::command(std::path::Path::new("/bin/bash"));
+        cmd.arg(&tmp).arg("--json");
+        if let Some(v) = version {
+            cmd.args(["--version", v]);
+        }
+        cmd
+    };
+    // Progress comes as plain lines here (no --json); littleguys onboards on its own.
+    #[cfg(windows)]
+    let cmd = {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let powershell = std::path::PathBuf::from(root).join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+        let mut cmd = runtime::command(&powershell);
+        cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&tmp).arg("-NoOnboard");
+        if let Some(v) = version {
+            cmd.args(["-Tag", v]);
+        }
+        cmd
+    };
     let app2 = app.clone();
     let result = runtime::run_streaming(cmd, Duration::from_secs(1800), move |line| {
         let label = serde_json::from_str::<Value>(line)
@@ -225,6 +253,8 @@ pub async fn doctor_install_openclaw(app: AppHandle, hub: State<'_, Arc<Hub>>, v
     if !out.ok {
         return Err(first_meaningful_line(&out.stderr, &out.stdout));
     }
+    // The installer may have put node and openclaw somewhere new on PATH.
+    crate::platform::refresh_login_path();
     client.reconnect_now();
     Ok(())
 }
@@ -247,7 +277,8 @@ pub async fn doctor_update_openclaw(app: AppHandle, hub: State<'_, Arc<Hub>>) ->
     Ok(())
 }
 
-/// Install (if needed) and start the gateway LaunchAgent, then wait for /health.
+/// Install (if needed) and start the gateway service (a LaunchAgent, Scheduled
+/// Task or systemd unit), then wait for /health.
 #[tauri::command]
 pub async fn doctor_start_gateway(app: AppHandle, hub: State<'_, Arc<Hub>>) -> Result<(), String> {
     let client = openclaw(&hub)?;
@@ -256,7 +287,7 @@ pub async fn doctor_start_gateway(app: AppHandle, hub: State<'_, Arc<Hub>>) -> R
     let cfg = config::load_config(&paths).map_err(|e| e.to_string())?;
     let port = config::resolve_endpoint(cfg.as_ref(), &paths).port.unwrap_or(config::DEFAULT_GATEWAY_PORT);
 
-    let installed = runtime::service_plist().is_some_and(|p| p.exists());
+    let installed = runtime::gateway_service(Some(&cli)).await.installed;
     let steps: Vec<Vec<&str>> = if installed {
         vec![vec!["gateway", "restart"]]
     } else {
@@ -285,7 +316,7 @@ pub async fn doctor_start_gateway(app: AppHandle, hub: State<'_, Arc<Hub>>) -> R
 }
 
 /// First-run setup: `openclaw onboard --non-interactive` with the chosen
-/// provider, a loopback gateway with token auth, and the launchd service.
+/// provider, a loopback gateway with token auth, and the gateway service.
 #[tauri::command]
 pub async fn doctor_onboard(
     app: AppHandle,

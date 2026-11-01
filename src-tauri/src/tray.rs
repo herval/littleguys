@@ -1,7 +1,8 @@
-//! The little guy in the menu bar: a template-image sprite animated per mood.
-//! Frames come from scripts/gen-icons.mjs.
+//! The little guy in the menu bar (Windows: the taskbar's notification area): a
+//! template-image sprite animated per mood. Frames come from scripts/gen-icons.mjs.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -82,7 +83,42 @@ pub fn set_update_ready(app: &AppHandle, version: &str) {
 }
 
 pub fn first_frame() -> Image<'static> {
-    Image::from_bytes(FRAMES[0].1).expect("tray frame decodes")
+    tinted(Image::from_bytes(FRAMES[0].1).expect("tray frame decodes"))
+}
+
+/// Windows: the taskbar is light, so the sprite stays black (else it's drawn white).
+static LIGHT_TASKBAR: AtomicBool = AtomicBool::new(false);
+
+/// Windows: look at the taskbar's theme again; the sprite follows it from its next frame.
+pub fn read_taskbar_theme() {
+    #[cfg(windows)]
+    LIGHT_TASKBAR.store(crate::platform::taskbar_is_light(), Ordering::Relaxed);
+}
+
+/// macOS tints template images to suit the menu bar. The Windows taskbar doesn't,
+/// so there the sprite is white on a dark taskbar, and padded square (tray icons
+/// are square; a wide one gets squashed).
+fn tinted(img: Image<'static>) -> Image<'static> {
+    #[cfg(windows)]
+    let img = {
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let side = w.max(h);
+        let light = LIGHT_TASKBAR.load(Ordering::Relaxed);
+        let mut out = vec![0u8; side * side * 4];
+        let (dx, dy) = ((side - w) / 2, (side - h) / 2);
+        for y in 0..h {
+            for x in 0..w {
+                let from = (y * w + x) * 4;
+                let to = ((y + dy) * side + x + dx) * 4;
+                out[to..to + 4].copy_from_slice(&img.rgba()[from..from + 4]);
+                if !light {
+                    out[to..to + 3].fill(255);
+                }
+            }
+        }
+        Image::new_owned(out, side as u32, side as u32)
+    };
+    img
 }
 
 #[derive(Clone)]
@@ -109,10 +145,14 @@ impl TrayAnimator {
     }
 
     pub fn start(&self, app: AppHandle) {
-        let images: HashMap<&'static str, Image<'static>> = FRAMES
-            .iter()
-            .filter_map(|(name, bytes)| Image::from_bytes(bytes).ok().map(|img| (*name, img)))
-            .collect();
+        let decode = || -> HashMap<&'static str, Image<'static>> {
+            FRAMES
+                .iter()
+                .filter_map(|(name, bytes)| Image::from_bytes(bytes).ok().map(|img| (*name, tinted(img))))
+                .collect()
+        };
+        let mut images = decode();
+        let mut light = LIGHT_TASKBAR.load(Ordering::Relaxed);
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
             let mut shown: Option<&'static str> = None;
@@ -124,6 +164,11 @@ impl TrayAnimator {
                 }
                 'mood: loop {
                     for (frame, hold) in schedule(mood) {
+                        if light != LIGHT_TASKBAR.load(Ordering::Relaxed) {
+                            light = !light;
+                            images = decode();
+                            shown = None;
+                        }
                         if shown != Some(*frame) {
                             if let (Some(tray), Some(image)) = (app.tray_by_id(TRAY_ID), images.get(frame)) {
                                 // One call: set_icon alone draws the frame as a

@@ -429,8 +429,9 @@ async fn run(inner: Arc<Inner>) {
                     s.phase = Phase::AuthFailed;
                     s.detail_code = Some("AUTH_RATE_LIMITED".into());
                     s.message = Some(format!(
-                        "The gateway is temporarily refusing sign-ins from this Mac after too many failed attempts (by something else on this Mac, or a stale token). littleguys will try again in {} min.",
-                        wait.as_secs().div_ceil(60)
+                        "The gateway is temporarily refusing sign-ins from this {pc} after too many failed attempts (by something else on this {pc}, or a stale token). littleguys will try again in {} min.",
+                        wait.as_secs().div_ceil(60),
+                        pc = crate::platform::COMPUTER
                     ));
                     s.hello = None;
                 });

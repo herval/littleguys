@@ -1,5 +1,6 @@
 import { CornerDownLeft, MessageCircleReply, Plus, Power, Settings } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { COMPUTER, shortcut } from "../lib/platform";
 import { chat as chatApi } from "../lib/gateway";
 import { activityFor, cleanPreview, defaultThread, guyName, isMultiGateway, liveGateways, needsAction, needsProxyFix, statusLabel, threadKind } from "../lib/guys";
 import { core, errorMessage, listen } from "../lib/ipc";
@@ -269,10 +270,10 @@ function Disconnected({ gateway }: { gateway?: GatewayRoster }) {
   const copy: Record<string, { title: string; body: string }> = {
     starting: { title: "Waking up…", body: "Connecting to OpenClaw." },
     connecting: { title: "Connecting…", body: status?.url ?? "" },
-    pairing: { title: "Approve littleguys", body: `${gateway?.name ?? "Your gateway"} needs to approve this Mac once.` },
+    pairing: { title: "Approve littleguys", body: `${gateway?.name ?? "Your gateway"} needs to approve this ${COMPUTER} once.` },
     "auth-failed": { title: "Can't sign in", body: status?.message ?? "The gateway rejected littleguys' credentials." },
     offline: { title: "Gateway is offline", body: status?.message ?? "littleguys will keep retrying." },
-    "no-config": { title: "Let's get you set up", body: "OpenClaw isn't set up on this Mac yet." },
+    "no-config": { title: "Let's get you set up", body: `OpenClaw isn't set up on this ${COMPUTER} yet.` },
     error: needsProxyFix(status)
       ? { title: "One setting on your gateway", body: `${gateway?.name ?? "Your gateway"} won't take connections through its Tailscale Serve route yet.` }
       : { title: "Something's off", body: status?.message ?? "" },
@@ -305,11 +306,11 @@ function Footer() {
       <MenuItem
         icon={<span className="flex w-3.5 justify-center text-[13px] leading-none">◐</span>}
         label="Open littleguys"
-        shortcut="⇧⌘L"
+        shortcut={shortcut("L", true)}
         onClick={() => core.openMain()}
       />
-      <MenuItem icon={<Settings size={14} />} label="Settings…" shortcut="⌘," onClick={() => core.openMain({ view: "settings" })} />
-      <MenuItem icon={<Power size={14} />} label="Quit littleguys" shortcut="⌘Q" onClick={() => core.quit()} />
+      <MenuItem icon={<Settings size={14} />} label="Settings…" shortcut={shortcut(",")} onClick={() => core.openMain({ view: "settings" })} />
+      <MenuItem icon={<Power size={14} />} label="Quit littleguys" shortcut={shortcut("Q")} onClick={() => core.quit()} />
     </div>
   );
 }

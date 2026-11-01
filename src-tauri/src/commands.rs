@@ -192,7 +192,7 @@ pub fn set_workspace_avatar(
     agent_id: String,
     face: Option<String>,
 ) -> Result<Option<String>, String> {
-    let workspace = activity.local_workspace(&gateway, &agent_id).ok_or("Their workspace isn't on this Mac.")?;
+    let workspace = activity.local_workspace(&gateway, &agent_id).ok_or_else(|| format!("Their workspace isn't on this {}.", crate::platform::COMPUTER))?;
     match face {
         Some(face) if crate::activity::is_face(&face) => crate::avatar_file::write(&workspace, &face).map(Some),
         Some(_) => Err(anyhow::anyhow!("That picture can't be used.")),
@@ -229,8 +229,8 @@ pub fn fit_popover(app: AppHandle, height: f64) {
     windows::fit_popover(&app, height);
 }
 
-/// Open a folder (an agent workspace) in Finder. Only meaningful when the
-/// gateway runs on this Mac.
+/// Open a folder (an agent workspace) in Finder or File Explorer. Only
+/// meaningful when the gateway runs on this computer.
 #[tauri::command]
 pub fn reveal_path(path: String) -> Result<(), String> {
     let expanded = match path.strip_prefix("~/") {
@@ -238,13 +238,9 @@ pub fn reveal_path(path: String) -> Result<(), String> {
         None => std::path::PathBuf::from(&path),
     };
     if !expanded.exists() {
-        return Err(format!("{} doesn't exist on this Mac", expanded.display()));
+        return Err(format!("{} doesn't exist on this {}", expanded.display(), crate::platform::COMPUTER));
     }
-    std::process::Command::new("/usr/bin/open")
-        .arg(&expanded)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    tauri_plugin_opener::open_path(&expanded, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

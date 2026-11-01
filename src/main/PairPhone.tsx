@@ -1,6 +1,7 @@
 import { Check, Copy, RotateCw, Smartphone } from "lucide-react";
 import QRCode from "qrcode";
 import { useEffect, useState } from "react";
+import { COMPUTER } from "../lib/platform";
 import { bridge, type BridgeState } from "../lib/bridge";
 import { errorMessage } from "../lib/ipc";
 import { Button, Modal, Spinner } from "../ui/kit";
@@ -53,7 +54,7 @@ export function PairPhone({ state, onClose }: { state: BridgeState; onClose: () 
               <Check size={24} />
             </span>
             <p className="text-[14px] font-medium">Paired with {paired.name}</p>
-            <p className="text-[12px] text-[var(--color-ink-3)]">Your guys on this Mac are on your phone now.</p>
+            <p className="text-[12px] text-[var(--color-ink-3)]">Your guys on this {COMPUTER} are on your phone now.</p>
           </div>
         ) : (
           <>
@@ -99,13 +100,13 @@ export function PairPhone({ state, onClose }: { state: BridgeState; onClose: () 
               <span>
                 {lan.length || tailnet ? (
                   <>
-                    Your phone reaches this Mac
+                    Your phone reaches this {COMPUTER}
                     {lan.length ? <> on Wi-Fi ({lan[0]})</> : null}
                     {lan.length && tailnet ? " and" : null}
                     {tailnet ? <> over Tailscale ({tailnet.split(".")[0]})</> : null}.
                   </>
                 ) : (
-                  "Looking for this Mac's addresses…"
+                  `Looking for this ${COMPUTER}'s addresses…`
                 )}
                 {!tailnet && " Without Tailscale, only on the same Wi-Fi. Install Tailscale on both to reach it from anywhere."}
               </span>

@@ -37,7 +37,10 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use tokio::net::{TcpListener as HookListener, TcpStream as HookStream};
+#[cfg(unix)]
+use tokio::net::{UnixListener as HookListener, UnixStream as HookStream};
 use tokio::sync::{oneshot, Notify};
 
 use crate::gateway::client::{ConnStatus, Hooks, Phase, RpcError};
@@ -47,7 +50,7 @@ use crate::openclaw::config::{Credential, GatewayMode};
 use crate::openclaw::runtime as cli;
 use crate::runtime::acp;
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
-use crate::runtime::{blocking, home, is_executable, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
+use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
 
 const AGENT_ID: &str = "claude";
 pub const PLUGIN_ID: &str = "littleguys@littleguys";
@@ -640,32 +643,77 @@ async fn run(inner: Arc<Inner>) {
     }
 }
 
-/// The socket and the inode it was bound as (so a stale cleanup never removes a newer one).
+/// Where hooks reach this app. macOS and Linux: a unix socket only this user can
+/// open, and the inode it was bound as (so a stale cleanup never removes a newer
+/// one). Windows: a port on 127.0.0.1 that only answers requests carrying the
+/// secret in [`ENDPOINT`].
 struct Socket {
+    #[cfg(unix)]
     path: PathBuf,
+    #[cfg(unix)]
     ino: Option<u64>,
 }
 
 fn remove_socket(socket: &Socket) {
-    use std::os::unix::fs::MetadataExt;
-    let ours = std::fs::symlink_metadata(&socket.path).ok().map(|m| m.ino()) == socket.ino;
-    if ours {
-        let _ = std::fs::remove_file(&socket.path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let ours = std::fs::symlink_metadata(&socket.path).ok().map(|m| m.ino()) == socket.ino;
+        if ours {
+            let _ = std::fs::remove_file(&socket.path);
+        }
     }
+    #[cfg(windows)]
+    let _ = socket;
+}
+
+/// Windows: the port hooks reach this app on, and the secret they must send.
+#[cfg(windows)]
+static ENDPOINT: Mutex<Option<(u16, String)>> = Mutex::new(None);
+
+#[cfg(windows)]
+fn endpoint() -> Option<(u16, String)> {
+    ENDPOINT.lock().unwrap().clone()
+}
+
+/// Windows: a fresh port and secret; the plugin files written after this point at them.
+#[cfg(windows)]
+async fn bind_port() -> Result<(HookListener, Socket), Problem> {
+    use rand::RngCore;
+    let failed = |e: std::io::Error| Problem::new(Phase::Error, format!("Couldn't listen for Claude Code: {e}"), None);
+    let listener = HookListener::bind(("127.0.0.1", 0)).await.map_err(failed)?;
+    let port = listener.local_addr().map_err(failed)?.port();
+    let mut bytes = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    *ENDPOINT.lock().unwrap() = Some((port, secret));
+    Ok((listener, Socket {}))
+}
+
+/// Windows: whether the request carries the secret (compared in constant time).
+#[cfg(windows)]
+fn secret_ok(request: &Request) -> bool {
+    let Some((_, secret)) = endpoint() else { return false };
+    let given = request.headers.get("x-littleguys-secret").map(String::as_bytes).unwrap_or_default();
+    given.len() == secret.len() && given.iter().zip(secret.as_bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
 }
 
 pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SOCKET_FILE)
 }
 
-async fn prepare(inner: &Arc<Inner>) -> Result<(UnixListener, Socket), Problem> {
+async fn prepare(inner: &Arc<Inner>) -> Result<(HookListener, Socket), Problem> {
     set_status(inner, |s| {
         if !matches!(s.phase, Phase::NoConfig | Phase::Error) {
             s.phase = Phase::Connecting;
         }
     });
     let claude = find_claude().ok_or_else(|| {
-        Problem::new(Phase::NoConfig, "Claude Code isn't installed on this Mac. Install it from claude.com/claude-code, then try again.", None)
+        Problem::new(
+            Phase::NoConfig,
+            format!("Claude Code isn't installed on this {}. Install it from claude.com/claude-code, then try again.", crate::platform::COMPUTER),
+            None,
+        )
     })?;
     *inner.claude.lock().unwrap() = Some(claude.clone());
     let version = claude_version(&claude).await;
@@ -674,6 +722,9 @@ async fn prepare(inner: &Arc<Inner>) -> Result<(UnixListener, Socket), Problem> 
     // `LITTLEGUYS_CLAUDE_PLUGIN=skip` (development): sessions started with
     // `claude --plugin-dir` report without the plugin being installed.
     let skip_check = std::env::var("LITTLEGUYS_CLAUDE_PLUGIN").is_ok_and(|v| v == "skip");
+    // Windows: the port is picked now, so the hook written next can point at it.
+    #[cfg(windows)]
+    let bound = bind_port().await?;
     let dir = write_plugin_files(&inner.data_dir).map_err(|e| Problem::new(Phase::Error, format!("Couldn't write the littleguys plugin: {e}"), None))?;
     if !skip_check {
         match plugin_state(&claude).await {
@@ -690,7 +741,9 @@ async fn prepare(inner: &Arc<Inner>) -> Result<(UnixListener, Socket), Problem> 
             }
         }
     }
-    bind_socket(&socket_path(&inner.data_dir)).await
+    #[cfg(unix)]
+    let bound = bind_socket(&socket_path(&inner.data_dir)).await?;
+    Ok(bound)
 }
 
 fn same_path(a: &str, b: &Path) -> bool {
@@ -698,13 +751,14 @@ fn same_path(a: &str, b: &Path) -> bool {
     canon(Path::new(a)) == canon(b)
 }
 
-async fn bind_socket(path: &Path) -> Result<(UnixListener, Socket), Problem> {
+#[cfg(unix)]
+async fn bind_socket(path: &Path) -> Result<(HookListener, Socket), Problem> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     if path.exists() {
         // A connection being replaced (settings changed) lets go within a tick.
         let mut taken = true;
         for _ in 0..20 {
-            if UnixStream::connect(path).await.is_err() {
+            if HookStream::connect(path).await.is_err() {
                 taken = false;
                 break;
             }
@@ -715,13 +769,13 @@ async fn bind_socket(path: &Path) -> Result<(UnixListener, Socket), Problem> {
         }
         let _ = std::fs::remove_file(path);
     }
-    let listener = UnixListener::bind(path).map_err(|e| Problem::new(Phase::Error, format!("Couldn't listen for Claude Code: {e}"), None))?;
+    let listener = HookListener::bind(path).map_err(|e| Problem::new(Phase::Error, format!("Couldn't listen for Claude Code: {e}"), None))?;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     let ino = std::fs::symlink_metadata(path).ok().map(|m| m.ino());
     Ok((listener, Socket { path: path.to_path_buf(), ino }))
 }
 
-async fn serve(inner: &Arc<Inner>, listener: UnixListener) {
+async fn serve(inner: &Arc<Inner>, listener: HookListener) {
     inner.st.lock().unwrap().connected = true;
     set_status(inner, |s| {
         s.phase = Phase::Connected;
@@ -763,9 +817,9 @@ async fn serve(inner: &Arc<Inner>, listener: UnixListener) {
     set_status(inner, |s| s.phase = Phase::Connecting);
 }
 
-// ---- hooks: a tiny HTTP server on the unix socket -------------------------------------
+// ---- hooks: a tiny HTTP server on the unix socket (Windows: the local port) -----------
 
-async fn accept_loop(inner: Arc<Inner>, listener: UnixListener) {
+async fn accept_loop(inner: Arc<Inner>, listener: HookListener) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -842,11 +896,15 @@ async fn write_response<W: AsyncWrite + Unpin>(w: &mut W, body: &str) -> std::io
     Ok(())
 }
 
-async fn handle_conn(inner: &Arc<Inner>, mut stream: UnixStream) -> std::io::Result<()> {
+async fn handle_conn(inner: &Arc<Inner>, mut stream: HookStream) -> std::io::Result<()> {
     let request = match tokio::time::timeout(Duration::from_secs(10), read_request(&mut stream)).await {
         Ok(r) => r?,
         Err(_) => return Ok(()),
     };
+    #[cfg(windows)]
+    if !secret_ok(&request) {
+        return Ok(());
+    }
     let reply = match request.path.strip_prefix("/hook/") {
         Some(event) => on_hook(inner, event, &request, &mut stream).await,
         None => String::new(),
@@ -855,7 +913,7 @@ async fn handle_conn(inner: &Arc<Inner>, mut stream: UnixStream) -> std::io::Res
 }
 
 /// Resolves once the hook's end of the connection goes away (Claude Code gave up on it).
-async fn peer_closed(stream: &mut UnixStream) {
+async fn peer_closed(stream: &mut HookStream) {
     let mut buf = [0u8; 64];
     loop {
         match stream.read(&mut buf).await {
@@ -866,7 +924,7 @@ async fn peer_closed(stream: &mut UnixStream) {
 }
 
 /// One hook event from a session; returns what the hook prints for Claude Code.
-async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mut UnixStream) -> String {
+async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mut HookStream) -> String {
     let Ok(input) = serde_json::from_slice::<Value>(&request.body) else { return String::new() };
     // Subagents' hooks belong to their parent's turn.
     if input.get("agent_id").and_then(Value::as_str).is_some_and(|a| !a.is_empty()) {
@@ -976,7 +1034,7 @@ fn handover(outbox: &[String]) -> String {
 }
 
 /// Waits for Allow or Deny from littleguys, when it's the one answering this session's prompts.
-async fn permission(inner: &Arc<Inner>, sid: &str, input: &Value, stream: &mut UnixStream) -> String {
+async fn permission(inner: &Arc<Inner>, sid: &str, input: &Value, stream: &mut HookStream) -> String {
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("tool").to_string();
     let (eligible, key, cwd) = {
         let st = inner.st.lock().unwrap();
@@ -2241,7 +2299,7 @@ async fn start_draft(inner: Arc<Inner>, key: String) {
 async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Option<&str>, keep: bool) -> Result<String, String> {
     let claude = inner.claude.lock().unwrap().clone().ok_or("Claude Code isn't installed")?;
     if !Path::new(cwd).is_dir() {
-        return Err(format!("{cwd} isn't a folder on this Mac."));
+        return Err(format!("{cwd} isn't a folder on this {}.", crate::platform::COMPUTER));
     }
     // A prompt starting with '-' would read as a flag.
     let prompt = if text.starts_with('-') { format!(" {text}") } else { text.to_string() };
@@ -2786,11 +2844,8 @@ fn mcp_servers(cwd: &Path, home: &Path) -> Vec<Value> {
 /// The `claude` CLI: on the login shell's PATH, or where its installers put it.
 pub fn find_claude() -> Option<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
-    cli::login_path()
-        .split(':')
-        .map(|dir| Path::new(dir).join("claude"))
-        .chain([home.join(".local/bin/claude"), home.join(".claude/local/claude")])
-        .find(|p| is_executable(p))
+    let dirs = crate::platform::path_dirs().into_iter().chain([home.join(".local").join("bin"), home.join(".claude").join("local")]);
+    crate::platform::find_in(dirs, "claude")
 }
 
 /// Environment a session launched from inside another one would inherit and shouldn't.
@@ -2873,15 +2928,22 @@ pub async fn plugin_state(claude: &Path) -> Option<PluginState> {
 }
 
 /// Writes the plugin (a one-plugin marketplace) to `<data_dir>/claude-plugin`, its
-/// hook pointed at this app's socket. Returns that folder.
+/// hook pointed at this app's socket (Windows: its port and secret). Returns that folder.
 pub fn write_plugin_files(data_dir: &Path) -> std::io::Result<PathBuf> {
     let root = data_dir.join(PLUGIN_DIR);
-    let socket = socket_path(data_dir).display().to_string().replace('\'', r"'\''");
+    #[cfg(unix)]
+    let (socket, port, secret) = (socket_path(data_dir).display().to_string().replace('\'', r"'\''"), String::new(), String::new());
+    #[cfg(windows)]
+    let (socket, port, secret) = match endpoint() {
+        Some((port, secret)) => (String::new(), port.to_string(), secret),
+        None => Default::default(),
+    };
+    let hook = HOOK_SH.replace("__LITTLEGUYS_SOCKET__", &socket).replace("__LITTLEGUYS_PORT__", &port).replace("__LITTLEGUYS_SECRET__", &secret);
     let files = [
         (".claude-plugin/marketplace.json", MARKETPLACE_JSON.to_string()),
         ("plugin/.claude-plugin/plugin.json", PLUGIN_JSON.to_string()),
         ("plugin/hooks/hooks.json", HOOKS_JSON.to_string()),
-        ("plugin/hooks/hook.sh", HOOK_SH.replace("__LITTLEGUYS_SOCKET__", &socket)),
+        ("plugin/hooks/hook.sh", hook),
     ];
     for (rel, content) in files {
         let path = root.join(rel);
@@ -2898,7 +2960,7 @@ pub fn write_plugin_files(data_dir: &Path) -> std::io::Result<PathBuf> {
 /// Installs (or repairs) the littleguys plugin in Claude Code. Sessions started from
 /// now on report to littleguys.
 pub async fn install_plugin(data_dir: &Path) -> Result<(), String> {
-    let claude = find_claude().ok_or("Claude Code isn't installed on this Mac.")?;
+    let claude = find_claude().ok_or(format!("Claude Code isn't installed on this {}.", crate::platform::COMPUTER))?;
     let root = write_plugin_files(data_dir).map_err(|e| format!("Couldn't write the plugin: {e}"))?;
     let root = root.display().to_string();
     run_cli(&claude, &["plugin", "marketplace", "add", &root], Duration::from_secs(60)).await?;
@@ -3554,8 +3616,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lg-plugin-{}", uuid::Uuid::new_v4()));
         let root = write_plugin_files(&dir).unwrap();
         let hook = std::fs::read_to_string(root.join("plugin/hooks/hook.sh")).unwrap();
+        #[cfg(unix)]
         assert!(hook.contains(&format!("sock='{}'", socket_path(&dir).display())));
-        assert!(!hook.contains("__LITTLEGUYS_SOCKET__"));
+        assert!(hook.contains("port=''"), "unix sockets need no port; Windows has none until it listens");
+        assert!(!hook.contains("__LITTLEGUYS_"));
         assert!(root.join(".claude-plugin/marketplace.json").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }

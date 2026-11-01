@@ -151,17 +151,11 @@ impl DeviceTokenStore {
 }
 
 pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let mut file = crate::platform::private_file().write(true).create(true).truncate(true).open(&tmp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     std::fs::rename(&tmp, path)?;

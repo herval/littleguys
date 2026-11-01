@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
+import { FILE_MANAGER } from "../lib/platform";
 import { artifacts, workspace } from "../lib/gateway";
 import { findGuy, gatewayOf, guyUid, isOnThisMac } from "../lib/guys";
 import { type DiffLine, type FileDiff, fileDiffs, jsonField } from "../lib/diff";
@@ -1070,7 +1071,7 @@ function FileLink({ path, where, children }: { path: string; where: Where; child
       <a
         href="#"
         role="button"
-        title={peekable ? `Open ${name}` : "Show in Finder"}
+        title={peekable ? `Open ${name}` : `Show in ${FILE_MANAGER}`}
         onClick={(e) => {
           e.preventDefault();
           const guy = peekable ? findGuy(useApp.getState().roster, guyUid(where.gatewayId, agentId)) : undefined;

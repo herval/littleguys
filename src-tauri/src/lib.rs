@@ -10,13 +10,14 @@ mod hub;
 pub mod localfs;
 mod media;
 pub mod openclaw;
+pub mod platform;
 pub mod runtime;
 mod tray;
 mod updater;
 mod windows;
 
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, RunEvent};
+use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::activity::Activity;
@@ -28,7 +29,9 @@ pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("littleguys_lib=info")).init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let open_shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
+    // ⌘⇧L on macOS, Ctrl+Shift+L elsewhere (Win+Shift+L is too close to locking the screen).
+    let open_key = if cfg!(target_os = "macos") { Modifiers::SUPER } else { Modifiers::CONTROL };
+    let open_shortcut = Shortcut::new(Some(open_key | Modifiers::SHIFT), Code::KeyL);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -108,6 +111,7 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
 
             // Menu-bar guy
+            tray::read_taskbar_theme();
             let animator = TrayAnimator::new();
             let menu = tray::menu(&handle, None)?;
             TrayIconBuilder::with_id(tray::TRAY_ID)
@@ -159,17 +163,21 @@ pub fn run() {
             app.manage(std::sync::Arc::new(browser_stream::Streams::default()));
 
             if let Err(e) = app.global_shortcut().register(open_shortcut) {
-                log::warn!("could not register ⌘⇧L: {e}");
+                log::warn!("could not register the open shortcut: {e}");
             }
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building littleguys")
         .run(|app, event| {
-            if let RunEvent::Reopen { has_visible_windows, .. } = event {
+            // Clicking the Dock icon with every window closed.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
                 if !has_visible_windows {
                     windows::open_main(app, None);
                 }
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
         });
 }
