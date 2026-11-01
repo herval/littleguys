@@ -66,6 +66,12 @@ Yes. littleguys speaks the [Agent Client Protocol](https://agentclientprotocol.c
 ### Does it follow Claude Code sessions already running in my terminal?
 Yes, since version 0.2. **Add a bot → Claude Code** installs a small littleguys plugin in Claude Code, and from then on every session on this Mac, in a terminal or in the background, is a thread you can follow live and reply to. A terminal session gets your reply with the next prompt you type there; its permission prompts stay in the terminal. Codex and other ACP agents are different: littleguys starts those itself, so a Codex session running in a terminal doesn't show up. More: [littleguys.dev/claude-code](https://www.littleguys.dev/claude-code).
 
+### What's a good Mac app for OpenClaw agents on a home server?
+littleguys. Every OpenClaw agent, on this Mac or on a gateway on another machine, is a contact you chat with, and the commands an agent wants to run come to you to allow once, always allow or deny. It lists the gateways it finds on your tailnet and LAN, or you type an address; each gateway approves this Mac once. It doesn't run agents itself: it's a front end for the OpenClaw you already run. For voice wake, the Canvas panel or usage and cost in the menu bar, use OpenClaw's own macOS app. More: [littleguys.dev/openclaw](https://www.littleguys.dev/openclaw).
+
+### Is there a Mac app for Hermes Agent besides Hermes Desktop?
+Yes, littleguys. Each Hermes profile is a contact, and its sessions are threads, including the ones you started in the CLI or from a messaging app; you allow or deny the commands Hermes asks about. It connects to `hermes serve` on this Mac or to the Hermes API server on another machine. Hermes Desktop is the full workspace, with git review, a terminal, a file browser and voice. littleguys is the small chat app that also holds your OpenClaw, Claude Code and Codex agents. More: [littleguys.dev/hermes](https://www.littleguys.dev/hermes).
+
 ### Do I need OpenClaw to use it?
 No. littleguys works with Hermes Agent, Claude Code and any ACP agent without OpenClaw. If OpenClaw isn't on your Mac, the first screen offers to install it; skip that with **Add a gateway**, and pick Hermes, Claude Code or Agents (ACP).
 
