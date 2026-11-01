@@ -2230,8 +2230,9 @@ fn listed_row(info: &Value, cwd: &str) -> Value {
 
 /// The same folder, however it's spelled (trailing slash, symlinks).
 fn same_dir(a: &str, b: &str) -> bool {
-    let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p.trim_end_matches('/')));
-    a.trim_end_matches('/') == b.trim_end_matches('/') || canonical(a) == canonical(b)
+    let trim = |p: &str| p.trim_end_matches(std::path::is_separator).to_string();
+    let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(trim(p)));
+    trim(a) == trim(b) || canonical(a) == canonical(b)
 }
 
 /// ACP prompt blocks + what the transcript shows for the user's message.
@@ -2841,7 +2842,7 @@ fn program_name(command: &str) -> Option<String> {
     let first = command.split_whitespace().find(|t| !t.contains('='))?;
     match base(command).filter(|b| !b.contains(char::is_whitespace) && !b.contains('=')) {
         // A path with spaces in folder names (`/Applications/Some App.app/bin/tool`).
-        Some(whole) if first.contains('/') => Some(whole),
+        Some(whole) if first.contains(std::path::is_separator) => Some(whole),
         _ => base(first),
     }
 }
@@ -4506,18 +4507,16 @@ mod tests {
         assert_eq!(Flavor::detect("npx @google/Gemini-cli --acp"), Flavor::Gemini);
         assert_eq!(Flavor::detect("opencode acp"), Flavor::Other);
         let (cwd, home) = (Path::new("/w"), Path::new("/h"));
-        let dirs: Vec<(String, &str)> =
-            skill_dirs(Flavor::Claude, cwd, home).into_iter().map(|(p, s)| (p.display().to_string(), s)).collect();
         assert_eq!(
-            dirs,
+            skill_dirs(Flavor::Claude, cwd, home),
             [
-                ("/w/.claude/skills".to_string(), "project"),
-                ("/w/.agents/skills".to_string(), "project"),
-                ("/h/.claude/skills".to_string(), "personal"),
-                ("/h/.agents/skills".to_string(), "personal"),
+                (cwd.join(".claude/skills"), "project"),
+                (cwd.join(".agents/skills"), "project"),
+                (home.join(".claude/skills"), "personal"),
+                (home.join(".agents/skills"), "personal"),
             ]
         );
-        assert_eq!(skill_dirs(Flavor::Codex, cwd, home)[2].0, Path::new("/h/.codex/skills"));
+        assert_eq!(skill_dirs(Flavor::Codex, cwd, home)[2].0, home.join(".codex/skills"));
         assert_eq!(skill_dirs(Flavor::Other, cwd, home).len(), 2);
     }
 
@@ -4539,7 +4538,7 @@ mod tests {
         assert_eq!(row["skillKey"], "pdf");
         assert_eq!(row["description"], "project pdf");
         assert_eq!(row["eligible"], true);
-        assert!(row["filePath"].as_str().unwrap().ends_with("pdf/SKILL.md"));
+        assert!(Path::new(row["filePath"].as_str().unwrap()).ends_with("pdf/SKILL.md"));
         assert!(scan_skills(&[(project.0.join("missing"), "project")]).is_empty());
     }
 
@@ -4598,7 +4597,7 @@ bearer_token_env_var = "SECRET"
 command = "thing"
 enabled = false
 "#
-        .replace("PROGRAM", &program.display().to_string());
+        .replace("PROGRAM", &program.display().to_string().replace('\\', r"\\"));
         let servers = codex_mcp(&toml, "user");
         assert!(!serde_json::to_string(&servers).unwrap().contains("SECRET"));
         assert_eq!(servers.len(), 3);
@@ -4634,6 +4633,8 @@ enabled = false
         assert_eq!(program_name("./Codex Computer Use.app/Contents/MacOS/Client").as_deref(), Some("Client"));
         assert_eq!(program_name("TOKEN=abc /usr/bin/node").as_deref(), Some("node"));
         assert_eq!(program_name("   "), None);
+        #[cfg(windows)]
+        assert_eq!(program_name(r"C:\Program Files\Some App\tool.exe").as_deref(), Some("tool.exe"));
         assert_eq!(safe_url("wss://a:b@host:9/x?y=1").as_deref(), Some("wss://host:9/x"));
         assert_eq!(safe_url("file:///etc/passwd"), None);
         assert_eq!(safe_url("not a url"), None);
@@ -4685,15 +4686,19 @@ enabled = false
         assert_eq!(resolve_path("~"), home);
         assert_eq!(resolve_path(" ~/x "), home.join("x"));
         assert_eq!(resolve_path("x/y"), home.join("x/y"));
-        assert_eq!(resolve_path("/abs"), PathBuf::from("/abs"));
-        assert_eq!(resolve_dir("/"), Some(PathBuf::from("/")));
-        assert_eq!(resolve_dir("/definitely/not/here"), None);
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        assert_eq!(resolve_path(&format!("{root}abs")), PathBuf::from(format!("{root}abs")));
+        assert_eq!(resolve_dir(root), Some(PathBuf::from(root)));
+        assert_eq!(resolve_dir(&format!("{root}definitely/not/here")), None);
     }
 
     #[test]
     fn same_folder_however_spelled() {
         assert!(same_dir("/Users/x/dev/", "/Users/x/dev"));
+        #[cfg(target_os = "macos")]
         assert!(same_dir("/tmp", "/private/tmp"));
+        #[cfg(windows)]
+        assert!(same_dir(r"C:\Users\x\dev\", r"C:\Users\x\dev"));
         assert!(!same_dir("/tmp", "/usr"));
         assert!(!same_dir("/Users/x/dev", "/Users/x/dev2"));
     }

@@ -1629,7 +1629,7 @@ fn strip_image_marks(text: &str) -> String {
 }
 
 /// The list agentbook (and the like) end a message with: "Attached files:", then
-/// `- name: /path` lines.
+/// `- name: /path` lines (`- name: C:\path` on Windows).
 const ATTACHED: &str = "Attached files:";
 /// Bigger attached images show as a file instead.
 const ATTACHED_IMAGE_MAX: u64 = 10 << 20;
@@ -1644,7 +1644,7 @@ fn split_attached(text: &str) -> (&str, Vec<(&str, &str)>) {
         .lines()
         .map(|line| {
             let entry = line.trim().strip_prefix("- ")?;
-            let sep = entry.find(": /")?;
+            let sep = entry.match_indices(": ").map(|(at, _)| at).find(|&at| absolute(&entry[at + 2..]))?;
             Some((&entry[..sep], &entry[sep + 2..]))
         })
         .collect();
@@ -1652,6 +1652,12 @@ fn split_attached(text: &str) -> (&str, Vec<(&str, &str)>) {
         Some(files) if !files.is_empty() => (&text[..at], files),
         _ => (text, Vec::new()),
     }
+}
+
+/// An absolute path as either OS writes it: `/…`, `C:\…` (or `C:/…`), `\\server\…`.
+fn absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    path.starts_with('/') || path.starts_with(r"\\") || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
 }
 
 /// The files a prompt has attached, as content blocks: images inline, anything
@@ -3036,6 +3042,7 @@ mod tests {
             Some("is this a problem?")
         );
         assert_eq!(visible_prompt("Attached files:\n- image.png: /tmp/a.png"), None);
+        assert_eq!(visible_prompt("hi\n\nAttached files:\n- a b.png: C:\\Users\\me\\a b.png\n- c.txt: \\\\nas\\c.txt").as_deref(), Some("hi"));
         // Not a list of files: kept.
         let prose = "Attached files: none of them\n- really: /none";
         assert_eq!(visible_prompt(prose).as_deref(), Some(prose));
