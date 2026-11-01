@@ -3,8 +3,8 @@
 //!
 //! - Sessions come from `claude agents --json --all` (polled) and from the
 //!   littleguys plugin's hooks, which report over a unix socket in littleguys'
-//!   data dir (`claude.sock`) the moment a turn starts or ends, a permission
-//!   prompt opens, or a session ends. The plugin lives in `src-tauri/claude-plugin`;
+//!   data dir (`claude.sock`; on Windows, a port on 127.0.0.1 with a secret) the
+//!   moment a turn starts or ends, a permission prompt opens, or a session ends. The plugin lives in `src-tauri/claude-plugin`;
 //!   [`install_plugin`] writes it to `<data_dir>/claude-plugin` and installs it
 //!   from there (`claude plugin marketplace add` + `claude plugin install`).
 //! - A thread's conversation is its session's transcript
@@ -100,7 +100,10 @@ const MARK: &str = "The person wrote to you from littleguys:";
 const MARKETPLACE_JSON: &str = include_str!("../../claude-plugin/.claude-plugin/marketplace.json");
 const PLUGIN_JSON: &str = include_str!("../../claude-plugin/plugin/.claude-plugin/plugin.json");
 const HOOKS_JSON: &str = include_str!("../../claude-plugin/plugin/hooks/hooks.json");
+#[cfg(unix)]
 const HOOK_SH: &str = include_str!("../../claude-plugin/plugin/hooks/hook.sh");
+#[cfg(windows)]
+const HOOK_PS1: &str = include_str!("../../claude-plugin/plugin/hooks/hook.ps1");
 
 type Emits = Vec<(&'static str, Value)>;
 
@@ -2934,22 +2937,31 @@ pub async fn plugin_state(claude: &Path) -> Option<PluginState> {
 }
 
 /// Writes the plugin (a one-plugin marketplace) to `<data_dir>/claude-plugin`, its
-/// hook pointed at this app's socket (Windows: its port and secret). Returns that folder.
+/// hook pointed at this app's socket. Returns that folder. Claude Code runs the
+/// plugin from there, so what's written here takes effect at the next hook.
+///
+/// Windows: the hooks run hook.ps1 in PowerShell instead (see
+/// [`powershell_hooks`]), and `hooks/endpoint` holds this launch's port, secret
+/// and process id.
 pub fn write_plugin_files(data_dir: &Path) -> std::io::Result<PathBuf> {
     let root = data_dir.join(PLUGIN_DIR);
     #[cfg(unix)]
-    let (socket, port, secret) = (socket_path(data_dir).display().to_string().replace('\'', r"'\''"), String::new(), String::new());
-    #[cfg(windows)]
-    let (socket, port, secret) = match endpoint() {
-        Some((port, secret)) => (String::new(), port.to_string(), secret),
-        None => Default::default(),
-    };
-    let hook = HOOK_SH.replace("__LITTLEGUYS_SOCKET__", &socket).replace("__LITTLEGUYS_PORT__", &port).replace("__LITTLEGUYS_SECRET__", &secret);
     let files = [
         (".claude-plugin/marketplace.json", MARKETPLACE_JSON.to_string()),
         ("plugin/.claude-plugin/plugin.json", PLUGIN_JSON.to_string()),
         ("plugin/hooks/hooks.json", HOOKS_JSON.to_string()),
-        ("plugin/hooks/hook.sh", hook),
+        ("plugin/hooks/hook.sh", HOOK_SH.replace("__LITTLEGUYS_SOCKET__", &socket_path(data_dir).display().to_string().replace('\'', r"'\''"))),
+    ];
+    #[cfg(windows)]
+    let files = [
+        (".claude-plugin/marketplace.json", MARKETPLACE_JSON.to_string()),
+        ("plugin/.claude-plugin/plugin.json", PLUGIN_JSON.to_string()),
+        ("plugin/hooks/hooks.json", powershell_hooks(HOOKS_JSON)),
+        ("plugin/hooks/hook.ps1", HOOK_PS1.to_string()),
+        (
+            "plugin/hooks/endpoint",
+            endpoint().map(|(port, secret)| format!("{port} {secret} {}\n", std::process::id())).unwrap_or_default(),
+        ),
     ];
     for (rel, content) in files {
         let path = root.join(rel);
@@ -2961,6 +2973,28 @@ pub fn write_plugin_files(data_dir: &Path) -> std::io::Result<PathBuf> {
         }
     }
     Ok(root)
+}
+
+/// hooks.json for Windows: each hook runs hook.ps1 in PowerShell, with the same
+/// event and time limit as its hook.sh line. Without Git Bash, Claude Code runs
+/// hooks in PowerShell, where `sh` doesn't exist, and a PermissionRequest hook that
+/// fails there blocks the request; so the Windows hooks never go through `sh`.
+/// hook.ps1 is read in as a script block, which the execution policy allows.
+#[cfg(any(windows, test))]
+fn powershell_hooks(hooks_json: &str) -> String {
+    let mut hooks: Value = serde_json::from_str(hooks_json).expect("hooks.json is valid");
+    for matchers in hooks["hooks"].as_object_mut().expect("hooks by event").values_mut() {
+        for hook in matchers.as_array_mut().into_iter().flatten().flat_map(|m| m["hooks"].as_array_mut()).flatten() {
+            let command = hook["command"].as_str().expect("a command hook");
+            let args: Vec<&str> = command.split_whitespace().rev().take(2).collect();
+            let (event, seconds) = (args[1], args[0]);
+            hook["command"] = json!(format!(
+                "try {{ & ([scriptblock]::Create([IO.File]::ReadAllText((Join-Path $env:CLAUDE_PLUGIN_ROOT 'hooks\\hook.ps1')))) {event} {seconds} }} catch {{}}; exit 0"
+            ));
+            hook["shell"] = json!("powershell");
+        }
+    }
+    serde_json::to_string_pretty(&hooks).expect("hooks serialize")
 }
 
 /// Installs (or repairs) the littleguys plugin in Claude Code. Sessions started from
@@ -3622,12 +3656,122 @@ mod tests {
     fn plugin_files_point_at_this_apps_socket() {
         let dir = std::env::temp_dir().join(format!("lg-plugin-{}", uuid::Uuid::new_v4()));
         let root = write_plugin_files(&dir).unwrap();
-        let hook = std::fs::read_to_string(root.join("plugin/hooks/hook.sh")).unwrap();
         #[cfg(unix)]
-        assert!(hook.contains(&format!("sock='{}'", socket_path(&dir).display())));
-        assert!(hook.contains("port=''"), "unix sockets need no port; Windows has none until it listens");
-        assert!(!hook.contains("__LITTLEGUYS_"));
+        {
+            let hook = std::fs::read_to_string(root.join("plugin/hooks/hook.sh")).unwrap();
+            assert!(hook.contains(&format!("sock='{}'", socket_path(&dir).display())));
+            assert!(!hook.contains("__LITTLEGUYS_"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(std::fs::read_to_string(root.join("plugin/hooks/hooks.json")).unwrap().contains("powershell"));
+            assert!(root.join("plugin/hooks/hook.ps1").is_file());
+        }
         assert!(root.join(".claude-plugin/marketplace.json").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_hooks_run_in_powershell() {
+        let windows: Value = serde_json::from_str(&powershell_hooks(HOOKS_JSON)).unwrap();
+        let unix: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        let events = unix["hooks"].as_object().unwrap();
+        assert_eq!(windows["hooks"].as_object().unwrap().len(), events.len());
+        for (event, matchers) in events {
+            let hook = &matchers[0]["hooks"][0];
+            let seconds = hook["command"].as_str().unwrap().split_whitespace().last().unwrap();
+            let ours = &windows["hooks"][event][0]["hooks"][0];
+            assert_eq!(ours["shell"], "powershell");
+            assert_eq!(ours["timeout"], hook["timeout"]);
+            let command = ours["command"].as_str().unwrap();
+            assert!(command.ends_with(&format!(r"'hooks\hook.ps1')))) {event} {seconds} }} catch {{}}; exit 0")), "{command}");
+            assert!(!command.contains("${"), "Claude Code would substitute it: {command}");
+        }
+    }
+
+    /// Runs a hook the way Claude Code does without Git Bash: its hooks.json
+    /// command, in PowerShell, with the event on stdin.
+    #[cfg(windows)]
+    fn run_powershell_hook(shell: &str, plugin: &Path, endpoint: &str, event: &str, input: &[u8]) -> Option<(bool, Vec<u8>)> {
+        use std::io::Write as _;
+        std::fs::write(plugin.join("hooks/endpoint"), endpoint).unwrap();
+        let hooks: Value = serde_json::from_str(&powershell_hooks(HOOKS_JSON)).unwrap();
+        let command = hooks["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().to_string();
+        let mut child = std::process::Command::new(shell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+            .env("CLAUDE_PLUGIN_ROOT", plugin)
+            .env("CLAUDE_CODE_ENTRYPOINT", "cli")
+            .env_remove("CLAUDE_JOB_DIR")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let out = child.wait_with_output().unwrap();
+        Some((out.status.success(), out.stdout))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_hook_reaches_littleguys_and_never_fails() {
+        use std::io::{Read as _, Write as _};
+        let dir = std::env::temp_dir().join(format!("lg-ps-{}", uuid::Uuid::new_v4()));
+        let plugin = dir.join("plugin");
+        std::fs::create_dir_all(plugin.join("hooks")).unwrap();
+        std::fs::write(plugin.join("hooks/hook.ps1"), HOOK_PS1).unwrap();
+        let input = "{\"prompt\":\"olá, café\"}".as_bytes().to_vec();
+        let answer = "{\"decision\":\"élan ✓\"}".as_bytes().to_vec();
+
+        for shell in ["powershell.exe", "pwsh.exe"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let reply = answer.clone();
+            let server = std::thread::spawn(move || {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 4096];
+                let body_at = loop {
+                    let n = conn.read(&mut buf).unwrap();
+                    seen.extend_from_slice(&buf[..n]);
+                    if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&seen[..body_at]).to_lowercase();
+                let length: usize = head.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().trim().parse().unwrap();
+                while seen.len() < body_at + length {
+                    let n = conn.read(&mut buf).unwrap();
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len()).into_bytes();
+                response.extend_from_slice(&reply);
+                conn.write_all(&response).unwrap();
+                (head, seen[body_at..].to_vec())
+            });
+            let me = std::process::id();
+            let Some((ok, stdout)) = run_powershell_hook(shell, &plugin, &format!("{port} s3cret {me}\n"), "PermissionRequest", &input) else {
+                eprintln!("{shell} isn't installed; skipped");
+                continue;
+            };
+            let (head, body) = server.join().unwrap();
+            assert!(ok, "{shell}: exits 0");
+            assert!(head.starts_with("post /hook/permissionrequest "), "{shell}: {head}");
+            assert!(head.contains("x-littleguys-secret: s3cret"), "{shell}: {head}");
+            assert!(head.contains("x-claude-entrypoint: cli"), "{shell}: {head}");
+            assert!(!head.contains("x-claude-background"), "{shell}: {head}");
+            assert_eq!(body, input, "{shell}: the event's bytes, as sent");
+            assert_eq!(stdout, answer, "{shell}: littleguys' answer, byte for byte");
+
+            // littleguys gone (its process, or its port): nothing printed, exit 0, and quickly.
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            for endpoint in [format!("{port} s3cret 4000000000\n"), format!("{closed} s3cret {me}\n"), String::new()] {
+                let started = std::time::Instant::now();
+                let (ok, stdout) = run_powershell_hook(shell, &plugin, &endpoint, "Stop", &input).unwrap();
+                assert!(ok && stdout.is_empty(), "{shell} with endpoint {endpoint:?}");
+                assert!(started.elapsed() < Duration::from_secs(15), "{shell} with endpoint {endpoint:?}: {:?}", started.elapsed());
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
