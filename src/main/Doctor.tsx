@@ -1,18 +1,20 @@
-import { ChevronRight, Plus, RotateCw, Stethoscope } from "lucide-react";
+import { ChevronRight, Plus, RotateCw, Stethoscope, Terminal, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { COMPUTER } from "../lib/platform";
+import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { core, errorMessage, listen } from "../lib/ipc";
-import type { ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
+import type { ClaudeCodeProbe, ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
 import { needsProxyFix, statusLabel } from "../lib/guys";
-import { useApp } from "../stores/app";
+import { type AddBotTab, useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { Button, Field, inputClass, Spinner } from "../ui/kit";
 import { CredentialFix, hostOf, PairingFix, ProxyFix } from "./GatewayFix";
 
 /**
- * Shown whenever there's no live gateway connection: explains what's wrong in
- * plain words and offers the one-click fix (install, update, start, set up,
- * approve, paste token).
+ * Shown whenever no bot is connected: explains what's wrong in plain words and
+ * offers the one-click fix (install, update, start, set up, approve, paste
+ * token). On first run (no OpenClaw set up) it starts with the agents people
+ * already have, Claude Code, Codex and the rest, before offering OpenClaw.
  */
 export function Doctor() {
   const roster = useApp((s) => s.roster);
@@ -54,7 +56,10 @@ export function Doctor() {
           <p className="mt-1.5 max-w-md text-[13px] text-[var(--color-ink-2)]">{subline(status)}</p>
         </div>
 
+        {phase === "no-config" && <AgentsYouHave />}
+
         <div className="mt-7 space-y-3">
+          {phase === "no-config" && report && report.issues.length > 0 && <p className={sectionLabel}>Or let littleguys set up OpenClaw</p>}
           {phase === "pairing" && (
             <Card>
               <PairingFix status={status!} />
@@ -117,7 +122,7 @@ export function Doctor() {
             {checking ? <Spinner size={12} /> : <Stethoscope size={13} />} Check again
           </Button>
           <Button variant="ghost" onClick={() => setAddGatewayOpen(true)}>
-            <Plus size={13} /> Add a gateway
+            <Plus size={13} /> Add a bot
           </Button>
         </div>
         {report && <Details report={report} />}
@@ -154,12 +159,67 @@ function subline(status: ConnStatus | null): string {
         ? `Can't reach ${hostOf(status.url)}. Is it powered on and on your network/tailnet?`
         : `OpenClaw's gateway isn't running on this ${COMPUTER}.`;
     case "no-config":
-      return "littleguys runs on OpenClaw. It'll install and set it up for you — no terminal needed.";
+      return "Bring the agents you already use, or let littleguys set up OpenClaw for you. No terminal needed.";
     case "error":
       return needsProxyFix(status) ? `${hostOf(status.url)} won't take connections through its Tailscale Serve route yet.` : (status.message ?? "");
     default:
       return status?.url ? `Connecting to ${hostOf(status.url)}…` : "Connecting to OpenClaw…";
   }
+}
+
+const sectionLabel = "text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]";
+
+/** First run: the agents littleguys connects to besides OpenClaw, each opening "Add a bot" on its tab. */
+function AgentsYouHave() {
+  const openAdd = useApp((s) => s.setAddGatewayOpen);
+  const [claude, setClaude] = useState<ClaudeCodeProbe | null>(null);
+  useEffect(() => {
+    core.bots
+      .claudeDetect()
+      .then(setClaude)
+      .catch(() => setClaude({ installed: false }));
+  }, []);
+  const rows: Array<{ tab: AddBotTab; icon: React.ReactNode; title: string; detail: string }> = [
+    {
+      tab: "claude",
+      icon: <img src={claudeFace} alt="" className="h-8 w-8 rounded-lg" />,
+      title: "Claude Code",
+      detail: `${claude?.installed ? `Found on this ${COMPUTER}. ` : ""}Every session, terminal ones too, as a chat you can answer.`,
+    },
+    {
+      tab: "acp",
+      icon: <Terminal size={16} />,
+      title: "Codex, Gemini CLI and more",
+      detail: "Any agent from the ACP registry: littleguys starts it for you.",
+    },
+    {
+      tab: "hermes",
+      icon: <Waypoints size={16} />,
+      title: "Hermes",
+      detail: `Your Hermes Agent profiles, on this ${COMPUTER} or a server.`,
+    },
+  ];
+  return (
+    <div className="mt-7 space-y-3">
+      <p className={sectionLabel}>Agents you already use</p>
+      <Card>
+        <div className="-my-1.5 divide-y divide-[var(--color-line)]">
+          {rows.map((r) => (
+            <div key={r.tab} className="flex items-center gap-3 py-2.5">
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--color-chip)] text-[var(--color-ink-2)]">{r.icon}</span>
+              <div className="min-w-0 flex-1">
+                <p className="font-medium">{r.title}</p>
+                <p className="text-[12px] text-[var(--color-ink-3)]">{r.detail}</p>
+              </div>
+              <Button size="sm" onClick={() => openAdd(true, r.tab)}>
+                Add
+              </Button>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
 }
 
 function Card({ children }: { children: React.ReactNode }) {

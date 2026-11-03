@@ -22,6 +22,8 @@ function readJson<T>(key: string, fallback: T): T {
 
 /** What the main pane shows; "past" is the resume picker (ACP agents' sessions from every folder). */
 export type MainView = "chat" | "routines" | "files" | "skills" | "past";
+/** The "Add a bot" dialog's tabs. */
+export type AddBotTab = "openclaw" | "hermes" | "claude" | "acp";
 
 /** The browser panel beside the chat: open per guy, one shared width. */
 interface BrowserPanelPrefs {
@@ -62,6 +64,8 @@ interface AppState {
   editor: { open: boolean; uid: string | null };
   settingsOpen: boolean;
   addGatewayOpen: boolean;
+  /** The tab the "Add a bot" dialog opens on. */
+  addGatewayTab: AddBotTab;
   setStatus(status: ConnStatus): void;
   setRoster(roster: Roster): void;
   selectGuy(uid: string, sessionKey?: string | null): void;
@@ -84,7 +88,7 @@ interface AppState {
   openEditor(uid: string | null): void;
   closeEditor(): void;
   setSettingsOpen(open: boolean): void;
-  setAddGatewayOpen(open: boolean): void;
+  setAddGatewayOpen(open: boolean, tab?: AddBotTab): void;
   navigate(nav: Navigate): void;
   /** Make a guy on a gateway that can, else add another kind of bot. */
   startNewGuy(): void;
@@ -111,6 +115,7 @@ export const useApp = create<AppState>((set, get) => ({
   editor: { open: false, uid: null },
   settingsOpen: false,
   addGatewayOpen: false,
+  addGatewayTab: "openclaw",
 
   setStatus: (status) =>
     set((s) => ({
@@ -195,7 +200,7 @@ export const useApp = create<AppState>((set, get) => ({
   openEditor: (uid) => set({ editor: { open: true, uid } }),
   closeEditor: () => set({ editor: { open: false, uid: null } }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
-  setAddGatewayOpen: (addGatewayOpen) => set({ addGatewayOpen }),
+  setAddGatewayOpen: (addGatewayOpen, tab = "openclaw") => set({ addGatewayOpen, addGatewayTab: tab }),
   startNewGuy: () => {
     const canMake = liveGateways(get().roster).some((g) => g.status.capabilities?.manageGuys);
     set(canMake ? { editor: { open: true, uid: null } } : { addGatewayOpen: true });

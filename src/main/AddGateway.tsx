@@ -3,13 +3,11 @@ import { useCallback, useEffect, useState } from "react";
 import { gatewayOf, needsProxyFix, phaseLabel } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { DiscoveredGateway, GatewayRoster } from "../lib/types";
-import { useApp } from "../stores/app";
+import { type AddBotTab, useApp } from "../stores/app";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputBase, inputClass, Modal, Segmented, Spinner } from "../ui/kit";
 import { AcpTab, ClaudeCodeTab, HermesTab } from "./AddBotTabs";
 import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix } from "./GatewayFix";
-
-type Tab = "openclaw" | "hermes" | "claude" | "acp";
 
 const sectionLabel = "text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]";
 
@@ -20,7 +18,7 @@ const sectionLabel = "text-[11px] font-semibold uppercase tracking-wide text-[va
  */
 export function AddGateway() {
   const close = () => useApp.getState().setAddGatewayOpen(false);
-  const [tab, setTab] = useState<Tab>("openclaw");
+  const [tab, setTab] = useState<AddBotTab>(() => useApp.getState().addGatewayTab);
   const [openId, setOpenId] = useState<string | null>(null);
   return (
     <Modal onClose={close} width={580}>
