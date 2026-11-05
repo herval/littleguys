@@ -69,7 +69,7 @@ pub fn gateway_add(
     hub.add(&url, name, credential(kind, secret))
 }
 
-/// Add a Hermes install, an ACP agent or Claude Code (kind = "hermes" | "acp" | "claudecode").
+/// Add a Hermes install, an ACP agent, Claude Code or Codex (kind = "hermes" | "acp" | "claudecode" | "codex").
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn bot_add(
@@ -89,6 +89,12 @@ pub fn bot_add(
 #[tauri::command]
 pub async fn claude_code_detect() -> Result<Value, ()> {
     Ok(crate::runtime::claudecode::detect().await)
+}
+
+/// Codex on this machine: `{installed, version, sessions}`.
+#[tauri::command]
+pub async fn codex_detect() -> Result<Value, ()> {
+    Ok(crate::runtime::codex::detect().await)
 }
 
 /// Install (or repair) the littleguys plugin in Claude Code.

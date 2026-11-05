@@ -5,6 +5,7 @@ import type {
   AcpConfig,
   ClaudeCodeConfig,
   ClaudeCodeProbe,
+  CodexProbe,
   ConnStatus,
   DiscoveredGateway,
   DoctorReport,
@@ -137,6 +138,8 @@ export const core = {
     /** Installs (or repairs) the littleguys plugin in Claude Code. */
     claudeInstallPlugin: () => invoke<void>("claude_code_install_plugin"),
     claudeConfigure: (id: string, claude: ClaudeCodeConfig) => invoke<void>("claude_code_configure", { id, claude }),
+    addCodex: () => invoke<GatewayEntry>("bot_add", { kind: "codex", name: null, acp: null, hermes: null, claude: null, secretKind: null, secret: null }),
+    codexDetect: () => invoke<CodexProbe>("codex_detect"),
   },
   hidePopover: () => invoke<void>("hide_popover"),
   fitPopover: (height: number) => invoke<void>("fit_popover", { height }),

@@ -57,6 +57,7 @@
 
 pub mod acp;
 pub mod claudecode;
+pub mod codex;
 pub mod hermes;
 pub mod scheduler;
 
@@ -80,6 +81,8 @@ pub enum RuntimeKind {
     Acp,
     /// Every Claude Code session on this Mac (`claudecode`).
     Claudecode,
+    /// Every Codex session on this machine (`codex`).
+    Codex,
 }
 
 /// What a runtime can do; the UI hides everything else.
@@ -170,6 +173,7 @@ pub enum Runtime {
     Hermes(hermes::HermesClient),
     Acp(acp::AcpClient),
     ClaudeCode(claudecode::ClaudeCodeClient),
+    Codex(codex::CodexClient),
 }
 
 macro_rules! each {
@@ -179,6 +183,7 @@ macro_rules! each {
             Runtime::Hermes($c) => $e,
             Runtime::Acp($c) => $e,
             Runtime::ClaudeCode($c) => $e,
+            Runtime::Codex($c) => $e,
         }
     };
 }
@@ -234,6 +239,7 @@ impl Runtime {
         match self {
             Runtime::OpenClaw(_) => None,
             Runtime::ClaudeCode(c) => Some(c.thread_folder(session_key)),
+            Runtime::Codex(c) => Some(c.thread_folder(session_key)),
             Runtime::Acp(c) => c.thread_folder(session_key),
             Runtime::Hermes(c) => c.thread_folder(agent_id).await,
         }
@@ -308,7 +314,7 @@ pub fn archived_filter(params: &Value) -> Option<bool> {
 }
 
 /// What you set on a thread from littleguys (`sessions.patch`), kept by littleguys for
-/// runtimes that don't keep it themselves (ACP, Claude Code).
+/// runtimes that don't keep it themselves (ACP, Claude Code, Codex).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadFlags {

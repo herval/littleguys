@@ -1,7 +1,7 @@
 import { Archive, ArrowDown, Globe, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { sessions as sessionsApi } from "../lib/gateway";
-import { channelName, gatewayOf, guyName, hasMainChat, isOnThisMac, isRunning, phaseLabel, sessionRow, threadKind, threadTitle } from "../lib/guys";
+import { channelName, followsSessions, gatewayOf, guyName, hasMainChat, isOnThisMac, isRunning, phaseLabel, sessionRow, threadKind, threadTitle } from "../lib/guys";
 import { core } from "../lib/ipc";
 import { presentTense, toolKind } from "../lib/toolPhrases";
 import { firstUnread } from "../lib/transcript";
@@ -130,7 +130,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   const folder = threadFolder(guy, row);
   const canPickFolder = useApp((s) => {
     const g = gatewayOf(s.roster, gw);
-    return ((g?.status.kind === "acp" && isOnThisMac(g)) || g?.status.kind === "claudecode") && kind !== "routine";
+    return ((g?.status.kind === "acp" && isOnThisMac(g)) || followsSessions(g?.status.kind)) && kind !== "routine";
   });
   // A title or preview means it has history somewhere, even if none loaded.
   const unstarted = Boolean(thread?.loaded) && items.length === 0 && !running && !row?.derivedTitle && !row?.lastMessagePreview;
@@ -321,8 +321,8 @@ function ChatHeader({
   const channel = kind === "channel" ? channelName(sessionKey) : null;
   const channelLabel = channel ? channel.charAt(0).toUpperCase() + channel.slice(1) : null;
   // The main chat is just "talking to Jefe"; other threads say which one this is.
-  const isMain = kind === "main" && gateway?.status.kind !== "acp" && gateway?.status.kind !== "claudecode";
-  const showFolder = (gateway?.status.kind === "acp" || gateway?.status.kind === "claudecode") && folder;
+  const isMain = kind === "main" && gateway?.status.kind !== "acp" && !followsSessions(gateway?.status.kind);
+  const showFolder = (gateway?.status.kind === "acp" || followsSessions(gateway?.status.kind)) && folder;
   const threadLabel = isMain ? null : kind === "channel" ? `${title} on ${channelLabel}` : title;
 
   return (

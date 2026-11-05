@@ -52,6 +52,7 @@ hmac = "0.12"
 if-addrs = "0.15"
 socket2 = "0.6"
 hpke = { version = "0.12", default-features = false, features = ["alloc", "x25519"] }
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -2,7 +2,7 @@ import { CalendarClock, ChevronRight, Pencil, Play, Plus, Trash2 } from "lucide-
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { COMPUTER } from "../lib/platform";
 import { cron } from "../lib/gateway";
-import { capsOf, gatewayOf, guyName, hasMainChat, relativeTime, sessionsFor, threadKind, threadTitle } from "../lib/guys";
+import { capsOf, followsSessions, gatewayOf, guyName, hasMainChat, relativeTime, sessionsFor, threadKind, threadTitle } from "../lib/guys";
 import { errorMessage, listen } from "../lib/ipc";
 import {
   DAYS,
@@ -300,8 +300,8 @@ function RoutineEditor({ guy, job, onClose, onSaved }: { guy: Guy; job: Job | nu
   const [preset, setPreset] = useState<Preset>(scheduleToPreset(job?.schedule as CronSchedule | undefined));
   const initialTarget = typeof job?.sessionTarget === "string" && job.sessionTarget.startsWith("session:") ? job.sessionTarget.slice(8) : "";
   const [target, setTarget] = useState<string>(initialTarget); // "" = new thread per run
-  // Claude Code starts each run's session in a folder (`payload.cwd`); the guy's is the one you last worked in.
-  const startsInFolder = useApp((s) => gatewayOf(s.roster, gw)?.status.kind === "claudecode");
+  // Claude Code and Codex start each run's session in a folder (`payload.cwd`); the guy's is the one you last worked in.
+  const startsInFolder = useApp((s) => followsSessions(gatewayOf(s.roster, gw)?.status.kind));
   const [folder, setFolder] = useState<string | null>((job?.payload as { cwd?: string } | undefined)?.cwd ?? guy.workspace ?? null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);

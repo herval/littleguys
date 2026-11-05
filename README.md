@@ -22,7 +22,7 @@ Or grab the `.dmg` from [Releases](https://github.com/herval/littleguys/releases
 For OpenClaw it's a UX layer over your existing `~/.openclaw`, not a separate install. New guys use the workspaces OpenClaw gives each agent, and the UI links to their folder. With no OpenClaw on the Mac yet, littleguys can install and set it up for you.
 
 ### Kinds of bots
-Each saved bot uses one of four adapters (`src-tauri/src/runtime/`), and each adapter declares what it can do so the UI hides the rest:
+Each saved bot uses one of five adapters (`src-tauri/src/runtime/`), and each adapter declares what it can do so the UI hides the rest:
 
 | Runtime | How littleguys talks to it | Guys | Routines | Approvals |
 |---|---|---|---|---|
@@ -30,6 +30,7 @@ Each saved bot uses one of four adapters (`src-tauri/src/runtime/`), and each ad
 | **Hermes Agent** | Local `hermes serve` backend (JSON-RPC over WebSocket), or a remote API server (`API_SERVER_KEY`) | Profiles | Native cron | ✓ |
 | **ACP agents**: Claude Code, Codex, Gemini CLI, Goose, OpenCode, ZeroClaw… | Agent Client Protocol over stdio, or WebSocket for `goose serve` and similar | One per agent | Run by littleguys while it's open | ✓ |
 | **Claude Code** | Every session on this Mac, terminal or background: `claude agents`, their transcripts, and hooks from the littleguys plugin. New threads and routine runs are background sessions (`claude --bg`) | One | Run by littleguys while it's open | Background sessions |
+| **Codex** | Every session on this machine, terminal or not: its rollout files, plus Codex's shared app-server when it's up. Replies go through that server, `codex queue` or `codex exec resume`; new threads and routine runs through the server or `codex exec` | One | Run by littleguys while it's open | Sessions on the shared server |
 
 Every adapter speaks the same OpenClaw-shaped calls and events, documented in `runtime/mod.rs`, so the rest of the app doesn't care what's behind a guy. ACP agents can be added in one click from the [ACP registry](https://agentclientprotocol.com). Bots without a scheduler get routines from `runtime/scheduler.rs`.
 
@@ -51,7 +52,7 @@ littleguys can be connected to several OpenClaw gateways at once, and every gate
   - Never set up → non-interactive `openclaw onboard` with the provider you pick
 
 ### Your phone
-littleguys for iPhone pairs with this Mac and reaches every bot on it (OpenClaw, Hermes, Claude Code, ACP agents), so your guys come along without each one being reachable from the phone:
+littleguys for iPhone pairs with this Mac and reaches every bot on it (OpenClaw, Hermes, Claude Code, Codex, ACP agents), so your guys come along without each one being reachable from the phone:
 - **Pairing:** **Settings → Phones → Pair mobile app** shows a QR code. Scan it from the iPhone app's **Pair with your Mac**. The code works once, for 10 minutes; **Copy link** pastes it on the phone through Universal Clipboard.
 - **Where it works:** on the same Wi-Fi as this Mac, or anywhere when both are on Tailscale. The phone finds the Mac again on its own (Bonjour `_littleguys._tcp`, then the addresses from the code).
 - **Notifications:** replies, routines and approvals reach the phone as pushes through [littleguys-relay](https://github.com/herval/littleguys-relay), sealed so the relay can't read them, and not while the app is open on the phone.
@@ -64,7 +65,10 @@ littleguys for iPhone pairs with this Mac and reaches every bot on it (OpenClaw,
 Yes. littleguys speaks the [Agent Client Protocol](https://agentclientprotocol.com), so Codex, Gemini CLI, GitHub Copilot CLI and the other agents in the ACP registry are a click away (Goose, OpenCode and others that ship as a download, once they're installed), each a contact with its own chats. It starts the agent itself, in the folder you pick, or connects to an ACP server over WebSocket. It's listed on the protocol's [clients page](https://agentclientprotocol.com/get-started/clients). More: [littleguys.dev/acp](https://www.littleguys.dev/acp).
 
 ### Does it follow Claude Code sessions already running in my terminal?
-Yes, since version 0.2. **Add a bot → Claude Code** installs a small littleguys plugin in Claude Code, and from then on every session on this Mac, in a terminal or in the background, is a thread you can follow live and reply to. A terminal session gets your reply with the next prompt you type there; its permission prompts stay in the terminal. Codex and other ACP agents are different: littleguys starts those itself, so a Codex session running in a terminal doesn't show up. More: [littleguys.dev/claude-code](https://www.littleguys.dev/claude-code).
+Yes, since version 0.2. **Add a bot → Claude Code** installs a small littleguys plugin in Claude Code, and from then on every session on this Mac, in a terminal or in the background, is a thread you can follow live and reply to. A terminal session gets your reply with the next prompt you type there; its permission prompts stay in the terminal. ACP agents are different: littleguys starts those itself, so a session running in a terminal doesn't show up. More: [littleguys.dev/claude-code](https://www.littleguys.dev/claude-code).
+
+### Does it follow Codex sessions already running in my terminal?
+Yes. **Add a bot → Codex** installs nothing: littleguys reads the session logs Codex already keeps, so every session on this machine, in a terminal or not, is a thread on one Codex guy that you can follow live and reply to. A plain `codex` usually runs on Codex's shared server: those sessions take your reply right away and ask you for permission in littleguys too. Any other session, such as `codex --no-daemon`, gets your reply when it's next idle, and its permission prompts stay in the terminal. Codex guys added as ACP agents keep working as they did: littleguys starts those itself.
 
 ### What's a good Mac app for OpenClaw agents on a home server?
 littleguys. Every OpenClaw agent, on this Mac or on a gateway on another machine, is a contact you chat with, and the commands an agent wants to run come to you to allow once, always allow or deny. It lists the gateways it finds on your tailnet and LAN, or you type an address; each gateway approves this Mac once. It doesn't run agents itself: it's a front end for the OpenClaw you already run. For voice wake, the Canvas panel or usage and cost in the menu bar, use OpenClaw's own macOS app. More: [littleguys.dev/openclaw](https://www.littleguys.dev/openclaw).
@@ -73,7 +77,7 @@ littleguys. Every OpenClaw agent, on this Mac or on a gateway on another machine
 Yes, littleguys. Each Hermes profile is a contact, and its sessions are threads, including the ones you started in the CLI or from a messaging app; you allow or deny the commands Hermes asks about. It connects to `hermes serve` on this Mac or to the Hermes API server on another machine. Hermes Desktop is the full workspace, with git review, a terminal, a file browser and voice. littleguys is the small chat app that also holds your OpenClaw, Claude Code and Codex agents. More: [littleguys.dev/hermes](https://www.littleguys.dev/hermes).
 
 ### Do I need OpenClaw to use it?
-No. littleguys works with Hermes Agent, Claude Code and any ACP agent without OpenClaw. If OpenClaw isn't on your Mac, the first screen offers to install it; skip that with **Add a gateway**, and pick Hermes, Claude Code or Agents (ACP).
+No. littleguys works with Hermes Agent, Claude Code, Codex and any ACP agent without OpenClaw. If OpenClaw isn't on your Mac, the first screen offers to install it; skip that with **Add a gateway**, and pick Hermes, Claude Code, Codex or Agents (ACP).
 
 ### Can it reach agents on other machines?
 Yes: several OpenClaw gateways at once, found on your tailnet and LAN, Hermes API servers, and ACP agents served over WebSocket, such as `goose serve`. With more than one machine, each guy is labeled with where it lives.
@@ -155,7 +159,7 @@ src-tauri/            Rust core — owns the gateway connection so the menu bar 
   openclaw/config.rs  reads ~/.openclaw/openclaw.json (JSON5) → endpoint + credential
   gateways.rs         saved gateways, address normalization, Tailscale/Bonjour discovery
   hub.rs              one GatewayClient per saved gateway (add / rename / disable / remove)
-  runtime/            OpenClaw, Hermes and ACP adapters behind one interface
+  runtime/            OpenClaw, Hermes, Claude Code, Codex and ACP adapters behind one interface
   openclaw/runtime.rs finds the CLI, the gateway service's state (launchd, or `openclaw gateway status`), /health
   doctor.rs           install / update / start / onboard
   activity.rs         per-gateway roster (guys + threads + running + approvals) → tray mood, notifications

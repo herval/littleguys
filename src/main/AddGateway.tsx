@@ -1,12 +1,12 @@
 import { ChevronRight, Globe, KeyRound, Network, RefreshCw, RotateCw, Trash2, Wifi } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { gatewayOf, needsProxyFix, phaseLabel } from "../lib/guys";
+import { followsSessions, gatewayOf, needsProxyFix, phaseLabel } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { DiscoveredGateway, GatewayRoster } from "../lib/types";
 import { type AddBotTab, useApp } from "../stores/app";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputBase, inputClass, Modal, Segmented, Spinner } from "../ui/kit";
-import { AcpTab, ClaudeCodeTab, HermesTab } from "./AddBotTabs";
+import { AcpTab, ClaudeCodeTab, CodexTab, HermesTab } from "./AddBotTabs";
 import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix } from "./GatewayFix";
 
 const sectionLabel = "text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]";
@@ -38,6 +38,7 @@ export function AddGateway() {
                 { value: "openclaw", label: "OpenClaw" },
                 { value: "hermes", label: "Hermes" },
                 { value: "claude", label: "Claude Code" },
+                { value: "codex", label: "Codex" },
                 { value: "acp", label: "Agents (ACP)" },
               ]}
             />
@@ -45,6 +46,7 @@ export function AddGateway() {
               {tab === "openclaw" && <OpenClawTab onOpen={setOpenId} />}
               {tab === "hermes" && <HermesTab onAdded={setOpenId} />}
               {tab === "claude" && <ClaudeCodeTab onAdded={setOpenId} />}
+              {tab === "codex" && <CodexTab onAdded={setOpenId} />}
               {tab === "acp" && <AcpTab onAdded={setOpenId} />}
             </div>
             <div className="mt-6 flex justify-end">
@@ -398,7 +400,7 @@ function GatewayStatus({ id, onDone, onBack }: { id: string; onDone: () => void;
             Connected
             {gateway.loaded && (
               <span className="font-normal text-[var(--color-ink-2)]">
-                {status.kind === "claudecode"
+                {followsSessions(status.kind)
                   ? ` — following ${gateway.sessions.length} ${gateway.sessions.length === 1 ? "session" : "sessions"}`
                   : ` — ${gateway.agents.length} little ${gateway.agents.length === 1 ? "guy" : "guys"} joined`}
               </span>
