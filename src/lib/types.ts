@@ -22,7 +22,7 @@ export type Phase =
   | "no-config"
   | "error";
 
-export type RuntimeKind = "openclaw" | "hermes" | "acp" | "claudecode";
+export type RuntimeKind = "openclaw" | "hermes" | "acp" | "claudecode" | "codex";
 
 /** What a bot runtime can do; the UI hides the rest (see src-tauri/src/runtime/mod.rs). */
 export interface Capabilities {
@@ -187,6 +187,14 @@ export interface Limit {
   resetsAtMs: number;
   /** When this was reported. */
   readAtMs: number;
+}
+
+/** What `codex_detect` found. */
+export interface CodexProbe {
+  installed: boolean;
+  version?: string | null;
+  /** It has run here: there are sessions to show. */
+  sessions?: boolean;
 }
 
 export interface GatewayEntry {

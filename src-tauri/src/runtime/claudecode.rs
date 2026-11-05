@@ -1322,7 +1322,7 @@ enum Read {
     Gone,
 }
 
-fn modified_ms(meta: &std::fs::Metadata) -> u64 {
+pub(super) fn modified_ms(meta: &std::fs::Metadata) -> u64 {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -1331,7 +1331,7 @@ fn modified_ms(meta: &std::fs::Metadata) -> u64 {
 
 /// Reads `[from, to)` and splits it into JSON lines. Returns them, how far it
 /// got (the end of the last whole line) and the unfinished rest.
-fn read_lines(path: &Path, from: u64, to: u64, carry: Vec<u8>, skip_first: bool) -> std::io::Result<(Vec<Value>, u64, Vec<u8>)> {
+pub(super) fn read_lines(path: &Path, from: u64, to: u64, carry: Vec<u8>, skip_first: bool) -> std::io::Result<(Vec<Value>, u64, Vec<u8>)> {
     let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(from))?;
     let mut bytes = Vec::with_capacity((to - from) as usize);
@@ -3029,7 +3029,7 @@ pub async fn detect() -> Value {
     })
 }
 
-fn first_line(text: &str) -> &str {
+pub(super) fn first_line(text: &str) -> &str {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
 }
 

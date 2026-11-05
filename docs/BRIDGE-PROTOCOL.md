@@ -194,7 +194,7 @@ The Mac's `ConnStatus` (camelCase, as the webview gets it in `gw:status`), with 
 
 - **Removed:** `configPath`, `configVersion`, `deviceId`, `credentialIssue`, `mode`.
 - **`hello`:** only its `policy` and `features` (or `null`).
-- **`kind`:** `openclaw | hermes | acp | claudecode | …`. Phones treat kinds they don't know as generic bots and show `kindLabel`.
+- **`kind`:** `openclaw | hermes | acp | claudecode | codex | …`. Phones treat kinds they don't know as generic bots and show `kindLabel`.
 - **`phase`:** `starting | connecting | connected | pairing | auth-failed | offline | no-config | error`.
 - **`endpoint`:** the normalized URL the bot connects to, or `null` for local agents. Phones use it to skip a relayed bot they also reach directly.
 

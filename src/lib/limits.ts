@@ -13,7 +13,7 @@ export function limitProvider(gateway: GatewayRoster | undefined): LimitProvider
   if (!gateway) return null;
   const { kind, url } = gateway.status;
   if (kind === "claudecode") return "claude";
-  // A dedicated Codex runtime goes here: if (kind === "codex") return "codex";
+  if (kind === "codex") return "codex";
   // ACP agents show their command as the url. On another machine, its limit is that machine's.
   if (kind === "acp" && isOnThisMac(gateway) && /codex/i.test(url ?? "")) return "codex";
   return null;

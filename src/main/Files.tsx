@@ -26,7 +26,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { FILE_MANAGER } from "../lib/platform";
 import { workspace } from "../lib/gateway";
-import { gatewayOf, guyHue, guyName, isOnThisMac, sessionsFor, shortTime } from "../lib/guys";
+import { followsSessions, gatewayOf, guyHue, guyName, isOnThisMac, sessionsFor, shortTime } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { Guy, WorkspaceEntry, WorkspaceFile } from "../lib/types";
 import { useApp } from "../stores/app";
@@ -84,12 +84,12 @@ function EntryIcon({ entry, open }: { entry: WorkspaceEntry; open?: boolean }) {
 
 /**
  * The thread whose folder the Files tab shows, for bots whose threads each work in their
- * own (ACP on this Mac, Claude Code): the one open, else the one you were on last.
+ * own (ACP on this Mac, Claude Code, Codex): the one open, else the one you were on last.
  */
 function useFilesThread(guy: Guy): string | undefined {
   return useApp((s) => {
     const g = gatewayOf(s.roster, guy.gatewayId);
-    if (g?.status.kind !== "claudecode" && !(g?.status.kind === "acp" && isOnThisMac(g))) return undefined;
+    if (!followsSessions(g?.status.kind) && !(g?.status.kind === "acp" && isOnThisMac(g))) return undefined;
     return (s.selectedUid === guy.uid ? s.selectedSessionKey : null) ?? s.lastThreadByGuy[guy.uid] ?? undefined;
   });
 }

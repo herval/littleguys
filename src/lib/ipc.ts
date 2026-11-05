@@ -5,6 +5,7 @@ import type {
   AcpConfig,
   ClaudeCodeConfig,
   ClaudeCodeProbe,
+  CodexProbe,
   ConnStatus,
   DiscoveredGateway,
   DoctorReport,
@@ -141,6 +142,8 @@ export const core = {
     claudeConfigure: (id: string, claude: ClaudeCodeConfig) => invoke<void>("claude_code_configure", { id, claude }),
     /** Chains Claude Code's status line so littleguys hears its limits (when `on` is given); resolves to whether it's on. */
     claudeStatusLine: (on?: boolean) => invoke<boolean>("claude_status_line", { on: on ?? null }),
+    addCodex: () => invoke<GatewayEntry>("bot_add", { kind: "codex", name: null, acp: null, hermes: null, claude: null, secretKind: null, secret: null }),
+    codexDetect: () => invoke<CodexProbe>("codex_detect"),
   },
   /** How much of a provider's rate limit is used; null when there's no current reading. */
   limit: (provider: LimitProvider) => invoke<Limit | null>("limits_read", { provider }),

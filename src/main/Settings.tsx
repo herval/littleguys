@@ -1,7 +1,7 @@
 import { Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { shortcut } from "../lib/platform";
-import { needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
+import { followsSessions, needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
 import { core, errorMessage, isTauri, listen } from "../lib/ipc";
 import type { GatewayRoster, UpdateState } from "../lib/types";
 import { useApp } from "../stores/app";
@@ -180,7 +180,7 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
             ? phase === "connected" && g.loaded
               ? g.status.kind === "acp"
                 ? "Ready"
-                : g.status.kind === "claudecode"
+                : followsSessions(g.status.kind)
                   ? `${g.sessions.length} ${g.sessions.length === 1 ? "session" : "sessions"}`
                   : `${g.agents.length} ${g.agents.length === 1 ? "guy" : "guys"}`
               : statusLabel(g.status)
@@ -206,7 +206,7 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
               const what =
                 g.status.kind === "acp"
                   ? `Remove ${g.name}? Its chat history in littleguys goes too.`
-                  : g.status.kind === "claudecode"
+                  : followsSessions(g.status.kind)
                     ? `Remove ${g.name}? Your sessions keep running; they just won't show up here.`
                     : `Remove ${g.name}? Its little guys stay where they are; they just won't show up here.`;
               if (await confirmAction(what, "littleguys", "Remove"))
