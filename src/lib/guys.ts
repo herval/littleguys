@@ -53,7 +53,12 @@ export function isOnThisMac(g: GatewayRoster | undefined): boolean {
   return kind === "acp" && !(url ?? "").startsWith("ws");
 }
 
-export const RUNTIME_LABEL: Record<string, string> = { openclaw: "OpenClaw", hermes: "Hermes", acp: "ACP agent", claudecode: "Claude Code" };
+export const RUNTIME_LABEL: Record<string, string> = { openclaw: "OpenClaw", hermes: "Hermes", acp: "ACP agent", claudecode: "Claude Code", codex: "Codex" };
+
+/** Claude Code and Codex: one guy, and every session on this computer a thread of theirs. */
+export function followsSessions(kind: string | undefined): boolean {
+  return kind === "claudecode" || kind === "codex";
+}
 
 export function liveGateways(roster: Roster): GatewayRoster[] {
   return roster.gateways.filter((g) => g.enabled && g.status.phase === "connected");
@@ -122,12 +127,12 @@ export function channelName(key: string): string | null {
 /**
  * OpenClaw (and Hermes, via its "Bot Chat") give every guy a real main chat.
  * ACP agents only have threads: their `agent:<id>:main` key is just a draft
- * that becomes a thread on the first message. Claude Code's threads are its
- * sessions.
+ * that becomes a thread on the first message. Claude Code's and Codex's threads
+ * are their sessions.
  */
 export function hasMainChat(roster: Roster, gatewayId: string): boolean {
   const kind = gatewayOf(roster, gatewayId)?.status.kind;
-  return kind !== "acp" && kind !== "claudecode";
+  return kind !== "acp" && !followsSessions(kind);
 }
 
 /** Where to land for a guy: their main chat, or (ACP) their latest thread / a new draft. */

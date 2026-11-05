@@ -158,6 +158,36 @@ claudeCode.status = {
   capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
 };
 
+// ?codex=1: Codex as its own kind (every session on this Mac is a thread).
+const cxKey = (id: string) => `agent:codex:dashboard:${id}`;
+const codex = gateway("codex-8e1d4b7a20", "Codex", "This Mac", "connected", {
+  defaultAgentId: "codex",
+  agents: [{ id: "codex", name: "Codex", identity: { name: "Codex", emoji: "🌀" }, workspace: "/Users/you/dev/shop-api" }] as never,
+  sessions: [
+    { key: cxKey("x1"), agentId: "codex", kind: "direct", derivedTitle: "Speed up the search index", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 30_000, lastMessagePreview: "Rebuilding the index with the new tokenizer…", hasActiveRun: true, status: "running" },
+    { key: cxKey("x2"), agentId: "codex", kind: "direct", derivedTitle: "Clean up the old build scripts", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 3 * min, lastMessagePreview: "Waiting for you in Codex", status: "done" },
+    { key: cxKey("x3"), agentId: "codex", kind: "direct", derivedTitle: "Write the changelog for 2.4", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 50 * min, lastMessagePreview: "Changelog's in; 6 entries.", status: "done" },
+  ] as never,
+  running: [cxKey("x1")],
+  approvals: [
+    {
+      id: "codex-ap-1",
+      agentId: "codex",
+      sessionKey: cxKey("x2"),
+      createdAtMs: now - 45_000,
+      presentation: { commandText: "rm -rf build/legacy", allowedDecisions: ["allow-once", "allow-always", "deny"] },
+      request: { id: "codex-ap-1", command: "rm -rf build/legacy", agentId: "codex", sessionKey: cxKey("x2"), cwd: "/Users/you/dev/infra" },
+    },
+  ],
+});
+codex.status = {
+  ...codex.status,
+  kind: "codex",
+  mode: "local",
+  serverVersion: "0.166.0",
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true },
+};
+
 /** The face each bot gave a guy, from before a photo was picked for them. */
 const botFaces = new Map<string, string | undefined>();
 
@@ -166,7 +196,7 @@ const roster: Roster = {
     ? [attic]
     : params.get("single")
       ? [attic]
-      : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude],
+      : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude, ...(params.get("codex") ? [codex] : [])],
   hidden: ["hermes-1/research"],
   notifications: { everyone: { replies: true, routines: "all" }, guys: {} },
   faces: [],
@@ -694,9 +724,9 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
     case "agents.workspace.list": {
       const listing = workspaceList(String(p.path ?? ""));
       // Claude Code and ACP threads each work in their own folder.
-      const rows = [...claudeCode.sessions, ...claude.sessions] as Array<{ key: string; workspaceDir?: string }>;
+      const rows = [...claudeCode.sessions, ...codex.sessions, ...claude.sessions] as Array<{ key: string; workspaceDir?: string }>;
       const folder = rows.find((r) => r.key === p.sessionKey)?.workspaceDir;
-      return gateway === claudeCode.id || gateway === claude.id ? { ...listing, workspaceDir: folder ?? "/Users/you/dev/shop-api" } : listing;
+      return gateway === claudeCode.id || gateway === codex.id || gateway === claude.id ? { ...listing, workspaceDir: folder ?? "/Users/you/dev/shop-api" } : listing;
     }
     case "agents.workspace.get":
       return workspaceGet(String(p.path));
@@ -882,6 +912,9 @@ export const mockBackend: Backend = {
       case "claude_code_detect":
         await new Promise((r) => setTimeout(r, 400));
         return { installed: true, version: "2.1.296", plugin: null } as T;
+      case "codex_detect":
+        await new Promise((r) => setTimeout(r, 400));
+        return { installed: true, version: "0.166.0", sessions: true } as T;
       case "claude_code_install_plugin":
         await new Promise((r) => setTimeout(r, 900));
         return undefined as T;
@@ -898,6 +931,11 @@ export const mockBackend: Backend = {
           if (!roster.gateways.includes(claudeCode)) roster.gateways.push(claudeCode);
           emit("lg:roster", { ...roster, gateways: [...roster.gateways] });
           return { id: claudeCode.id, name: "Claude Code", url: null, enabled: true, addedAtMs: Date.now(), kind } as T;
+        }
+        if (kind === "codex") {
+          if (!roster.gateways.includes(codex)) roster.gateways.push(codex);
+          emit("lg:roster", { ...roster, gateways: [...roster.gateways] });
+          return { id: codex.id, name: "Codex", url: null, enabled: true, addedAtMs: Date.now(), kind } as T;
         }
         const acp = args?.acp as { agentName?: string } | null;
         const name = (args?.name as string) || acp?.agentName || "Hermes";

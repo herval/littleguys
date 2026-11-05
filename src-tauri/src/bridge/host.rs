@@ -117,6 +117,7 @@ pub fn kind_label(kind: &str) -> String {
         "hermes" => "Hermes".into(),
         "acp" => "ACP agent".into(),
         "claudecode" => "Claude Code".into(),
+        "codex" => "Codex".into(),
         other => other.to_string(),
     }
 }
@@ -165,6 +166,7 @@ mod tests {
         assert_eq!(s["endpoint"], Value::Null);
         assert_eq!(s["kindLabel"], "ACP agent");
         assert_eq!(bot_status(&json!({"kind": "claudecode"}))["kindLabel"], "Claude Code");
+        assert_eq!(bot_status(&json!({"kind": "codex"}))["kindLabel"], "Codex");
         assert_eq!(bot_status(&json!({"kind": "zeroclaw"}))["kindLabel"], "zeroclaw");
     }
 }

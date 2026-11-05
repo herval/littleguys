@@ -23,7 +23,7 @@ function readJson<T>(key: string, fallback: T): T {
 /** What the main pane shows; "past" is the resume picker (ACP agents' sessions from every folder). */
 export type MainView = "chat" | "routines" | "files" | "skills" | "past";
 /** The "Add a bot" dialog's tabs. */
-export type AddBotTab = "openclaw" | "hermes" | "claude" | "acp";
+export type AddBotTab = "openclaw" | "hermes" | "claude" | "codex" | "acp";
 
 /** The browser panel beside the chat: open per guy, one shared width. */
 interface BrowserPanelPrefs {

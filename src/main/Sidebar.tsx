@@ -33,6 +33,7 @@ import {
   cleanPreview,
   findGuy,
   gatewayOf,
+  followsSessions,
   guyName,
   guyUid,
   isMultiGateway,
@@ -170,7 +171,7 @@ function GuyHeader({ guy }: { guy: Guy }) {
   const multi = isMultiGateway(roster);
   const model = typeof guy.model === "object" && guy.model ? guy.model.primary : undefined;
   const isAcp = gateway?.status.kind === "acp";
-  const isClaudeCode = gateway?.status.kind === "claudecode";
+  const allSessions = followsSessions(gateway?.status.kind);
   const [faceError, setFaceError] = useState<string | null>(null);
   useEffect(() => {
     if (!faceError) return;
@@ -180,7 +181,7 @@ function GuyHeader({ guy }: { guy: Guy }) {
   const subtitle = [
     act.running
       ? "working…"
-      : isClaudeCode
+      : allSessions
         ? `every session on this ${COMPUTER}`
         : isAcp
           ? guy.gatewayName
