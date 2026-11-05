@@ -17,7 +17,13 @@
 //!   A terminal session that's idle gets it with its next prompt.
 //! - With the connection's `approvals` setting on, a background session's
 //!   permission prompt waits in its PermissionRequest hook for Allow or Deny from
-//!   littleguys. Terminal sessions keep asking in their terminal.
+//!   littleguys. A terminal session's prompt can be answered in either place:
+//!   Claude Code shows its dialog while the hook runs and takes whichever answer
+//!   comes first, so the terminal never waits for littleguys. You're likely at the
+//!   terminal, so a card only shows if the dialog's still open after
+//!   [`TERMINAL_HOLD`]. Saying No or Esc there kills the hook, but saying Yes leaves
+//!   it running, and the transcript stays quiet until the tool finishes; the sign
+//!   of a Yes is `claude agents` no longer listing the session as waiting.
 //! - New threads start as drafts (`sessions.create`, or the guy's main key before
 //!   it has a session); the first message starts a background session in the
 //!   thread's folder: `claude "<text>" --bg`. `--bg` picks the session id, so the
@@ -62,6 +68,11 @@ pub const PLUGIN_MISSING: &str = "claude-plugin";
 const TICK: Duration = Duration::from_secs(1);
 /// Poll `claude agents` every this many ticks.
 const AGENTS_EVERY: u32 = 3;
+/// A terminal session's prompt stays between you and the terminal this long before
+/// littleguys speaks up. Claude Code's own notification waits as long.
+const TERMINAL_HOLD: Duration = Duration::from_secs(6);
+/// While a terminal prompt is this new, `claude agents` is polled every tick.
+const PROMPT_WATCH: Duration = Duration::from_secs(60);
 /// Sessions show up as threads while they run, or for this long after.
 const LIST_WINDOW_MS: u64 = 3 * 24 * 3600 * 1000;
 /// Transcripts are followed while their session runs, or for this long after it last wrote.
@@ -145,6 +156,8 @@ struct Inner {
     /// Poll `claude agents` on the next tick.
     poke: AtomicBool,
     wake: Notify,
+    /// [`TERMINAL_HOLD`].
+    terminal_hold: Duration,
     claude: Mutex<Option<PathBuf>>,
     st: Mutex<State>,
     scheduler: Arc<LocalScheduler>,
@@ -433,6 +446,18 @@ struct Approval {
     session_id: String,
     payload: Value,
     tx: Option<oneshot::Sender<String>>,
+    /// A terminal session's prompt: when it opened.
+    opened: Option<Instant>,
+    /// `claude agents` has listed its session as waiting.
+    dialog_seen: bool,
+    /// Not shown yet ([`TERMINAL_HOLD`]).
+    held: bool,
+}
+
+impl Approval {
+    fn watched(&self) -> bool {
+        self.opened.is_some_and(|t| t.elapsed() < PROMPT_WATCH)
+    }
 }
 
 impl ClaudeCodeClient {
@@ -465,6 +490,7 @@ impl ClaudeCodeClient {
                 restart: AtomicBool::new(false),
                 poke: AtomicBool::new(false),
                 wake: Notify::new(),
+                terminal_hold: TERMINAL_HOLD,
                 claude: Mutex::new(None),
                 st: Mutex::new(st),
                 scheduler,
@@ -525,7 +551,7 @@ impl ClaudeCodeClient {
             }
             "exec.approval.list" => {
                 let st = inner.st.lock().unwrap();
-                let approvals: Vec<Value> = st.approvals.values().map(|a| a.payload.clone()).collect();
+                let approvals: Vec<Value> = st.approvals.values().filter(|a| !a.held).map(|a| a.payload.clone()).collect();
                 return Ok(json!({ "approvals": approvals }));
             }
             m if m.starts_with("cron.") => return inner.scheduler.handle(m, params).await,
@@ -800,7 +826,8 @@ async fn serve(inner: &Arc<Inner>, listener: HookListener) {
         if inner.stopped.load(Ordering::SeqCst) || inner.restart.load(Ordering::SeqCst) {
             break;
         }
-        if tick % AGENTS_EVERY == 0 || inner.poke.swap(false, Ordering::SeqCst) {
+        let watching = inner.st.lock().unwrap().approvals.values().any(Approval::watched);
+        if tick % AGENTS_EVERY == 0 || watching || inner.poke.swap(false, Ordering::SeqCst) {
             poll_agents(inner).await;
             deliver_due(inner);
         }
@@ -1015,6 +1042,8 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
                 if let Some(last) = input.get("last_assistant_message").and_then(Value::as_str).filter(|t| !t.trim().is_empty()) {
                     s.said = Some(last.trim().to_string());
                 }
+                // Whatever it was asking, its turn got past it.
+                expire.extend(st.approvals.values_mut().filter(|a| a.session_id == sid).filter_map(|a| a.tx.take()));
             }
             "SessionEnd" => {
                 s.running = false;
@@ -1041,14 +1070,26 @@ fn handover(outbox: &[String]) -> String {
     format!("{MARK}\n\n{}", outbox.join("\n\n"))
 }
 
-/// Waits for Allow or Deny from littleguys, when it's the one answering this session's prompts.
+/// Whether an approval card can stand in for this prompt. Questions need their answers
+/// picked, and a terminal session's plan needs reading and its next mode picked; a
+/// thread you deleted has nowhere to show a card, and its terminal can still ask.
+fn card_fits(s: &Session, tool: &str) -> bool {
+    match tool {
+        "AskUserQuestion" => false,
+        "ExitPlanMode" => s.background,
+        _ => s.background || !s.hidden,
+    }
+}
+
+/// Waits for Allow or Deny from littleguys, when it's the one answering this session's
+/// prompts. A terminal session has its dialog open all the while (Claude Code doesn't wait
+/// for this hook), so its card waits for [`TERMINAL_HOLD`] and goes when the dialog closes.
 async fn permission(inner: &Arc<Inner>, sid: &str, input: &Value, stream: &mut HookStream) -> String {
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("tool").to_string();
-    let (eligible, key, cwd) = {
+    let (eligible, terminal, key, cwd) = {
         let st = inner.st.lock().unwrap();
         let Some(s) = st.sessions.get(sid) else { return String::new() };
-        // Questions need their answers picked, which an approval card can't do.
-        (inner.config.approvals && s.background && tool != "AskUserQuestion", s.key(), s.cwd.clone())
+        (inner.config.approvals && card_fits(s, &tool), !s.background, s.key(), s.cwd.clone())
     };
     if !eligible {
         return String::new();
@@ -1061,29 +1102,71 @@ async fn permission(inner: &Arc<Inner>, sid: &str, input: &Value, stream: &mut H
         allowed.push("allow-always");
     }
     allowed.push("deny");
+    let folder = Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned());
     let payload = json!({
         "id": id,
         "agentId": AGENT_ID,
         "sessionKey": key,
         "createdAtMs": now_ms(),
-        "presentation": { "commandText": command, "allowedDecisions": allowed },
+        "presentation": { "commandText": command, "allowedDecisions": allowed, "folder": folder },
         "request": { "id": id, "command": command, "agentId": AGENT_ID, "sessionKey": key, "cwd": cwd, "toolName": tool },
     });
-    let (tx, rx) = oneshot::channel::<String>();
-    inner
-        .st
-        .lock()
-        .unwrap()
-        .approvals
-        .insert(id.clone(), Approval { session_id: sid.to_string(), payload: payload.clone(), tx: Some(tx) });
+    let (tx, mut rx) = oneshot::channel::<String>();
+    let approval = Approval {
+        session_id: sid.to_string(),
+        payload: payload.clone(),
+        tx: Some(tx),
+        opened: terminal.then(Instant::now),
+        dialog_seen: false,
+        held: terminal,
+    };
+    inner.st.lock().unwrap().approvals.insert(id.clone(), approval);
+    if terminal {
+        inner.wake.notify_one();
+        let show = tokio::select! {
+            _ = tokio::time::sleep(inner.terminal_hold) => reveal(inner, &id),
+            _ = &mut rx => false,
+            _ = peer_closed(stream) => false,
+        };
+        if !show {
+            inner.st.lock().unwrap().approvals.remove(&id);
+            return String::new();
+        }
+    }
     emit(inner, "exec.approval.requested", payload);
     let decision = tokio::select! {
-        d = rx => d.ok(),
+        d = &mut rx => d.ok(),
         _ = peer_closed(stream) => None,
     };
     inner.st.lock().unwrap().approvals.remove(&id);
     emit(inner, "exec.approval.resolved", json!({ "id": id, "decision": decision.as_deref().unwrap_or("expired") }));
     hook_decision(decision.as_deref(), suggestions.as_ref())
+}
+
+/// Ends a terminal prompt's hold. It only shows if `claude agents` has seen its dialog open;
+/// a Claude Code that doesn't say leaves its prompts to the terminal, as if littleguys weren't here.
+fn reveal(inner: &Inner, id: &str) -> bool {
+    let mut st = inner.st.lock().unwrap();
+    let Some(a) = st.approvals.get_mut(id) else { return false };
+    a.held = !a.dialog_seen;
+    a.dialog_seen
+}
+
+/// A terminal prompt whose session `claude agents` no longer lists as waiting was answered
+/// there. Its hook may still be running (see the module docs); this lets it go.
+fn note_dialogs(inner: &Inner, listed: &[Listed]) {
+    let waiting: HashSet<&str> = listed.iter().filter(|l| l.waiting_for.is_some()).map(|l| l.session_id.as_str()).collect();
+    let mut answered = Vec::new();
+    for a in inner.st.lock().unwrap().approvals.values_mut().filter(|a| a.opened.is_some()) {
+        if waiting.contains(a.session_id.as_str()) {
+            a.dialog_seen = true;
+        } else if a.dialog_seen {
+            answered.extend(a.tx.take());
+        }
+    }
+    for tx in answered {
+        let _ = tx.send("expired".into());
+    }
 }
 
 /// The PermissionRequest hook's answer; empty leaves the prompt to Claude Code.
@@ -1259,6 +1342,7 @@ async fn poll_agents(inner: &Arc<Inner>) {
         emits.push(refresh());
     }
     flush(inner, emits);
+    note_dialogs(inner, &listed);
 }
 
 // ---- transcripts --------------------------------------------------------------------------
@@ -3618,6 +3702,235 @@ mod tests {
         assert_eq!(deny["hookSpecificOutput"]["decision"]["behavior"], "deny");
     }
 
+    type Events = Arc<Mutex<Vec<(String, Value)>>>;
+
+    const SHORT_HOLD: Duration = Duration::from_millis(200);
+
+    /// A client following one session on the fictional `/work/shop`, and what it emits.
+    fn following(approvals: bool, background: bool) -> (ClaudeCodeClient, Events) {
+        let events: Events = Arc::default();
+        let seen = events.clone();
+        let hooks = Hooks {
+            status: Box::new(|_| {}),
+            event: Box::new(move |name, payload, _| seen.lock().unwrap().push((name.to_string(), payload.clone()))),
+            connected: Box::new(|| {}),
+        };
+        let mut client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig { approvals }, temp_dir("prompts"), hooks);
+        Arc::get_mut(&mut client.inner).expect("just made").terminal_hold = SHORT_HOLD;
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            let s = st.session("s1");
+            s.background = background;
+            s.running = true;
+            s.cwd = "/work/shop".into();
+            s.started_at = now_ms();
+        }
+        (client, events)
+    }
+
+    /// The two ends of a hook's connection.
+    #[cfg(unix)]
+    async fn hook_pair() -> (HookStream, HookStream) {
+        HookStream::pair().unwrap()
+    }
+
+    #[cfg(windows)]
+    async fn hook_pair() -> (HookStream, HookStream) {
+        let listener = HookListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let theirs = HookStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        (listener.accept().await.unwrap().0, theirs)
+    }
+
+    fn hook_request(event: &str, body: Value) -> Request {
+        Request { path: format!("/hook/{event}"), headers: HashMap::new(), body: body.to_string().into_bytes() }
+    }
+
+    fn rules() -> Value {
+        json!([{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "cargo test" }], "behavior": "allow", "destination": "localSettings" }])
+    }
+
+    /// A session asks; returns what its hook will print, and the hook's end of the connection.
+    async fn ask(client: &ClaudeCodeClient, tool: &str) -> (tokio::task::JoinHandle<String>, HookStream) {
+        let (mut ours, theirs) = hook_pair().await;
+        let inner = client.inner.clone();
+        let body = json!({ "session_id": "s1", "cwd": "/work/shop", "tool_name": tool, "tool_input": { "command": "cargo test" }, "permission_suggestions": rules() });
+        let request = hook_request("PermissionRequest", body);
+        let reply = tokio::spawn(async move { on_hook(&inner, "PermissionRequest", &request, &mut ours).await });
+        tokio::task::yield_now().await;
+        (reply, theirs)
+    }
+
+    fn listing(waiting: bool) -> Vec<Listed> {
+        vec![Listed { session_id: "s1".into(), waiting_for: waiting.then(|| "permission prompt".to_string()), ..Default::default() }]
+    }
+
+    async fn cards(client: &ClaudeCodeClient) -> Vec<Value> {
+        client.call("exec.approval.list", json!({})).await.unwrap()["approvals"].as_array().unwrap().clone()
+    }
+
+    fn emitted(events: &Events, name: &str) -> Vec<Value> {
+        events.lock().unwrap().iter().filter(|(n, _)| n == name).map(|(_, p)| p.clone()).collect()
+    }
+
+    /// A terminal prompt with its card up.
+    async fn card_up(client: &ClaudeCodeClient) -> (tokio::task::JoinHandle<String>, HookStream) {
+        let asked = ask(client, "Bash").await;
+        note_dialogs(&client.inner, &listing(true));
+        tokio::time::sleep(SHORT_HOLD + Duration::from_millis(100)).await;
+        assert_eq!(cards(client).await.len(), 1);
+        asked
+    }
+
+    #[tokio::test]
+    async fn terminal_prompts_show_after_the_hold_in_their_thread() {
+        let (client, events) = following(true, false);
+        let (reply, _hook) = ask(&client, "Bash").await;
+        note_dialogs(&client.inner, &listing(true));
+        assert!(cards(&client).await.is_empty(), "held");
+        assert!(emitted(&events, "exec.approval.requested").is_empty(), "no notification yet");
+
+        tokio::time::sleep(SHORT_HOLD + Duration::from_millis(100)).await;
+        let shown = cards(&client).await;
+        assert_eq!(emitted(&events, "exec.approval.requested"), shown);
+        let card = &shown[0];
+        assert_eq!(card["presentation"]["commandText"], "cargo test");
+        assert_eq!(card["presentation"]["folder"], "shop", "the notification says which");
+        assert_eq!(card["presentation"]["allowedDecisions"], json!(["allow-once", "allow-always", "deny"]));
+        let rows = client.call("sessions.list", json!({})).await.unwrap();
+        assert_eq!(rows["sessions"][0]["key"], card["sessionKey"], "the thread's Approvals finds it");
+
+        let id = card["id"].as_str().unwrap();
+        client.call("exec.approval.resolve", json!({ "id": id, "decision": "allow-always" })).await.unwrap();
+        let printed: Value = serde_json::from_str(&reply.await.unwrap()).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        assert_eq!(printed["hookSpecificOutput"]["decision"]["updatedPermissions"], rules());
+        assert!(cards(&client).await.is_empty());
+        assert_eq!(emitted(&events, "exec.approval.resolved")[0]["decision"], "allow-always");
+    }
+
+    #[tokio::test]
+    async fn a_yes_in_the_terminal_takes_the_card_away() {
+        let (client, events) = following(true, false);
+        let (reply, _hook) = card_up(&client).await;
+        let id = cards(&client).await[0]["id"].as_str().unwrap().to_string();
+
+        // Saying Yes leaves the hook running: the listing is the only word of it.
+        note_dialogs(&client.inner, &listing(true));
+        assert_eq!(cards(&client).await.len(), 1, "still open");
+        note_dialogs(&client.inner, &listing(false));
+        assert_eq!(reply.await.unwrap(), "", "the terminal's answer stands");
+        assert!(cards(&client).await.is_empty());
+        assert_eq!(emitted(&events, "exec.approval.resolved"), vec![json!({ "id": id, "decision": "expired" })]);
+        let late = client.call("exec.approval.resolve", json!({ "id": id, "decision": "deny" })).await;
+        assert_eq!(late.unwrap_err().code, "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn a_session_gone_from_the_listing_takes_its_card_away() {
+        let (client, _) = following(true, false);
+        let (reply, _hook) = card_up(&client).await;
+        note_dialogs(&client.inner, &[]);
+        assert_eq!(reply.await.unwrap(), "");
+        assert!(cards(&client).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prompts_answered_during_the_hold_never_show() {
+        let (client, events) = following(true, false);
+        let (reply, _hook) = ask(&client, "Bash").await;
+        note_dialogs(&client.inner, &listing(true));
+        note_dialogs(&client.inner, &listing(false));
+        let printed = tokio::time::timeout(SHORT_HOLD / 2, reply).await.expect("the hook goes at once").unwrap();
+        assert_eq!(printed, "");
+        assert!(emitted(&events, "exec.approval.requested").is_empty(), "no notification");
+        assert!(emitted(&events, "exec.approval.resolved").is_empty());
+        assert!(client.inner.st.lock().unwrap().approvals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_or_esc_in_the_terminal_ends_the_hook_and_the_card() {
+        // During the hold: nothing ever shows.
+        let (client, events) = following(true, false);
+        let (reply, hook) = ask(&client, "Bash").await;
+        note_dialogs(&client.inner, &listing(true));
+        drop(hook);
+        assert_eq!(reply.await.unwrap(), "");
+        assert!(emitted(&events, "exec.approval.requested").is_empty());
+        assert!(client.inner.st.lock().unwrap().approvals.is_empty());
+
+        // With the card up: it goes.
+        let (client, events) = following(true, false);
+        let (reply, hook) = card_up(&client).await;
+        drop(hook);
+        assert_eq!(reply.await.unwrap(), "");
+        assert!(cards(&client).await.is_empty());
+        assert_eq!(emitted(&events, "exec.approval.resolved")[0]["decision"], "expired");
+    }
+
+    #[tokio::test]
+    async fn prompts_claude_code_never_listed_stay_in_the_terminal() {
+        // A Claude Code that doesn't report `waitingFor`: as if littleguys weren't here.
+        let (client, events) = following(true, false);
+        let (reply, _hook) = ask(&client, "Bash").await;
+        assert_eq!(reply.await.unwrap(), "");
+        assert!(emitted(&events, "exec.approval.requested").is_empty());
+        assert!(client.inner.st.lock().unwrap().approvals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_end_of_a_turn_ends_its_prompts() {
+        let (client, _) = following(true, false);
+        let (reply, _hook) = card_up(&client).await;
+        let (mut stop, _other) = hook_pair().await;
+        let request = hook_request("Stop", json!({ "session_id": "s1" }));
+        on_hook(&client.inner, "Stop", &request, &mut stop).await;
+        assert_eq!(reply.await.unwrap(), "");
+        assert!(cards(&client).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn background_prompts_show_at_once_and_ignore_the_listing() {
+        let (client, events) = following(true, true);
+        let (reply, _hook) = ask(&client, "Bash").await;
+        assert_eq!(cards(&client).await.len(), 1, "no hold: no one's at a terminal");
+        assert_eq!(emitted(&events, "exec.approval.requested").len(), 1);
+        note_dialogs(&client.inner, &listing(true));
+        note_dialogs(&client.inner, &listing(false));
+        assert_eq!(cards(&client).await.len(), 1, "it waits for you");
+        let id = cards(&client).await[0]["id"].as_str().unwrap().to_string();
+        client.call("exec.approval.resolve", json!({ "id": id, "decision": "deny" })).await.unwrap();
+        let printed: Value = serde_json::from_str(&reply.await.unwrap()).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    }
+
+    #[tokio::test]
+    async fn some_prompts_stay_in_the_terminal() {
+        let (client, events) = following(false, false);
+        assert_eq!(ask(&client, "Bash").await.0.await.unwrap(), "", "approvals off");
+
+        let (client, _) = following(true, false);
+        for tool in ["AskUserQuestion", "ExitPlanMode"] {
+            assert_eq!(ask(&client, tool).await.0.await.unwrap(), "", "{tool}");
+        }
+        client.inner.st.lock().unwrap().session("s1").hidden = true;
+        assert_eq!(ask(&client, "Bash").await.0.await.unwrap(), "", "a deleted thread");
+        assert!(emitted(&events, "exec.approval.requested").is_empty());
+
+        let mut background = Session::new("b");
+        background.background = true;
+        assert!(card_fits(&background, "ExitPlanMode") && card_fits(&background, "Bash"));
+        assert!(!card_fits(&background, "AskUserQuestion"));
+    }
+
+    #[test]
+    fn only_new_terminal_prompts_speed_up_the_listing() {
+        let approval = |opened| Approval { session_id: "s1".into(), payload: Value::Null, tx: None, opened, dialog_seen: false, held: false };
+        assert!(approval(Some(Instant::now())).watched());
+        assert!(!approval(Instant::now().checked_sub(PROMPT_WATCH)).watched());
+        assert!(!approval(None).watched(), "background sessions have no dialog to watch");
+    }
+
     #[tokio::test]
     async fn reads_a_hook_request() {
         let body = r#"{"session_id":"s"}"#;
@@ -3976,6 +4289,219 @@ mod tests {
         assert_eq!(name.as_deref(), Some("e2e routine"));
         assert_eq!(run_cwd, cwd);
         remove_session(&claude, &run_sid).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn tmux(args: &[&str]) -> String {
+        let out = std::process::Command::new("tmux").args(["-L", "lg-e2e"]).args(args).output().expect("tmux installed");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(unix)]
+    fn screen() -> String {
+        // Claude Code pads tool output with a no-break space.
+        tmux(&["capture-pane", "-p", "-t", "e2e"]).replace('\u{a0}', " ")
+    }
+
+    #[cfg(unix)]
+    fn press(key: &str) {
+        tmux(&["send-keys", "-t", "e2e", key]);
+    }
+
+    #[cfg(unix)]
+    fn dialog_up() -> bool {
+        screen().contains("Do you want to proceed?")
+    }
+
+    #[cfg(unix)]
+    async fn until(what: &str, seconds: u64, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        while !done() {
+            assert!(Instant::now() < deadline, "never happened: {what}\n{}", screen());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Has the session in the pane run `command`, and waits for its dialog when `dialog`.
+    #[cfg(unix)]
+    async fn run_in_pane(command: &str, dialog: bool) {
+        until("the prompt to be free", 60, || screen().contains("? for shortcuts")).await;
+        tmux(&["send-keys", "-t", "e2e", "-l", &format!("Use the Bash tool to run exactly this one command and nothing else, then say done: {command}")]);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        press("Enter");
+        if dialog {
+            until("the dialog", 60, dialog_up).await;
+        }
+    }
+
+    /// A real terminal session in tmux, on the plugin this app writes, answered from both
+    /// sides. It touches none of your settings or plugins, but leaves one rule in the
+    /// folder's `.claude/settings.local.json`:
+    /// `LITTLEGUYS_CLAUDE_PLUGIN=skip LG_E2E_CWD=<a folder Claude Code trusts> cargo test --lib real_terminal -- --ignored --nocapture`
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts a real Claude Code session in tmux"]
+    async fn real_terminal_prompts_are_answered_from_either_side() {
+        let cwd = std::env::var("LG_E2E_CWD").expect("LG_E2E_CWD: a folder Claude Code trusts");
+        assert_eq!(std::env::var("LITTLEGUYS_CLAUDE_PLUGIN").as_deref(), Ok("skip"), "the plugin is loaded with --plugin-dir");
+        let events: Events = Arc::default();
+        let seen = events.clone();
+        let hooks = Hooks {
+            status: Box::new(|_| {}),
+            event: Box::new(move |name, payload, _| seen.lock().unwrap().push((name.to_string(), payload.clone()))),
+            connected: Box::new(|| {}),
+        };
+        // Short: a unix socket's path can't be long.
+        let dir = PathBuf::from(format!("/tmp/lg-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = ClaudeCodeClient::new("e2e".into(), "Claude".into(), ClaudeCodeConfig { approvals: true }, dir.clone(), hooks);
+        client.start();
+        until("following Claude Code", 30, || matches!(client.status().phase, Phase::Connected)).await;
+
+        let plugin = dir.join("claude-plugin/plugin");
+        let claude = find_claude().expect("Claude Code installed");
+        let command = format!(
+            "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SSE_PORT -u CLAUDE_JOB_DIR '{}' --model haiku --setting-sources local --strict-mcp-config --permission-mode manual --plugin-dir '{}'",
+            claude.display(),
+            plugin.display()
+        );
+        tmux(&["kill-server"]);
+        tmux(&["new-session", "-d", "-s", "e2e", "-x", "130", "-y", "45", "-c", &cwd, &command]);
+
+        let hook_script = format!("{}/hooks/hook.sh PermissionRequest", plugin.display());
+        let hooks_running = || {
+            let out = std::process::Command::new("pgrep").args(["-f", &hook_script]).output().expect("pgrep");
+            !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+        };
+        let requested = || emitted(&events, "exec.approval.requested");
+        let resolved = || emitted(&events, "exec.approval.resolved");
+        let ran = |n: u32| screen().contains(&format!("⎿  {n}"));
+        let id_of = |card: &Value| card["id"].as_str().unwrap().to_string();
+
+        println!("Yes in the terminal within the hold: no card, and the hook goes");
+        run_in_pane(r#"python3 -c "print(1001)""#, true).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let answered = Instant::now();
+        press("1");
+        until("the tool to run", 30, || ran(1001)).await;
+        until("the hook to end", 3, || !hooks_running()).await;
+        println!("  hook gone after {:?}", answered.elapsed());
+        tokio::time::sleep(TERMINAL_HOLD).await;
+        assert!(requested().is_empty(), "nothing to notify about");
+
+        println!("Yes before littleguys could look: no card, and the hook goes when the hold ends");
+        run_in_pane(r#"python3 -c "print(1011)""#, true).await;
+        let answered = Instant::now();
+        press("1");
+        until("the tool to run", 30, || ran(1011)).await;
+        until("the hook to end", TERMINAL_HOLD.as_secs() + 2, || !hooks_running()).await;
+        println!("  hook gone after {:?}", answered.elapsed());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(requested().is_empty(), "nothing to notify about");
+
+        println!("Yes in the terminal with the card up: the card goes");
+        run_in_pane(r#"python3 -c "print(1002)""#, true).await;
+        let asked = Instant::now();
+        until("the card", 15, || requested().len() == 1).await;
+        println!("  card after {:?}", asked.elapsed());
+        assert!(asked.elapsed() >= TERMINAL_HOLD - Duration::from_millis(500), "held for {:?}", asked.elapsed());
+        let card = requested()[0].clone();
+        assert!(card["presentation"]["commandText"].as_str().unwrap().contains("print(1002)"), "{card}");
+        let folder = Path::new(&cwd).file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(card["presentation"]["folder"], folder.as_str());
+        assert!(card["presentation"]["allowedDecisions"].as_array().unwrap().iter().any(|d| d == "allow-always"), "{card}");
+        let rows = client.call("sessions.list", json!({})).await.unwrap();
+        assert!(rows["sessions"].as_array().unwrap().iter().any(|r| r["key"] == card["sessionKey"]), "shows in its thread");
+        assert!(dialog_up(), "the terminal's still asking");
+        let answered = Instant::now();
+        press("1");
+        until("the card to go", 5, || resolved().len() == 1).await;
+        println!("  card gone after {:?}", answered.elapsed());
+        assert_eq!(resolved()[0]["decision"], "expired");
+        until("the hook to end", 2, || !hooks_running()).await;
+        until("the tool to run", 30, || ran(1002)).await;
+
+        println!("Yes on a long command: the card goes while it runs");
+        run_in_pane(r#"python3 -c "import time; time.sleep(12); print(1003)""#, true).await;
+        until("the card", 15, || requested().len() == 2).await;
+        let answered = Instant::now();
+        press("1");
+        until("the card to go", 5, || resolved().len() == 2).await;
+        println!("  card gone after {:?}", answered.elapsed());
+        assert!(!ran(1003), "it's still running");
+        until("the tool to run", 30, || ran(1003)).await;
+
+        println!("No in the terminal: the card goes");
+        run_in_pane(r#"python3 -c "print(1004)""#, true).await;
+        until("the card", 15, || requested().len() == 3).await;
+        let answered = Instant::now();
+        press("4");
+        until("the card to go", 3, || resolved().len() == 3).await;
+        println!("  card gone after {:?}", answered.elapsed());
+        assert_eq!(resolved()[2]["decision"], "expired");
+        assert!(!hooks_running());
+
+        println!("Esc during the hold: no card");
+        run_in_pane(r#"python3 -c "print(1005)""#, true).await;
+        press("Escape");
+        until("the hook to end", 3, || !hooks_running()).await;
+        tokio::time::sleep(TERMINAL_HOLD).await;
+        assert_eq!(requested().len(), 3);
+
+        println!("Allow here: the dialog closes and the tool runs");
+        run_in_pane(r#"python3 -c "print(1006)""#, true).await;
+        until("the card", 15, || requested().len() == 4).await;
+        let answered = Instant::now();
+        client.call("exec.approval.resolve", json!({ "id": id_of(&requested()[3]), "decision": "allow-once" })).await.unwrap();
+        until("the dialog to close", 3, || !dialog_up()).await;
+        println!("  dialog gone after {:?}", answered.elapsed());
+        until("the tool to run", 30, || ran(1006)).await;
+        assert!(screen().contains("Allowed by PermissionRequest hook"));
+
+        println!("Deny here: the dialog closes and the session hears why");
+        run_in_pane(r#"python3 -c "print(1007)""#, true).await;
+        until("the card", 15, || requested().len() == 5).await;
+        client.call("exec.approval.resolve", json!({ "id": id_of(&requested()[4]), "decision": "deny" })).await.unwrap();
+        until("the dialog to close", 3, || !dialog_up()).await;
+        until("the denial", 30, || screen().contains("The person denied this in littleguys.")).await;
+        assert!(!ran(1007));
+
+        println!("Always allow here: a rule is saved and the command stops asking");
+        let always = r#"python3 -c "print(1008)""#;
+        run_in_pane(always, true).await;
+        until("the card", 15, || requested().len() == 6).await;
+        client.call("exec.approval.resolve", json!({ "id": id_of(&requested()[5]), "decision": "allow-always" })).await.unwrap();
+        until("the tool to run", 30, || ran(1008)).await;
+        let rules = std::fs::read_to_string(Path::new(&cwd).join(".claude/settings.local.json")).expect("a rule saved");
+        println!("  {}", rules.replace('\n', " "));
+        assert!(rules.contains("1008"), "{rules}");
+        tmux(&["send-keys", "-t", "e2e", "/clear", "Enter"]);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        run_in_pane(always, false).await;
+        until("the tool to run", 30, || ran(1008)).await;
+        assert!(!dialog_up());
+        tokio::time::sleep(TERMINAL_HOLD).await;
+        assert_eq!(requested().len(), 6, "it didn't ask");
+
+        println!("littleguys closed: the hook does nothing and the terminal asks as ever");
+        client.stop();
+        let socket = socket_path(&dir);
+        until("the socket to go", 10, || !socket.exists()).await;
+        run_in_pane(r#"python3 -c "print(1009)""#, true).await;
+        until("the hook to end", 2, || !hooks_running()).await;
+        press("1");
+        until("the tool to run", 30, || ran(1009)).await;
+
+        println!("littleguys crashed, its socket left behind: the same");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        assert!(socket.exists());
+        run_in_pane(r#"python3 -c "print(1010)""#, true).await;
+        until("the hook to end", 2, || !hooks_running()).await;
+        press("1");
+        until("the tool to run", 30, || ran(1010)).await;
+
+        tmux(&["kill-server"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

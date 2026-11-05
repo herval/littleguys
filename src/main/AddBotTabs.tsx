@@ -234,7 +234,7 @@ export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
           <span>
             <span className="font-medium">Answer permission prompts here</span>
             <span className="block text-[11.5px] text-[var(--color-ink-3)]">
-              Background sessions wait for your Allow or Deny in littleguys. Terminal sessions keep asking in their terminal.
+              Background sessions wait for your Allow or Deny in littleguys. Terminal sessions ask in the terminal and, if you don't answer within a few seconds, here too. The first answer counts.
             </span>
           </span>
         </label>

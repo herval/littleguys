@@ -256,7 +256,7 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
   );
 }
 
-/** Claude Code's one setting: whether littleguys answers background sessions' permission prompts. */
+/** Claude Code's one setting: whether littleguys answers sessions' permission prompts. */
 function ClaudeApprovals({ gateway: g, onError }: { gateway: GatewayRoster; onError: (e: string) => void }) {
   const on = g.status.capabilities.approvals;
   return (
@@ -270,7 +270,7 @@ function ClaudeApprovals({ gateway: g, onError }: { gateway: GatewayRoster; onEr
       <span>
         <span className="font-medium">Answer permission prompts here</span>
         <span className="block text-[11.5px] text-[var(--color-ink-3)]">
-          Background sessions wait for your Allow or Deny in littleguys. Terminal sessions keep asking in their terminal.
+          Background sessions wait for your Allow or Deny in littleguys. Terminal sessions ask in the terminal and, if you don't answer within a few seconds, here too. The first answer counts.
         </span>
       </span>
     </label>
