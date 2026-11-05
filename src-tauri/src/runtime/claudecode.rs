@@ -910,7 +910,12 @@ async fn handle_conn(inner: &Arc<Inner>, mut stream: HookStream) -> std::io::Res
     }
     let reply = match request.path.strip_prefix("/hook/") {
         Some(event) => on_hook(inner, event, &request, &mut stream).await,
-        None => String::new(),
+        None => {
+            if request.path == crate::limits::CLAUDE_REPORT_PATH {
+                crate::limits::record_claude(&request.body);
+            }
+            String::new()
+        }
     };
     write_response(&mut stream, &reply).await
 }
@@ -1258,7 +1263,7 @@ async fn poll_agents(inner: &Arc<Inner>) {
 
 // ---- transcripts --------------------------------------------------------------------------
 
-fn claude_home() -> PathBuf {
+pub(crate) fn claude_home() -> PathBuf {
     match std::env::var_os("CLAUDE_CONFIG_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => dirs::home_dir().unwrap_or_default().join(".claude"),

@@ -7,7 +7,7 @@
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { bridgeMockInvoke } from "./bridge";
 import type { Backend } from "./ipc";
-import type { ChatMessage, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, NotifyPrefs, Roster } from "./types";
+import type { ChatMessage, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster } from "./types";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -158,9 +158,25 @@ claudeCode.status = {
   capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
 };
 
+const codex = gateway("acp-codex", "Codex", "npx -y @agentclientprotocol/codex-acp", "connected", {
+  defaultAgentId: "bot",
+  agents: [{ id: "bot", name: "Codex", identity: { name: "Codex", emoji: "🌀" }, workspace: "/Users/you/dev/shop-api" }] as never,
+  sessions: [
+    { key: "agent:bot:main", agentId: "bot", kind: "direct", updatedAt: now - 11 * min, lastMessagePreview: "Split the invoice module in three; tests pass.", workspaceDir: "/Users/you/dev/shop-api" },
+  ] as never,
+});
+codex.status = { ...codex.status, kind: "acp", mode: null, capabilities: claude.status.capabilities };
+
+// What `limits_read` answers: Codex's shows in `make mock`, Claude Code's with ?claudecode=1.
+const limits: Record<string, Limit> = {
+  codex: { usedPercent: 86, resetsAtMs: now + 3 * 24 * 60 * min, readAtMs: now - 2 * min },
+  claude: { usedPercent: 41, resetsAtMs: now + 2 * 60 * min, readAtMs: now - 4 * min },
+};
+let claudeStatusLine = true;
+
 // ?codex=1: Codex as its own kind (every session on this Mac is a thread).
 const cxKey = (id: string) => `agent:codex:dashboard:${id}`;
-const codex = gateway("codex-8e1d4b7a20", "Codex", "This Mac", "connected", {
+const codexSessions = gateway("codex-8e1d4b7a20", "Codex", "This Mac", "connected", {
   defaultAgentId: "codex",
   agents: [{ id: "codex", name: "Codex", identity: { name: "Codex", emoji: "🌀" }, workspace: "/Users/you/dev/shop-api" }] as never,
   sessions: [
@@ -180,8 +196,8 @@ const codex = gateway("codex-8e1d4b7a20", "Codex", "This Mac", "connected", {
     },
   ],
 });
-codex.status = {
-  ...codex.status,
+codexSessions.status = {
+  ...codexSessions.status,
   kind: "codex",
   mode: "local",
   serverVersion: "0.166.0",
@@ -196,7 +212,7 @@ const roster: Roster = {
     ? [attic]
     : params.get("single")
       ? [attic]
-      : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude, ...(params.get("codex") ? [codex] : [])],
+      : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude, params.get("codex") ? codexSessions : codex],
   hidden: ["hermes-1/research"],
   notifications: { everyone: { replies: true, routines: "all" }, guys: {} },
   faces: [],
@@ -837,6 +853,11 @@ export const mockBackend: Backend = {
       case "get_roster":
       case "refresh_roster":
         return roster as T;
+      case "limits_read":
+        return (limits[String(args?.provider)] ?? null) as T;
+      case "claude_status_line":
+        if (typeof args?.on === "boolean") claudeStatusLine = args.on;
+        return claudeStatusLine as T;
       case "gw_path": {
         // As if the guy's folder held the mock workspace.
         const folder = "/Users/you/dev/shop-api";

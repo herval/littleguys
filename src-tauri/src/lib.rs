@@ -7,6 +7,7 @@ mod doctor;
 pub mod gateway;
 pub mod gateways;
 mod hub;
+mod limits;
 pub mod localfs;
 mod media;
 pub mod openclaw;
@@ -83,6 +84,8 @@ pub fn run() {
             browser_stream::browser_stream_start,
             browser_stream::browser_stream_stop,
             browser_stream::browser_screenshot,
+            limits::limits_read,
+            limits::claude_status_line,
             media::gw_media,
             media::gw_path,
             media::save_media,

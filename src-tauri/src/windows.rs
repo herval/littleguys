@@ -42,7 +42,7 @@ pub fn setup(app: &AppHandle) {
         popover.on_window_event(move |event| {
             if let WindowEvent::Focused(false) = event {
                 POPOVER_BLURRED_AT.store(now_ms(), Ordering::SeqCst);
-                let _ = handle.hide();
+                hide(&handle);
             }
         });
     }
@@ -77,7 +77,7 @@ pub fn setup(app: &AppHandle) {
 pub fn toggle_popover(app: &AppHandle) {
     let Some(popover) = app.get_webview_window(POPOVER) else { return };
     if popover.is_visible().unwrap_or(false) {
-        let _ = popover.hide();
+        hide(&popover);
         return;
     }
     if now_ms().saturating_sub(POPOVER_BLURRED_AT.load(Ordering::SeqCst)) < 250 {
@@ -102,9 +102,14 @@ fn show_popover(popover: &WebviewWindow) {
     let _ = popover.emit("lg:popover-shown", ());
 }
 
+fn hide(popover: &WebviewWindow) {
+    let _ = popover.hide();
+    let _ = popover.emit("lg:popover-hidden", ());
+}
+
 pub fn hide_popover(app: &AppHandle) {
     if let Some(popover) = app.get_webview_window(POPOVER) {
-        let _ = popover.hide();
+        hide(&popover);
     }
 }
 

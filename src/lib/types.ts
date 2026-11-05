@@ -178,6 +178,17 @@ export interface ClaudeCodeProbe {
   plugin?: { enabled: boolean; folder?: string | null } | null;
 }
 
+/** Whose rate limit a guy runs on (see src/lib/limits.ts). */
+export type LimitProvider = "claude" | "codex";
+
+/** One rate-limit window, as last reported. */
+export interface Limit {
+  usedPercent: number;
+  resetsAtMs: number;
+  /** When this was reported. */
+  readAtMs: number;
+}
+
 /** What `codex_detect` found. */
 export interface CodexProbe {
   installed: boolean;
