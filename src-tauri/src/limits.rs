@@ -499,7 +499,7 @@ mod tests {
         std::fs::write(sessions.join("2026/10/01/notes.txt"), "not a log").unwrap();
         let logs = newest_rollouts(&sessions);
         assert_eq!(logs.len(), CODEX_DAYS);
-        assert!(logs.iter().all(|log| log.to_string_lossy().contains("/2026/10/") && !log.to_string_lossy().contains("/10/03/")), "{logs:?}");
+        assert!(logs.iter().all(|log| log.starts_with(sessions.join("2026/10")) && !log.starts_with(sessions.join("2026/10/03"))), "{logs:?}");
     }
 
     #[test]
