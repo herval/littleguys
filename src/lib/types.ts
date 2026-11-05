@@ -85,7 +85,7 @@ export interface HelloSnapshot {
   };
   snapshot?: { sessionDefaults?: { defaultAgentId?: string; mainSessionKey?: string } };
   features?: { methods?: string[] };
-  /** Claude Code: littleguys answers background sessions' permission prompts. */
+  /** Claude Code: littleguys answers sessions' permission prompts. */
   approvals?: boolean;
 }
 
@@ -167,7 +167,7 @@ export interface HermesConfig {
 
 /** Claude Code on this Mac (every session is a thread). */
 export interface ClaudeCodeConfig {
-  /** littleguys answers background sessions' permission prompts. */
+  /** littleguys answers sessions' permission prompts. */
   approvals: boolean;
 }
 

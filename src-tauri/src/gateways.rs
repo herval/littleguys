@@ -46,7 +46,7 @@ pub struct GatewayEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeCodeConfig {
-    /// littleguys answers background sessions' permission prompts (they wait for it).
+    /// littleguys answers sessions' permission prompts (background ones wait for it).
     #[serde(default)]
     pub approvals: bool,
 }

@@ -794,7 +794,7 @@ impl Activity {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let who = if agent_id.is_empty() { "A little guy".to_string() } else { self.agent_label(gateway, agent_id) };
-        let (title, body) = (format!("{who} needs your OK"), format!("Wants to run: {command}"));
+        let (title, body) = (approval_title(&who, payload), format!("Wants to run: {command}"));
         let key = payload
             .get("sessionKey")
             .or_else(|| payload.pointer("/request/sessionKey"))
@@ -1018,6 +1018,14 @@ fn mark_faces(agents: &mut [Value], gateway: &str, faces: &HashMap<String, Strin
     }
 }
 
+/// "Claude Code needs your OK in shop": with every session its own thread, the folder says which.
+fn approval_title(who: &str, payload: &Value) -> String {
+    match payload.pointer("/presentation/folder").and_then(Value::as_str).filter(|f| !f.is_empty()) {
+        Some(folder) => format!("{who} needs your OK in {folder}"),
+        None => format!("{who} needs your OK"),
+    }
+}
+
 fn approval_id(payload: &Value) -> Option<String> {
     payload
         .get("id")
@@ -1141,6 +1149,15 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_notifications_say_which_folder() {
+        let shop = json!({ "presentation": { "commandText": "cargo test", "folder": "shop" } });
+        assert_eq!(approval_title("Claude Code", &shop), "Claude Code needs your OK in shop");
+        for elsewhere in [json!({ "presentation": { "folder": null } }), json!({ "presentation": { "folder": "" } }), json!({})] {
+            assert_eq!(approval_title("Fox", &elsewhere), "Fox needs your OK");
+        }
+    }
 
     #[test]
     fn finds_the_conversation_a_routine_runs_in() {
