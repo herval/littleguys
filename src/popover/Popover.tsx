@@ -2,12 +2,47 @@ import { CornerDownLeft, MessageCircleReply, Plus, Power, Settings } from "lucid
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { COMPUTER, shortcut } from "../lib/platform";
 import { chat as chatApi } from "../lib/gateway";
-import { activityFor, cleanPreview, defaultThread, guyName, isMultiGateway, liveGateways, needsAction, needsProxyFix, statusLabel, threadKind } from "../lib/guys";
+import { activityFor, cleanPreview, defaultThread, gatewayOf, guyName, isMultiGateway, liveGateways, needsAction, needsProxyFix, statusLabel, threadKind } from "../lib/guys";
 import { core, errorMessage, listen } from "../lib/ipc";
-import type { GatewayRoster, Guy, Roster } from "../lib/types";
+import { limitLine, limitProvider } from "../lib/limits";
+import type { GatewayRoster, Guy, Limit, LimitProvider, Roster } from "../lib/types";
 import { sortGuys, useApp } from "../stores/app";
 import { Avatar, GuyMark } from "../ui/Avatar";
 import { Spinner, TypingDots } from "../ui/kit";
+
+const LIMITS_EVERY_MS = 60_000;
+
+/** Reads the limits when the popover opens and once a minute while it's open; never while it's closed. */
+function useLimits(providers: string) {
+  const [limits, setLimits] = useState<Partial<Record<LimitProvider, Limit | null>>>({});
+  useEffect(() => {
+    if (!providers) return;
+    let timer: number | undefined;
+    const read = () => {
+      for (const provider of providers.split(",") as LimitProvider[]) {
+        core
+          .limit(provider)
+          .then((limit) => setLimits((known) => ({ ...known, [provider]: limit })))
+          .catch(() => {});
+      }
+    };
+    const stop = () => window.clearInterval(timer);
+    const start = () => {
+      stop();
+      read();
+      timer = window.setInterval(read, LIMITS_EVERY_MS);
+    };
+    read();
+    const shown = listen("lg:popover-shown", start);
+    const hidden = listen("lg:popover-hidden", stop);
+    return () => {
+      stop();
+      shown.then((u) => u());
+      hidden.then((u) => u());
+    };
+  }, [providers]);
+  return limits;
+}
 
 export function Popover() {
   const roster = useApp((s) => s.roster);
@@ -20,6 +55,12 @@ export function Popover() {
   const live = liveGateways(roster);
   const enabled = roster.gateways.filter((g) => g.enabled);
   const troubled = enabled.filter((g) => g.status.phase !== "connected");
+  const providerOf = (guy: Guy) => limitProvider(gatewayOf(roster, guy.gatewayId));
+  const limits = useLimits([...new Set(guys.map(providerOf))].filter(Boolean).sort().join());
+  const limitOf = (guy: Guy) => {
+    const provider = providerOf(guy);
+    return provider && limits[provider];
+  };
 
   // Keep the window exactly as tall as its content.
   useLayoutEffect(() => {
@@ -58,6 +99,7 @@ export function Popover() {
       key={guy.uid}
       guy={guy}
       roster={roster}
+      limit={limitOf(guy)}
       replying={replyTo === guy.uid}
       onReply={() => setReplyTo(replyTo === guy.uid ? null : guy.uid)}
     />
@@ -151,7 +193,21 @@ function TroubleRow({ gateway: g }: { gateway: GatewayRoster }) {
   );
 }
 
-function GuyRow({ guy, roster, replying, onReply }: { guy: Guy; roster: Roster; replying: boolean; onReply: () => void }) {
+function LimitBar({ limit }: { limit: Limit | null | undefined }) {
+  const line = limitLine(limit);
+  if (!line) return null;
+  const fill = { quiet: "bg-[var(--color-ink-3)]", warn: "bg-[var(--color-warn)]", bad: "bg-[var(--color-bad)]" }[line.tone];
+  return (
+    <div className="mt-1 flex items-center gap-2 text-[10.5px] leading-none text-[var(--color-ink-3)]">
+      <span className="h-[3px] w-10 shrink-0 overflow-hidden rounded-full bg-black/10 dark:bg-white/15">
+        <span className={`block h-full rounded-full ${fill}`} style={{ width: `${line.percent}%` }} />
+      </span>
+      <span className="min-w-0 truncate">{line.text}</span>
+    </div>
+  );
+}
+
+function GuyRow({ guy, roster, limit, replying, onReply }: { guy: Guy; roster: Roster; limit: Limit | null | undefined; replying: boolean; onReply: () => void }) {
   const act = activityFor(roster, guy);
   const ring = act.needsYou ? "needs-you" : act.running ? "working" : act.unread ? "unread" : "idle";
   const preview = cleanPreview(act.latest?.lastMessagePreview);
@@ -205,6 +261,7 @@ function GuyRow({ guy, roster, replying, onReply }: { guy: Guy; roster: Roster; 
               <MessageCircleReply size={14} />
             </button>
           </div>
+          <LimitBar limit={limit} />
         </div>
       </div>
       {replying && <QuickReply guy={guy} sessionKey={target} />}

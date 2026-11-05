@@ -12,7 +12,7 @@ use crate::gateway::client::{ConnStatus, EndpointSource, GatewayClient, Hooks};
 use crate::gateway::identity::{now_ms, DeviceIdentity, DeviceTokenStore};
 use crate::gateways::{self, AcpConfig, ClaudeCodeConfig, Discovered, GatewayEntry, GatewayStore, HermesConfig, OPENCLAW_GATEWAY_ID};
 use crate::openclaw::config::{self, Credential, OpenclawPaths};
-use crate::runtime::{acp::AcpClient, claudecode::ClaudeCodeClient, hermes::HermesClient, Runtime, RuntimeKind};
+use crate::runtime::{acp::AcpClient, claudecode::ClaudeCodeClient, codex::CodexClient, hermes::HermesClient, Runtime, RuntimeKind};
 
 pub struct Hub {
     app_version: String,
@@ -75,6 +75,9 @@ impl Hub {
         }
         if entry.kind == RuntimeKind::Claudecode {
             return "Claude Code".into();
+        }
+        if entry.kind == RuntimeKind::Codex {
+            return "Codex".into();
         }
         match &entry.url {
             Some(url) => gateways::display_name_for(url),
@@ -143,6 +146,7 @@ impl Hub {
                 self.data_dir.clone(),
                 hooks,
             )),
+            RuntimeKind::Codex => Runtime::Codex(CodexClient::new(entry.id.clone(), name.clone(), self.data_dir.clone(), hooks)),
         };
         self.activity.attach(client.clone(), name, entry.enabled);
         if entry.enabled {
@@ -247,7 +251,7 @@ impl Hub {
         Ok(id)
     }
 
-    /// Add a Hermes install, an ACP agent or Claude Code.
+    /// Add a Hermes install, an ACP agent, Claude Code or Codex.
     pub fn add_bot(
         &self,
         kind: RuntimeKind,
@@ -261,11 +265,15 @@ impl Hub {
             RuntimeKind::Openclaw => return Err("use add() for OpenClaw gateways".into()),
             RuntimeKind::Hermes => hermes.as_ref().and_then(|h| h.url.clone()),
             RuntimeKind::Acp => acp.as_ref().and_then(|a| a.url.clone()),
-            RuntimeKind::Claudecode => None,
+            RuntimeKind::Claudecode | RuntimeKind::Codex => None,
         };
         // One Mac, one Claude Code: it follows every session there.
         if kind == RuntimeKind::Claudecode && self.entries.lock().unwrap().iter().any(|e| e.kind == kind) {
             return Err("Claude Code is already added.".into());
+        }
+        // Likewise Codex. (ACP Codex guys are a different kind, and stay as they are.)
+        if kind == RuntimeKind::Codex && self.entries.lock().unwrap().iter().any(|e| e.kind == kind) {
+            return Err("Codex is already added.".into());
         }
         if kind == RuntimeKind::Acp {
             let cfg = acp.as_ref().ok_or("missing ACP agent settings")?;
@@ -294,6 +302,7 @@ impl Hub {
                 match kind {
                     RuntimeKind::Hermes => "hermes",
                     RuntimeKind::Claudecode => "claude",
+                    RuntimeKind::Codex => "codex",
                     _ => "acp",
                 },
                 &uuid::Uuid::new_v4().simple().to_string()[..10]
@@ -390,6 +399,12 @@ impl Hub {
         }
         if let Some(client) = self.client(id) {
             client.stop();
+            // Without this bot, Settings has no switch left for it.
+            if matches!(client, Runtime::ClaudeCode(_)) {
+                if let Err(e) = crate::limits::set_status_line(&self.data_dir, false) {
+                    log::warn!("status line: {e}");
+                }
+            }
         }
         self.clients.lock().unwrap().retain(|c| c.id() != id);
         {

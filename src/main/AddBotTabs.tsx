@@ -1,10 +1,10 @@
-// "Add a bot" tabs for runtimes other than OpenClaw: Hermes, Claude Code and ACP agents.
+// "Add a bot" tabs for runtimes other than OpenClaw: Hermes, Claude Code, Codex and ACP agents.
 import { Check, ChevronRight, Folder, Laptop, Network, RefreshCw, Terminal } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { COMPUTER } from "../lib/platform";
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { core, errorMessage, isTauri } from "../lib/ipc";
-import type { ClaudeCodeProbe, HermesProbe, RegistryAgent } from "../lib/types";
+import type { ClaudeCodeProbe, CodexProbe, HermesProbe, RegistryAgent } from "../lib/types";
 import { useApp } from "../stores/app";
 import { Button, Field, inputBase, inputClass, Spinner } from "../ui/kit";
 
@@ -243,6 +243,75 @@ export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
       <p className="mt-4 text-[11.5px] text-[var(--color-ink-3)]">
         Adding it installs the littleguys plugin in Claude Code: a few hooks that tell littleguys when a session starts or finishes a turn,
         and hand it your replies. They do nothing while littleguys isn't running.
+      </p>
+    </div>
+  );
+}
+
+// ---- Codex ---------------------------------------------------------------------
+
+export function CodexTab({ onAdded }: { onAdded: (id: string) => void }) {
+  const [probe, setProbe] = useState<CodexProbe | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const added = useApp((s) => s.roster.gateways.find((g) => g.status.kind === "codex")?.id ?? null);
+
+  useEffect(() => {
+    core.bots
+      .codexDetect()
+      .then(setProbe)
+      .catch(() => setProbe({ installed: false }));
+  }, []);
+
+  const add = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onAdded((await core.bots.addCodex()).id);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 rounded-xl border border-[var(--color-line)] px-3.5 py-3">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--color-chip)] text-[16px]">🌀</span>
+        <div className="min-w-0 flex-1">
+          <p className="font-medium">
+            Codex on this {COMPUTER}
+            {probe?.version && <span className="ml-1.5 text-[11px] font-normal text-[var(--color-ink-3)]">v{probe.version}</span>}
+          </p>
+          <p className="text-[11.5px] text-[var(--color-ink-3)]">
+            {probe === null ? (
+              <span className="flex items-center gap-1.5">
+                <Spinner size={10} /> Looking for it…
+              </span>
+            ) : probe.installed ? (
+              "Every session, terminal ones too, shows up as a thread you can follow and reply to."
+            ) : (
+              <>
+                Not installed. Get it at <span className="font-mono">developers.openai.com/codex</span>, then come back.
+              </>
+            )}
+          </p>
+        </div>
+        {added ? (
+          <Button size="sm" onClick={() => onAdded(added)}>
+            <Check size={12} /> Added
+          </Button>
+        ) : (
+          <Button variant="primary" disabled={busy || !probe?.installed} onClick={add}>
+            {busy && <Spinner size={11} />} Add
+          </Button>
+        )}
+      </div>
+      {error && <p className="mt-3 text-[12.5px] text-[var(--color-bad)]">{error}</p>}
+      <p className="mt-4 text-[11.5px] text-[var(--color-ink-3)]">
+        Nothing gets installed: littleguys reads the session logs Codex already keeps. Permission prompts show up here for sessions on Codex's
+        shared server. Sessions outside it keep asking in their terminal. Codex guys you added as ACP agents stay as they are.
       </p>
     </div>
   );

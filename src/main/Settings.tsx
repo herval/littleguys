@@ -1,7 +1,7 @@
 import { Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { shortcut } from "../lib/platform";
-import { needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
+import { followsSessions, needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
 import { core, errorMessage, isTauri, listen } from "../lib/ipc";
 import type { GatewayRoster, UpdateState } from "../lib/types";
 import { useApp } from "../stores/app";
@@ -180,7 +180,7 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
             ? phase === "connected" && g.loaded
               ? g.status.kind === "acp"
                 ? "Ready"
-                : g.status.kind === "claudecode"
+                : followsSessions(g.status.kind)
                   ? `${g.sessions.length} ${g.sessions.length === 1 ? "session" : "sessions"}`
                   : `${g.agents.length} ${g.agents.length === 1 ? "guy" : "guys"}`
               : statusLabel(g.status)
@@ -206,7 +206,7 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
               const what =
                 g.status.kind === "acp"
                   ? `Remove ${g.name}? Its chat history in littleguys goes too.`
-                  : g.status.kind === "claudecode"
+                  : followsSessions(g.status.kind)
                     ? `Remove ${g.name}? Your sessions keep running; they just won't show up here.`
                     : `Remove ${g.name}? Its little guys stay where they are; they just won't show up here.`;
               if (await confirmAction(what, "littleguys", "Remove"))
@@ -238,6 +238,7 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
         </div>
       )}
       {g.status.kind === "claudecode" && <ClaudeApprovals gateway={g} onError={setError} />}
+      {g.status.kind === "claudecode" && <ClaudeLimits onError={setError} />}
       {g.enabled &&
         (phase === "offline" || phase === "error" || phase === "no-config") &&
         g.status.message &&
@@ -270,6 +271,35 @@ function ClaudeApprovals({ gateway: g, onError }: { gateway: GatewayRoster; onEr
         <span className="font-medium">Answer permission prompts here</span>
         <span className="block text-[11.5px] text-[var(--color-ink-3)]">
           Background sessions wait for your Allow or Deny in littleguys. Terminal sessions ask in the terminal and, if you don't answer within a few seconds, here too. The first answer counts.
+        </span>
+      </span>
+    </label>
+  );
+}
+
+/** Opt-in: Claude Code only tells status lines its limits, so this chains the person's own (see src-tauri/src/limits.rs). */
+function ClaudeLimits({ onError }: { onError: (e: string) => void }) {
+  const [on, setOn] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    core.bots.claudeStatusLine().then(setOn).catch(() => {});
+  }, []);
+
+  if (on === null) return null;
+  return (
+    <label className="mt-3 flex items-start gap-2.5 border-t border-[var(--color-line)] pt-3 text-[12.5px]">
+      <input
+        type="checkbox"
+        className="mt-[3px] accent-[var(--color-accent)]"
+        checked={on}
+        onChange={(e) => core.bots.claudeStatusLine(e.target.checked).then(setOn).catch((err) => onError(errorMessage(err)))}
+      />
+      <span>
+        <span className="font-medium">Show usage limits in the popover</span>
+        <span className="block text-[11.5px] text-[var(--color-ink-3)]">
+          Claude Code only tells status lines how much of its limits you've used. This adds a small step in front of yours in
+          ~/.claude/settings.json, and turning it off puts your setting back. With no status line of your own, Claude Code drops a few
+          keyboard hints from its footer while this is on. The numbers appear after Claude's next reply.
         </span>
       </span>
     </label>

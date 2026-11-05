@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { COMPUTER } from "../lib/platform";
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { core, errorMessage, listen } from "../lib/ipc";
-import type { ClaudeCodeProbe, ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
+import type { ClaudeCodeProbe, CodexProbe, ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
 import { needsProxyFix, statusLabel } from "../lib/guys";
 import { type AddBotTab, useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
@@ -173,11 +173,16 @@ const sectionLabel = "text-[11px] font-semibold uppercase tracking-wide text-[va
 function AgentsYouHave() {
   const openAdd = useApp((s) => s.setAddGatewayOpen);
   const [claude, setClaude] = useState<ClaudeCodeProbe | null>(null);
+  const [codex, setCodex] = useState<CodexProbe | null>(null);
   useEffect(() => {
     core.bots
       .claudeDetect()
       .then(setClaude)
       .catch(() => setClaude({ installed: false }));
+    core.bots
+      .codexDetect()
+      .then(setCodex)
+      .catch(() => setCodex({ installed: false }));
   }, []);
   const rows: Array<{ tab: AddBotTab; icon: React.ReactNode; title: string; detail: string }> = [
     {
@@ -186,10 +191,20 @@ function AgentsYouHave() {
       title: "Claude Code",
       detail: `${claude?.installed ? `Found on this ${COMPUTER}. ` : ""}Every session, terminal ones too, as a chat you can answer.`,
     },
+    ...(codex?.installed
+      ? [
+          {
+            tab: "codex" as const,
+            icon: <span className="text-[16px]">🌀</span>,
+            title: "Codex",
+            detail: `Found on this ${COMPUTER}. Every session, terminal ones too, as a chat you can answer.`,
+          },
+        ]
+      : []),
     {
       tab: "acp",
       icon: <Terminal size={16} />,
-      title: "Codex, Gemini CLI and more",
+      title: codex?.installed ? "Gemini CLI and more" : "Codex, Gemini CLI and more",
       detail: "Any agent from the ACP registry: littleguys starts it for you.",
     },
     {
