@@ -16,7 +16,7 @@ Or grab the `.dmg` from [Releases](https://github.com/herval/littleguys/releases
 
 - **Chats:** a WhatsApp-style window where each agent is a contact (a "little guy"). The sidebar lists every guy as a card; clicking one opens their threads. It has streaming replies, tool-call chips, attachments, and approve/deny for commands.
 - **Menu bar:** the menu-bar sprite shows what your guys are up to: idle, working, new replies, needs you, or offline.
-- **Popover:** clicking the guy opens a dropdown listing every guy with a live status ring, a last-message preview and quick reply.
+- **Popover:** clicking the guy opens a dropdown listing every guy with a live status ring, a last-message preview and quick reply. Claude Code and Codex guys also get one thin line with how much of their rate limit is used and when it resets.
 - **Routines:** cron jobs with friendly schedules, run-now and run history. Results land in a thread.
 
 For OpenClaw it's a UX layer over your existing `~/.openclaw`, not a separate install. New guys use the workspaces OpenClaw gives each agent, and the UI links to their folder. With no OpenClaw on the Mac yet, littleguys can install and set it up for you.
@@ -66,6 +66,11 @@ Yes. littleguys speaks the [Agent Client Protocol](https://agentclientprotocol.c
 ### Does it follow Claude Code sessions already running in my terminal?
 Yes, since version 0.2. **Add a bot → Claude Code** installs a small littleguys plugin in Claude Code, and from then on every session on this Mac, in a terminal or in the background, is a thread you can follow live and reply to. A terminal session gets your reply with the next prompt you type there; its permission prompts stay in the terminal. Codex and other ACP agents are different: littleguys starts those itself, so a Codex session running in a terminal doesn't show up. More: [littleguys.dev/claude-code](https://www.littleguys.dev/claude-code).
 
+### Does it show my Claude Code and Codex usage limits?
+Yes, as one line on the guy's row in the popover: "41% · resets in 2h", for the limit closest to running out. There's no history, chart or cost estimate, and nothing runs in the background: it reads when you open the popover and once a minute while it's open. It never touches your Keychain or credentials or calls a usage API, so it can't prompt you. The line hides when there's no reading or the limit's window is over, and an older reading says how old it is.
+
+Codex writes its limits to the session logs on this Mac, so a Codex guy (an ACP agent here) just shows them. Claude Code only tells status lines, so that one is opt-in: **Settings → Connections → Claude Code → Show usage limits in the popover** puts a small step in front of your status line in `~/.claude/settings.json`. Your status line keeps working, and turning the setting off puts it back exactly as it was. Sessions in a project with its own `statusLine` won't report. Claude Code also has no number to report until a session's first reply, or on API-key billing.
+
 ### What's a good Mac app for OpenClaw agents on a home server?
 littleguys. Every OpenClaw agent, on this Mac or on a gateway on another machine, is a contact you chat with, and the commands an agent wants to run come to you to allow once, always allow or deny. It lists the gateways it finds on your tailnet and LAN, or you type an address; each gateway approves this Mac once. It doesn't run agents itself: it's a front end for the OpenClaw you already run. For voice wake, the Canvas panel or usage and cost in the menu bar, use OpenClaw's own macOS app. More: [littleguys.dev/openclaw](https://www.littleguys.dev/openclaw).
 
@@ -79,7 +84,7 @@ No. littleguys works with Hermes Agent, Claude Code and any ACP agent without Op
 Yes: several OpenClaw gateways at once, found on your tailnet and LAN, Hermes API servers, and ACP agents served over WebSocket, such as `goose serve`. With more than one machine, each guy is labeled with where it lives.
 
 ### How is it different from the OpenClaw app, Hermes Desktop or the Codex app?
-Those are full apps built around one kind of agent each, and they do more: voice, terminals, git review, usage and cost tracking. littleguys does less on purpose: it's one small chat app for all of your agents, with nothing to configure. The [comparison](https://www.littleguys.dev/compare) has the details, with a source for each.
+Those are full apps built around one kind of agent each, and they do more: voice, terminals, git review, usage history and cost tracking. littleguys does less on purpose: it's one small chat app for all of your agents, with nothing to configure. The [comparison](https://www.littleguys.dev/compare) has the details, with a source for each.
 
 ### Does it need an account, a cloud service or telemetry?
 No. littleguys talks straight to your agents, on this Mac or over your own network. The only other things it fetches are its own updates, from GitHub, and the ACP registry's list of agents when you add one. Phone notifications go through [littleguys-relay](https://github.com/herval/littleguys-relay), sealed so the relay can't read them.

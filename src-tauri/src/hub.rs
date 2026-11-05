@@ -390,6 +390,12 @@ impl Hub {
         }
         if let Some(client) = self.client(id) {
             client.stop();
+            // Without this bot, Settings has no switch left for it.
+            if matches!(client, Runtime::ClaudeCode(_)) {
+                if let Err(e) = crate::limits::set_status_line(&self.data_dir, false) {
+                    log::warn!("status line: {e}");
+                }
+            }
         }
         self.clients.lock().unwrap().retain(|c| c.id() != id);
         {
