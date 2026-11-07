@@ -115,6 +115,18 @@ make test          # Rust tests
 
 Run `make` to see every command.
 
+Rust development builds keep line-level backtraces and incremental compilation,
+with dependency debug symbols disabled to reduce disk use. On macOS, before Tauri builds
+and `make run` / `make check` / `make test`, the build clears this checkout's default
+`src-tauri/target/debug` cache if it exceeds 10 GiB. The next compilation rebuilds
+that cache; release packages are preserved. This is a check before each command,
+not a hard limit during compilation. Set `RUST_DEBUG_CACHE_MAX_GB=20` to change the
+threshold or `RUST_DEBUG_CACHE_MAX_GB=0` to disable it. Cleanup uses Python 3's
+standard library and skips the cache if another Cargo build holds its lock.
+Direct Cargo commands and `pnpm tauri dev` bypass the check; run `make prune-cache`
+manually when using those. `make clean` removes all build output. Windows builds
+skip this cleanup and don't need Python.
+
 ### Testing against a throwaway gateway
 
 ```bash

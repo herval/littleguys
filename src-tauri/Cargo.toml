@@ -63,6 +63,14 @@ mac-notification-sys = "0.6"
 # Toasts that open the chat when clicked (the notification plugin ignores clicks).
 tauri-winrt-notification = "0.8"
 
+# Keep file/line backtraces without storing full type and variable debug data.
+# Tests inherit this profile; retain incremental compilation for fast rebuilds.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = true
 codegen-units = 1

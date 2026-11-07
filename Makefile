@@ -1,7 +1,7 @@
 # littleguys: everyday commands. Run `make` to list them.
 
 .DEFAULT_GOAL := help
-.PHONY: help install run mock build release release-secrets install-app check test clean
+.PHONY: help install run mock build release release-secrets install-app check test clean prune-cache
 
 # One universal binary: runs on Apple silicon and Intel Macs.
 TARGET := universal-apple-darwin
@@ -25,7 +25,7 @@ install: ## Install dependencies (needs Node 22+, pnpm and Rust)
 	pnpm install
 	cd src-tauri && cargo fetch
 
-run: ## Run the app, with a hot-reloading UI
+run: prune-cache ## Run the app, with a hot-reloading UI
 	pnpm tauri dev
 
 mock: ## Run only the UI in a browser, against a mock gateway
@@ -50,12 +50,16 @@ install-app: ## Build littleguys.app for this Mac and put it in /Applications, q
 	cp -R src-tauri/target/$(NATIVE)/release/bundle/macos/littleguys.app "$(APPS)/"
 	@echo "Installed $(APPS)/littleguys.app"
 
-check: ## Typecheck the UI and the Rust core
+check: prune-cache ## Typecheck the UI and the Rust core
 	pnpm typecheck
 	cd src-tauri && cargo check
 
-test: ## Run the Rust tests
+test: prune-cache ## Run the cache-cleanup and Rust tests
+	python3 -B -m unittest discover -s scripts -p 'test_*.py'
 	cd src-tauri && cargo test
+
+prune-cache: ## Clear the Rust debug cache if it exceeds 10 GiB
+	pnpm cache:prune
 
 clean: ## Remove build output
 	rm -rf dist

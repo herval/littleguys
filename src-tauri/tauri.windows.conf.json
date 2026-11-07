@@ -1,4 +1,7 @@
 {
+  "build": {
+    "beforeBuildCommand": "pnpm build"
+  },
   "bundle": {
     "targets": ["nsis"],
     "windows": {

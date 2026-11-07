@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "cache:prune": "python3 scripts/prune_rust_cache.py",
     "tauri": "tauri",
     "icons": "node scripts/gen-icons.mjs"
   },
