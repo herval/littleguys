@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { COMPUTER } from "../lib/platform";
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { core, errorMessage, isTauri } from "../lib/ipc";
+import { isAcpCodexHere } from "../lib/limits";
 import type { ClaudeCodeProbe, CodexProbe, HermesProbe, RegistryAgent } from "../lib/types";
 import { useApp } from "../stores/app";
 import { Button, Field, inputBase, inputClass, Spinner } from "../ui/kit";
@@ -255,6 +256,7 @@ export function CodexTab({ onAdded }: { onAdded: (id: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const added = useApp((s) => s.roster.gateways.find((g) => g.status.kind === "codex")?.id ?? null);
+  const acpCodex = useApp((s) => s.roster.gateways.some(isAcpCodexHere));
 
   useEffect(() => {
     core.bots
@@ -311,7 +313,8 @@ export function CodexTab({ onAdded }: { onAdded: (id: string) => void }) {
       {error && <p className="mt-3 text-[12.5px] text-[var(--color-bad)]">{error}</p>}
       <p className="mt-4 text-[11.5px] text-[var(--color-ink-3)]">
         Nothing gets installed: littleguys reads the session logs Codex already keeps. Permission prompts show up here for sessions on Codex's
-        shared server. Sessions outside it keep asking in their terminal. Codex guys you added as ACP agents stay as they are.
+        shared server, unless you turn that off in Settings. Sessions outside it keep asking in their terminal.
+        {acpCodex && " Your ACP Codex guy stays as it is, so its sessions will show up on both guys."}
       </p>
     </div>
   );

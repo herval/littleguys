@@ -66,6 +66,7 @@ pub fn run() {
             commands::claude_code_detect,
             commands::claude_code_install_plugin,
             commands::claude_code_configure,
+            commands::codex_configure,
             commands::codex_detect,
             commands::gateway_setup_code,
             commands::acp_registry,

@@ -939,6 +939,13 @@ export const mockBackend: Backend = {
       case "claude_code_install_plugin":
         await new Promise((r) => setTimeout(r, 900));
         return undefined as T;
+      case "codex_configure": {
+        const g = roster.gateways.find((g) => g.id === args?.id);
+        const approvals = Boolean((args?.codex as { approvals?: boolean })?.approvals);
+        if (g) g.status = { ...g.status, capabilities: { ...g.status.capabilities, approvals } };
+        emit("lg:roster", { ...roster, gateways: [...roster.gateways] });
+        return undefined as T;
+      }
       case "claude_code_configure": {
         const g = roster.gateways.find((g) => g.id === args?.id);
         const approvals = Boolean((args?.claude as { approvals?: boolean })?.approvals);

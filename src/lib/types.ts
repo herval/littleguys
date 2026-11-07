@@ -171,6 +171,12 @@ export interface ClaudeCodeConfig {
   approvals: boolean;
 }
 
+/** Codex on this computer (every session is a thread). */
+export interface CodexConfig {
+  /** littleguys shows and answers sessions' permission prompts. */
+  approvals: boolean;
+}
+
 /** What `claude_code_detect` found. */
 export interface ClaudeCodeProbe {
   installed: boolean;
@@ -207,6 +213,7 @@ export interface GatewayEntry {
   acp?: AcpConfig;
   hermes?: HermesConfig;
   claude?: ClaudeCodeConfig;
+  codex?: CodexConfig;
 }
 
 export interface RegistryAgent {

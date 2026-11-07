@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use littleguys_lib::gateway::client::{Hooks, Phase};
+use littleguys_lib::gateways::CodexConfig;
 use littleguys_lib::runtime::codex::CodexClient;
 use serde_json::{json, Value};
 
@@ -66,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         }),
         connected: Box::new(|| eprintln!("[connected]")),
     };
-    let client = CodexClient::new("codex-probe".into(), "Codex".into(), data.clone(), hooks);
+    let client = CodexClient::new("codex-probe".into(), "Codex".into(), CodexConfig::default(), data.clone(), hooks);
     client.start();
 
     for _ in 0..300 {

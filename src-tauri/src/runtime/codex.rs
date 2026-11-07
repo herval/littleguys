@@ -45,6 +45,7 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::gateway::client::{ConnStatus, Hooks, Phase, RpcError};
 use crate::gateway::identity::{now_ms, write_private};
+use crate::gateways::CodexConfig;
 use crate::openclaw::config::{Credential, GatewayMode};
 use crate::openclaw::runtime as cli;
 use crate::runtime::claudecode::{first_line, modified_ms, read_lines};
@@ -157,6 +158,8 @@ struct Inner {
     model: Option<String>,
     /// `LITTLEGUYS_CODEX_SERVER=off` (development): act as if the shared server were down.
     no_server: bool,
+    /// littleguys shows and answers permission prompts.
+    approvals: AtomicBool,
 }
 
 #[derive(Default)]
@@ -442,12 +445,12 @@ enum WaitingOn {
 }
 
 impl CodexClient {
-    pub fn new(id: String, name: String, data_dir: PathBuf, hooks: Hooks) -> Self {
+    pub fn new(id: String, name: String, config: CodexConfig, data_dir: PathBuf, hooks: Hooks) -> Self {
         let status = ConnStatus {
             gateway_id: id.clone(),
             gateway_name: name,
             kind: RuntimeKind::Codex,
-            capabilities: capabilities(),
+            capabilities: Capabilities { approvals: config.approvals, ..capabilities() },
             mode: Some(GatewayMode::Local),
             url: Some(format!("This {}", crate::platform::COMPUTER)),
             ..Default::default()
@@ -459,7 +462,6 @@ impl CodexClient {
         for sid in st.started.keys().cloned().collect::<Vec<_>>() {
             st.session(&sid);
         }
-        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         Self {
             inner: Arc::new(Inner {
                 id,
@@ -477,9 +479,10 @@ impl CodexClient {
                 st: Mutex::new(st),
                 scheduler,
                 started_path,
-                only: env("LITTLEGUYS_CODEX_ONLY"),
-                model: env("LITTLEGUYS_CODEX_MODEL"),
-                no_server: env("LITTLEGUYS_CODEX_SERVER").is_some_and(|v| v == "off"),
+                only: dev_env("LITTLEGUYS_CODEX_ONLY"),
+                model: dev_env("LITTLEGUYS_CODEX_MODEL"),
+                no_server: dev_env("LITTLEGUYS_CODEX_SERVER").is_some_and(|v| v == "off"),
+                approvals: AtomicBool::new(config.approvals),
             }),
         }
     }
@@ -519,6 +522,24 @@ impl CodexClient {
 
     pub fn set_name(&self, name: String) {
         set_status(&self.inner, |s| s.gateway_name = name);
+    }
+
+    /// Whether littleguys shows and answers permission prompts. Sessions and routines carry
+    /// on either way. Off, prompts stay in Codex, and the thread says it's waiting there.
+    pub fn set_approvals(&self, on: bool) {
+        let inner = &self.inner;
+        inner.approvals.store(on, Ordering::SeqCst);
+        set_status(inner, |s| s.capabilities.approvals = on);
+        let mut st = inner.st.lock().unwrap();
+        if on {
+            // Joining again is what makes the server replay a prompt that's still open.
+            let st = &mut *st;
+            st.joined.retain(|id, _| st.waiting.get(id) != Some(&WaitingOn::Approval));
+            return;
+        }
+        let cards: Vec<String> = st.approvals.drain().map(|(id, _)| id).collect();
+        drop(st);
+        flush(inner, cards.into_iter().map(|id| ("exec.approval.resolved", json!({ "id": id }))).collect());
     }
 
     pub fn set_credential_override(&self, _credential: Option<Credential>) {}
@@ -574,6 +595,17 @@ impl CodexClient {
 }
 
 // ---- status / events ------------------------------------------------------------------
+
+/// A development setting. Release builds don't look at them.
+#[cfg(debug_assertions)]
+fn dev_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+#[cfg(not(debug_assertions))]
+fn dev_env(_name: &str) -> Option<String> {
+    None
+}
 
 fn set_status(inner: &Inner, update: impl FnOnce(&mut ConnStatus)) {
     let snapshot = {
@@ -1582,7 +1614,8 @@ fn on_notification(inner: &Arc<Inner>, method: &str, params: &Value) {
 }
 
 /// A prompt from a session littleguys joined. Only the two kinds an approval card can
-/// answer: the rest stay in Codex (the thread says it's waiting).
+/// answer: the rest stay in Codex (the thread says it's waiting), as they all do with
+/// approvals off.
 fn on_request(inner: &Arc<Inner>, id: &Value, method: &str, params: &Value) {
     let (fallback, tool) = match method {
         "item/commandExecution/requestApproval" => ("Run a command", "exec"),
@@ -1592,6 +1625,10 @@ fn on_request(inner: &Arc<Inner>, id: &Value, method: &str, params: &Value) {
     let Some(sid) = params.get("threadId").and_then(Value::as_str) else { return };
     let approval = {
         let mut st = inner.st.lock().unwrap();
+        // Checked under the lock, so a card can't slip in as `set_approvals` clears them.
+        if !inner.approvals.load(Ordering::SeqCst) {
+            return;
+        }
         let Some(s) = st.sessions.get(sid).filter(|s| s.tail.is_some() && !s.skip) else { return };
         let (key, cwd) = (s.key(), s.cwd.clone());
         let item = params.get("approvalId").or_else(|| params.get("itemId")).and_then(Value::as_str).unwrap_or(sid);
@@ -1650,6 +1687,9 @@ fn approval_resolve(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
 
 /// Joins sessions waiting on an approval: the server then replays their prompt.
 fn join_waiting(inner: &Arc<Inner>) {
+    if !inner.approvals.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(srv) = server(inner) else { return };
     let todo: Vec<String> = {
         let mut st = inner.st.lock().unwrap();
@@ -3133,5 +3173,82 @@ mod tests {
         srv.settle(&json!({ "id": 8, "result": { "ok": true } }));
         assert_eq!(rx.try_recv().unwrap(), Ok(json!({ "ok": true })));
         srv.settle(&json!({ "id": 9, "result": {} }));
+    }
+
+    type Events = Arc<Mutex<Vec<(String, Value)>>>;
+
+    /// A client following session `ID`, and what it emits.
+    fn following(approvals: bool) -> (CodexClient, Events) {
+        let events: Events = Arc::default();
+        let seen = events.clone();
+        let hooks = Hooks {
+            status: Box::new(|_| {}),
+            event: Box::new(move |name, payload, _| seen.lock().unwrap().push((name.to_string(), payload.clone()))),
+            connected: Box::new(|| {}),
+        };
+        let dir = std::env::temp_dir().join(format!("lg-codex-prompts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = CodexClient::new("t".into(), "Codex".into(), CodexConfig { approvals }, dir, hooks);
+        client.inner.st.lock().unwrap().session(ID).tail = Some(Tail { offset: 0, partial: Vec::new() });
+        (client, events)
+    }
+
+    fn prompt(client: &CodexClient, request: u64) {
+        let params = json!({ "threadId": ID, "itemId": "item-1", "command": "ls" });
+        on_request(&client.inner, &json!(request), "item/commandExecution/requestApproval", &params);
+    }
+
+    fn cards(client: &CodexClient) -> usize {
+        client.inner.st.lock().unwrap().approvals.len()
+    }
+
+    fn emitted(events: &Events, name: &str) -> usize {
+        events.lock().unwrap().iter().filter(|(n, _)| n == name).count()
+    }
+
+    #[test]
+    fn prompts_show_here_with_approvals_on() {
+        let (client, events) = following(true);
+        assert!(client.status().capabilities.approvals);
+        prompt(&client, 1);
+        assert_eq!(cards(&client), 1);
+        assert_eq!(emitted(&events, "exec.approval.requested"), 1);
+    }
+
+    #[test]
+    fn prompts_stay_in_codex_with_approvals_off() {
+        let (client, events) = following(false);
+        assert!(!client.status().capabilities.approvals);
+        prompt(&client, 1);
+        assert_eq!(cards(&client), 0);
+        assert_eq!(emitted(&events, "exec.approval.requested"), 0);
+    }
+
+    #[test]
+    fn turning_approvals_off_takes_down_open_cards() {
+        let (client, events) = following(true);
+        prompt(&client, 1);
+        client.set_approvals(false);
+        assert!(!client.status().capabilities.approvals);
+        assert_eq!(cards(&client), 0);
+        assert_eq!(emitted(&events, "exec.approval.resolved"), 1);
+        prompt(&client, 2);
+        assert_eq!(cards(&client), 0);
+    }
+
+    #[test]
+    fn turning_approvals_on_rejoins_sessions_that_wait() {
+        let (client, _) = following(false);
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.waiting.insert(ID.to_string(), WaitingOn::Approval);
+            st.joined.insert(ID.to_string(), Instant::now());
+            st.joined.insert("busy-elsewhere".to_string(), Instant::now());
+        }
+        client.set_approvals(true);
+        assert!(client.status().capabilities.approvals);
+        let st = client.inner.st.lock().unwrap();
+        assert!(!st.joined.contains_key(ID), "the server only replays a prompt to a session that rejoins");
+        assert!(st.joined.contains_key("busy-elsewhere"));
     }
 }

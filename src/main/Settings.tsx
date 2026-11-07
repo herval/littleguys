@@ -237,8 +237,23 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
           <ClaudePluginFix status={g.status} />
         </div>
       )}
-      {g.status.kind === "claudecode" && <ClaudeApprovals gateway={g} onError={setError} />}
+      {g.status.kind === "claudecode" && (
+        <ApprovalsSetting
+          gateway={g}
+          hint="Background sessions wait for your Allow or Deny in littleguys. Terminal sessions ask in the terminal and, if you don't answer within a few seconds, here too. The first answer counts."
+          configure={(approvals) => core.bots.claudeConfigure(g.id, { approvals })}
+          onError={setError}
+        />
+      )}
       {g.status.kind === "claudecode" && <ClaudeLimits onError={setError} />}
+      {g.status.kind === "codex" && (
+        <ApprovalsSetting
+          gateway={g}
+          hint="Sessions on Codex's shared server ask here as well as in the terminal, and the first answer counts. Turn this off and they only ask in Codex."
+          configure={(approvals) => core.bots.codexConfigure(g.id, { approvals })}
+          onError={setError}
+        />
+      )}
       {g.enabled &&
         (phase === "offline" || phase === "error" || phase === "no-config") &&
         g.status.message &&
@@ -256,8 +271,18 @@ function GatewayRow({ gateway: g }: { gateway: GatewayRoster }) {
   );
 }
 
-/** Claude Code's one setting: whether littleguys answers sessions' permission prompts. */
-function ClaudeApprovals({ gateway: g, onError }: { gateway: GatewayRoster; onError: (e: string) => void }) {
+/** Claude Code and Codex: whether littleguys answers sessions' permission prompts. */
+function ApprovalsSetting({
+  gateway: g,
+  hint,
+  configure,
+  onError,
+}: {
+  gateway: GatewayRoster;
+  hint: string;
+  configure: (approvals: boolean) => Promise<void>;
+  onError: (e: string) => void;
+}) {
   const on = g.status.capabilities.approvals;
   return (
     <label className="mt-3 flex items-start gap-2.5 border-t border-[var(--color-line)] pt-3 text-[12.5px]">
@@ -265,13 +290,11 @@ function ClaudeApprovals({ gateway: g, onError }: { gateway: GatewayRoster; onEr
         type="checkbox"
         className="mt-[3px] accent-[var(--color-accent)]"
         checked={on}
-        onChange={(e) => core.bots.claudeConfigure(g.id, { approvals: e.target.checked }).catch((err) => onError(errorMessage(err)))}
+        onChange={(e) => configure(e.target.checked).catch((err) => onError(errorMessage(err)))}
       />
       <span>
         <span className="font-medium">Answer permission prompts here</span>
-        <span className="block text-[11.5px] text-[var(--color-ink-3)]">
-          Background sessions wait for your Allow or Deny in littleguys. Terminal sessions ask in the terminal and, if you don't answer within a few seconds, here too. The first answer counts.
-        </span>
+        <span className="block text-[11.5px] text-[var(--color-ink-3)]">{hint}</span>
       </span>
     </label>
   );

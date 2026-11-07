@@ -10,7 +10,7 @@ use tauri::AppHandle;
 use crate::activity::Activity;
 use crate::gateway::client::{ConnStatus, EndpointSource, GatewayClient, Hooks};
 use crate::gateway::identity::{now_ms, DeviceIdentity, DeviceTokenStore};
-use crate::gateways::{self, AcpConfig, ClaudeCodeConfig, Discovered, GatewayEntry, GatewayStore, HermesConfig, OPENCLAW_GATEWAY_ID};
+use crate::gateways::{self, AcpConfig, ClaudeCodeConfig, CodexConfig, Discovered, GatewayEntry, GatewayStore, HermesConfig, OPENCLAW_GATEWAY_ID};
 use crate::openclaw::config::{self, Credential, OpenclawPaths};
 use crate::runtime::{acp::AcpClient, claudecode::ClaudeCodeClient, codex::CodexClient, hermes::HermesClient, Runtime, RuntimeKind};
 
@@ -146,7 +146,13 @@ impl Hub {
                 self.data_dir.clone(),
                 hooks,
             )),
-            RuntimeKind::Codex => Runtime::Codex(CodexClient::new(entry.id.clone(), name.clone(), self.data_dir.clone(), hooks)),
+            RuntimeKind::Codex => Runtime::Codex(CodexClient::new(
+                entry.id.clone(),
+                name.clone(),
+                entry.codex.clone().unwrap_or_default(),
+                self.data_dir.clone(),
+                hooks,
+            )),
         };
         self.activity.attach(client.clone(), name, entry.enabled);
         if entry.enabled {
@@ -219,6 +225,7 @@ impl Hub {
             acp: None,
             hermes: None,
             claude: None,
+            codex: None,
         };
         if credential.is_some() {
             self.store.set_credential(&entry.id, credential.as_ref()).map_err(|e| e.to_string())?;
@@ -315,6 +322,7 @@ impl Hub {
             acp,
             hermes,
             claude: if kind == RuntimeKind::Claudecode { Some(claude.unwrap_or_default()) } else { None },
+            codex: None,
         };
         if credential.is_some() {
             self.store.set_credential(&entry.id, credential.as_ref()).map_err(|e| e.to_string())?;
@@ -378,6 +386,21 @@ impl Hub {
             self.clients.lock().unwrap().retain(|c| c.id() != id);
             self.activity.detach(id);
             self.spawn(&entry);
+        }
+        Ok(())
+    }
+
+    /// Change a Codex connection's settings. It takes them as it runs, so sessions and
+    /// routines carry on.
+    pub fn configure_codex(&self, id: &str, codex: CodexConfig) -> Result<(), String> {
+        {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.iter_mut().find(|e| e.id == id && e.kind == RuntimeKind::Codex).ok_or("unknown Codex connection")?;
+            entry.codex = Some(codex.clone());
+            self.store.save(&entries).map_err(|e| e.to_string())?;
+        }
+        if let Some(Runtime::Codex(client)) = self.client(id) {
+            client.set_approvals(codex.approvals);
         }
         Ok(())
     }

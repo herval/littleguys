@@ -7,7 +7,7 @@ use tauri::{AppHandle, State};
 
 use crate::activity::{Activity, NotifyPrefs, Roster};
 use crate::gateway::client::{ConnStatus, RpcError};
-use crate::gateways::{AcpConfig, ClaudeCodeConfig, GatewayEntry, HermesConfig};
+use crate::gateways::{AcpConfig, ClaudeCodeConfig, CodexConfig, GatewayEntry, HermesConfig};
 use crate::runtime::RuntimeKind;
 use crate::updater::{UpdateState, Updates};
 use crate::hub::{DiscoveredGateway, Hub};
@@ -106,6 +106,11 @@ pub async fn claude_code_install_plugin(hub: State<'_, Arc<Hub>>) -> Result<(), 
 #[tauri::command]
 pub fn claude_code_configure(hub: State<'_, Arc<Hub>>, id: String, claude: ClaudeCodeConfig) -> Result<(), String> {
     hub.configure_claude(&id, claude)
+}
+
+#[tauri::command]
+pub fn codex_configure(hub: State<'_, Arc<Hub>>, id: String, codex: CodexConfig) -> Result<(), String> {
+    hub.configure_codex(&id, codex)
 }
 
 /// Launchable agents from the ACP registry (Claude Code, Codex, Gemini CLI, …).

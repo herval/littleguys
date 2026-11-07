@@ -8,14 +8,20 @@ const FRESH_MS = 60 * 60_000;
 const NEARLY_OUT = 80;
 const OUT = 95;
 
+/** A Codex guy added as an ACP agent, on this computer. ACP agents show their command as the url. */
+export function isAcpCodexHere(gateway: GatewayRoster): boolean {
+  const { kind, url } = gateway.status;
+  return kind === "acp" && isOnThisMac(gateway) && /codex/i.test(url ?? "");
+}
+
 /** Whose rate limit a gateway's guys run on, if littleguys can tell. */
 export function limitProvider(gateway: GatewayRoster | undefined): LimitProvider | null {
   if (!gateway) return null;
-  const { kind, url } = gateway.status;
+  const { kind } = gateway.status;
   if (kind === "claudecode") return "claude";
   if (kind === "codex") return "codex";
-  // ACP agents show their command as the url. On another machine, its limit is that machine's.
-  if (kind === "acp" && isOnThisMac(gateway) && /codex/i.test(url ?? "")) return "codex";
+  // On another machine, its limit is that machine's.
+  if (isAcpCodexHere(gateway)) return "codex";
   return null;
 }
 

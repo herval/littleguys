@@ -40,6 +40,8 @@ pub struct GatewayEntry {
     pub hermes: Option<HermesConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude: Option<ClaudeCodeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<CodexConfig>,
 }
 
 /// Claude Code on this Mac: every session is a thread (see runtime/claudecode.rs).
@@ -49,6 +51,21 @@ pub struct ClaudeCodeConfig {
     /// littleguys answers sessions' permission prompts (background ones wait for it).
     #[serde(default)]
     pub approvals: bool,
+}
+
+/// Codex on this computer: every session is a thread (see runtime/codex.rs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexConfig {
+    /// littleguys shows and answers sessions' permission prompts. Off, they stay in Codex.
+    #[serde(default = "default_true")]
+    pub approvals: bool,
+}
+
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self { approvals: true }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -170,6 +187,7 @@ impl GatewayStore {
                     acp: None,
                     hermes: None,
                     claude: None,
+                    codex: None,
                 },
             );
         }
@@ -468,13 +486,33 @@ mod tests {
             acp: None,
             hermes: None,
             claude: Some(ClaudeCodeConfig { approvals: true }),
+            codex: None,
+        });
+        entries.push(GatewayEntry {
+            id: "codex-1".into(),
+            name: String::new(),
+            url: None,
+            enabled: true,
+            added_at_ms: 2,
+            kind: RuntimeKind::Codex,
+            acp: None,
+            hermes: None,
+            claude: None,
+            codex: Some(CodexConfig { approvals: false }),
         });
         store.save(&entries).unwrap();
         let again = GatewayStore::new(&dir).load();
-        assert_eq!(again.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["openclaw", "claude-1"]);
+        assert_eq!(again.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["openclaw", "claude-1", "codex-1"]);
         assert_eq!(again[1].kind, RuntimeKind::Claudecode);
         assert_eq!(again[1].claude, Some(ClaudeCodeConfig { approvals: true }));
+        assert_eq!(again[2].codex, Some(CodexConfig { approvals: false }));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_prompts_show_here_until_turned_off() {
+        assert!(CodexConfig::default().approvals);
+        assert!(serde_json::from_str::<CodexConfig>("{}").unwrap().approvals);
     }
 
     #[test]
