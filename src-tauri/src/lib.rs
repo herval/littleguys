@@ -175,12 +175,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building littleguys")
         .run(|app, event| {
-            // Clicking the Dock icon with every window closed.
+            // Dock/Finder reopen should always restore the chat, even if the
+            // popover is visible or the main window is minimized.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
-                if !has_visible_windows {
-                    windows::open_main(app, None);
-                }
+            if let tauri::RunEvent::Reopen { .. } = event {
+                windows::open_main(app, None);
             }
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);

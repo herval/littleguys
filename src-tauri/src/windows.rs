@@ -62,10 +62,14 @@ pub fn setup(app: &AppHandle) {
         main.on_window_event(move |event| match event {
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                let _ = handle.hide();
-                set_dock_visible(&app_handle, false);
+                if handle.hide().is_ok() {
+                    set_dock_visible(&app_handle, false);
+                }
             }
             WindowEvent::Focused(focused) => {
+                if *focused {
+                    set_dock_visible(&app_handle, true);
+                }
                 let _ = handle.emit("lg:main-focus", *focused);
             }
             WindowEvent::ThemeChanged(_) => crate::tray::read_taskbar_theme(),
@@ -124,29 +128,36 @@ pub fn fit_popover(app: &AppHandle, height: f64) {
 }
 
 pub fn open_main(app: &AppHandle, nav: Option<Navigate>) {
-    hide_popover(app);
-    let Some(main) = app.get_webview_window(MAIN) else { return };
-    set_dock_visible(app, true);
-    let _ = main.unminimize();
-    let _ = main.show();
-    let _ = main.set_focus();
-    if let Some(nav) = nav {
-        let _ = main.emit("lg:navigate", nav);
+    let handle = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || {
+        hide_popover(&handle);
+        let Some(main) = handle.get_webview_window(MAIN) else { return };
+        // Keep the policy change and window activation together, including when
+        // opening from a notification or an IPC command on another thread.
+        set_dock_visible(&handle, true);
+        let _ = main.unminimize();
+        let _ = main.show();
+        #[cfg(target_os = "macos")]
+        activate_app();
+        let _ = main.set_focus();
+        if let Some(nav) = nav {
+            let _ = main.emit("lg:navigate", nav);
+        }
+    }) {
+        log::warn!("could not open the main window: {e}");
     }
 }
 
 /// The app lives in the menu bar; it only shows in the Dock / ⌘Tab while the
 /// main window is open.
 /// (Windows and Linux: the window's taskbar button already comes and goes with it.)
-pub fn set_dock_visible(app: &AppHandle, visible: bool) {
+fn set_dock_visible(app: &AppHandle, visible: bool) {
     #[cfg(target_os = "macos")]
     {
         use tauri::ActivationPolicy;
         let policy = if visible { ActivationPolicy::Regular } else { ActivationPolicy::Accessory };
-        let _ = app.set_activation_policy(policy);
-        if visible {
-            // Switching to Regular doesn't activate the app by itself.
-            let _ = app.run_on_main_thread(activate_app);
+        if let Err(e) = app.set_activation_policy(policy) {
+            log::warn!("could not set Dock visibility to {visible}: {e}");
         }
     }
     #[cfg(not(target_os = "macos"))]
