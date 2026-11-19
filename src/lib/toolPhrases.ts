@@ -1,6 +1,10 @@
 // Tool calls in plain words: "browsing nytimes.com" while it happens,
 // "browsed nytimes.com and ran 2 commands" once it's done.
+import type { SessionRow, ThreadActivity } from "./types";
 import type { ToolCallBlock } from "./transcript";
+
+/** All the phrasing needs of a call: its name and input. */
+type Call = Pick<ToolCallBlock, "name" | "arguments">;
 
 export type ToolKind =
   | "browse"
@@ -19,7 +23,7 @@ export type ToolKind =
   | "plan"
   | "other";
 
-function args(call: ToolCallBlock): Record<string, unknown> {
+function args(call: Call): Record<string, unknown> {
   if (typeof call.arguments === "string") {
     try {
       return JSON.parse(call.arguments) as Record<string, unknown>;
@@ -78,7 +82,7 @@ function baseName(path: unknown): string | undefined {
 }
 
 /** The thing a call acts on, short: a domain, a file name, a query. */
-export function toolSubject(call: ToolCallBlock): string | undefined {
+export function toolSubject(call: Call): string | undefined {
   const a = args(call);
   switch (toolKind(call.name)) {
     case "browse":
@@ -101,7 +105,7 @@ export function toolSubject(call: ToolCallBlock): string | undefined {
 const quote = (s: string) => `“${s}”`;
 
 /** What the guy is doing right now, e.g. "browsing nytimes.com". */
-export function presentTense(call: ToolCallBlock): string {
+export function presentTense(call: Call): string {
   const s = toolSubject(call);
   switch (toolKind(call.name)) {
     case "browse":
@@ -112,8 +116,11 @@ export function presentTense(call: ToolCallBlock): string {
       return s ? `searching the web for ${quote(s)}` : "searching the web";
     case "search":
       return s ? `looking for ${quote(s)}` : "searching";
-    case "exec":
-      return "running a command";
+    case "exec": {
+      // Claude Code says what each command is for ("Run the tests").
+      const what = args(call).description;
+      return typeof what === "string" && what.trim() ? lowerFirst(what.trim()) : "running a command";
+    }
     case "edit":
       return s ? `editing ${s}` : "editing a file";
     case "read":
@@ -213,4 +220,41 @@ export function summarizeSteps(calls: ToolCallBlock[]): string {
   }
   const sentence = list(parts);
   return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+}
+
+/** "Run the tests" → "run the tests", but "API check" stays. */
+function lowerFirst(s: string): string {
+  return /^[A-Z][a-z]/.test(s) ? s.charAt(0).toLowerCase() + s.slice(1) : s;
+}
+
+/** What a working thread's row says it's doing (Claude Code threads say). */
+export function rowActivity(row: SessionRow | null | undefined): ThreadActivity | undefined {
+  return (row as { activity?: ThreadActivity } | null | undefined)?.activity;
+}
+
+const isAgentCall = (call: Call) => /^(agent|task)$/i.test(call.name);
+
+/**
+ * What a working thread is doing, in a few words: its own step ("editing
+ * diff.ts"), or the agents it has working ("Swap diffs for jsdiff · run the
+ * parity check"), so a thread whose turn is over still says why it's busy.
+ */
+export function doingNow(activity: ThreadActivity | undefined): string | null {
+  if (!activity) return null;
+  const agents = activity.agents ?? [];
+  const step = activity.step ?? null;
+  const own = step && !isAgentCall(step) ? presentTense(step) : null;
+  const working = (n: number) => (n === 1 ? "1 agent working" : `${n} agents working`);
+  if (own) return agents.length ? `${own}, with ${working(agents.length)}` : own;
+  if (agents.length === 1) {
+    const [agent] = agents;
+    return [agent.description?.trim(), agent.step ? presentTense(agent.step) : null].filter(Boolean).join(" · ") || working(1);
+  }
+  if (agents.length > 1) {
+    const what = agents.map((a) => a.description?.trim()).filter(Boolean);
+    return what.length ? `${working(agents.length)}: ${what.join(", ")}` : working(agents.length);
+  }
+  // Handed to an agent that hasn't written anything yet.
+  const what = step ? args(step).description : null;
+  return typeof what === "string" && what.trim() ? what.trim() : step ? "handing off to an agent" : null;
 }

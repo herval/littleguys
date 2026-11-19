@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { sessions as sessionsApi } from "../lib/gateway";
 import { channelName, followsSessions, gatewayOf, guyName, hasMainChat, isOnThisMac, isRunning, phaseLabel, sessionRow, threadKind, threadTitle } from "../lib/guys";
 import { core } from "../lib/ipc";
-import { presentTense, toolKind } from "../lib/toolPhrases";
+import { doingNow, presentTense, rowActivity, toolKind } from "../lib/toolPhrases";
 import { firstUnread } from "../lib/transcript";
 import type { Guy, SessionRow } from "../lib/types";
 import { useApp } from "../stores/app";
@@ -134,17 +134,21 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   });
   // A title or preview means it has history somewhere, even if none loaded.
   const unstarted = Boolean(thread?.loaded) && items.length === 0 && !running && !row?.derivedTitle && !row?.lastMessagePreview;
+  // Claude Code threads say on their row what they're doing, subagents included.
+  const doing = running ? doingNow(rowActivity(row)) : null;
   const activity = activeTool
     ? presentTense(activeTool)
-    : live
-      ? live.text
-        ? "typing"
-        : live.phase
-          ? livePhaseLabel(live.phase).replace(/…$/, "")
-          : "thinking"
-      : running
-        ? "working"
-        : null;
+    : doing
+      ? doing
+      : live
+        ? live.text
+          ? "typing"
+          : live.phase
+            ? livePhaseLabel(live.phase).replace(/…$/, "")
+            : "thinking"
+        : running
+          ? "working"
+          : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">

@@ -46,6 +46,7 @@ import {
   threadTitle,
 } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
+import { doingNow, rowActivity } from "../lib/toolPhrases";
 import type { Guy, SessionRow } from "../lib/types";
 import { type MainView, mainSessionKey, useApp } from "../stores/app";
 import { useArchive } from "../stores/archive";
@@ -602,7 +603,9 @@ function ThreadRow({
             <p className={`truncate text-[12px] font-medium ${selected ? "text-white" : "text-[var(--color-bad)]"}`}>needs your OK</p>
           ) : (
             <p className={`truncate text-[12px] ${selected ? "text-white/80" : "text-[var(--color-ink-3)]"}`}>
-              {running ? "working…" : preview || (isMain ? "Your main chat" : isDraft ? "Say hi to start a thread" : "No messages yet")}
+              {running
+                ? (doingNow(rowActivity(row)) ?? "working…")
+                : preview || (isMain ? "Your main chat" : isDraft ? "Say hi to start a thread" : "No messages yet")}
             </p>
           )}
           {unread && <span className={`ml-auto h-2 w-2 shrink-0 rounded-full ${selected ? "bg-white" : "bg-[var(--color-accent)]"}`} />}

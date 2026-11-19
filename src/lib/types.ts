@@ -100,6 +100,21 @@ export interface ExecApproval {
   [key: string]: unknown;
 }
 
+/** A tool call as a thread row carries it: its name and the short fields of its input. */
+export interface StepCall {
+  name: string;
+  arguments?: Record<string, unknown>;
+}
+
+/**
+ * What a working thread is doing, on its row (`activity`, Claude Code): its own
+ * tool call in flight, and the subagents working for it, each with theirs.
+ */
+export interface ThreadActivity {
+  step?: StepCall | null;
+  agents?: { description?: string | null; step?: StepCall | null }[];
+}
+
 /** One gateway's slice of the roster (see src-tauri/src/activity.rs). */
 export interface GatewayRoster {
   id: string;

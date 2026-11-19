@@ -86,6 +86,15 @@ const TAIL_MAX_BYTES: u64 = 8 << 20;
 /// How much of a transcript's end is read for its title and last words.
 const SUMMARY_BYTES: u64 = 256 << 10;
 const TOOL_TEXT_MAX: usize = 20_000;
+/// A subagent that hasn't written for this long isn't counted as working (it died with its
+/// session, or a command of its has run for longer than anyone waits).
+const HELPER_STALE_MS: u64 = 30 * 60 * 1000;
+/// Writes to a finished subagent this long after it said it was done mean it was sent more work.
+const HELPER_RESUMED_MS: u64 = 5_000;
+/// How much of a subagent's transcript is read for its step in flight.
+const HELPER_TAIL_BYTES: u64 = 128 << 10;
+/// A step on the thread row keeps its short arguments (a path, a query, a command), cut to this.
+const STEP_ARG_MAX: usize = 300;
 const REQUEST_MAX_BYTES: usize = 8 << 20;
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const CLI_TIMEOUT: Duration = Duration::from_secs(20);
@@ -345,6 +354,11 @@ struct Session {
     tail: Option<Tail>,
     /// tool_use id → tool name, for naming tool results.
     tools: HashMap<String, String>,
+    /// Its own tool calls without a result yet, oldest first: tool_use id → [`step`].
+    steps: Vec<(String, Value)>,
+    /// Its subagents' transcripts (`<transcript>/subagents/agent-<id>.jsonl`) while it's busy,
+    /// by agent id.
+    helpers: HashMap<String, Helper>,
     /// Your messages waiting for the session.
     outbox: Vec<String>,
     delivering: bool,
@@ -408,6 +422,19 @@ impl Session {
         }
     }
 
+    /// What it's doing while it works, for the thread list: its own step in flight, and the
+    /// subagents working for it (each with theirs).
+    fn activity(&self) -> Option<Value> {
+        if !self.busy {
+            return None;
+        }
+        let mut helpers: Vec<(&String, &Helper)> = self.helpers.iter().filter(|(_, h)| h.working).collect();
+        helpers.sort_by(|a, b| a.0.cmp(b.0));
+        let agents: Vec<Value> = helpers.iter().map(|(_, h)| json!({ "description": h.description, "step": h.step })).collect();
+        let step = self.steps.last().map(|(_, step)| step);
+        (step.is_some() || !agents.is_empty()).then(|| json!({ "step": step, "agents": agents }))
+    }
+
     /// A turn started or ended; returns whether it changed.
     fn set_busy(&mut self, busy: bool, emits: &mut Emits) -> bool {
         if self.busy == busy {
@@ -424,6 +451,8 @@ impl Session {
             emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "start" })));
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "status", "phase": "thinking" })));
         } else {
+            self.steps.clear();
+            self.helpers.clear();
             // A reply you haven't read (in littleguys).
             if !self.flags.unread {
                 self.flags.unread = true;
@@ -440,6 +469,21 @@ impl Session {
 struct Tail {
     offset: u64,
     partial: Vec<u8>,
+}
+
+/// One of a session's subagents, as its files last read.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Helper {
+    len: u64,
+    modified: u64,
+    meta_modified: u64,
+    /// What it was sent to do (its `.meta.json`).
+    description: Option<String>,
+    /// Claude Code marked it done (its `.meta.json`).
+    finished: bool,
+    /// Its tool call in flight.
+    step: Option<Value>,
+    working: bool,
 }
 
 struct Approval {
@@ -1465,7 +1509,9 @@ fn read_transcript(path: &Path, tail: Option<Tail>) -> Read {
 
 async fn follow_transcripts(inner: &Arc<Inner>) {
     let now = now_ms();
-    let jobs: Vec<(String, PathBuf, Option<Tail>)> = {
+    // A busy session's subagents are looked over too, for what they're doing.
+    type Job = (String, PathBuf, Option<Tail>, Option<HashMap<String, Helper>>);
+    let jobs: Vec<Job> = {
         let mut st = inner.st.lock().unwrap();
         let st = &mut *st;
         let mut jobs = Vec::new();
@@ -1478,7 +1524,7 @@ async fn follow_transcripts(inner: &Arc<Inner>) {
                 s.transcript = st.transcripts.find(&s.id, &s.cwd);
             }
             if let Some(path) = &s.transcript {
-                jobs.push((s.id.clone(), path.clone(), s.tail.clone()));
+                jobs.push((s.id.clone(), path.clone(), s.tail.clone(), s.busy.then(|| s.helpers.clone())));
             }
         }
         jobs
@@ -1487,7 +1533,12 @@ async fn follow_transcripts(inner: &Arc<Inner>) {
         return;
     }
     let reads = tauri::async_runtime::spawn_blocking(move || {
-        jobs.into_iter().map(|(sid, path, tail)| (sid, read_transcript(&path, tail))).collect::<Vec<_>>()
+        jobs.into_iter()
+            .map(|(sid, path, tail, helpers)| {
+                let helpers = helpers.map(|known| scan_helpers(&helpers_dir(&path), &known, now));
+                (sid, read_transcript(&path, tail), helpers)
+            })
+            .collect::<Vec<_>>()
     })
     .await
     .unwrap_or_default();
@@ -1495,8 +1546,12 @@ async fn follow_transcripts(inner: &Arc<Inner>) {
     let mut changed = false;
     {
         let mut st = inner.st.lock().unwrap();
-        for (sid, read) in reads {
+        for (sid, read, helpers) in reads {
             let Some(s) = st.sessions.get_mut(&sid) else { continue };
+            let before = s.activity();
+            if let Some(helpers) = helpers.filter(|_| s.busy) {
+                s.helpers = helpers;
+            }
             match read {
                 Read::First { tail, lines, modified } => {
                     for line in &lines {
@@ -1525,6 +1580,7 @@ async fn follow_transcripts(inner: &Arc<Inner>) {
                 }
                 Read::Same | Read::Gone => {}
             }
+            changed |= s.activity() != before;
         }
     }
     if changed {
@@ -1544,6 +1600,11 @@ fn note_line(s: &mut Session, line: &Value, live: bool, emits: &mut Emits) -> bo
     }
     if let Some(said) = meta.said {
         s.said = Some(said);
+    }
+    if meta.turn_end || meta.prompt.is_some() {
+        s.steps.clear();
+    } else if !flag(line, "isSidechain") {
+        track_steps(&mut s.steps, line);
     }
     if let Some(prompt) = meta.prompt {
         if s.first_prompt.is_none() {
@@ -1615,6 +1676,107 @@ fn line_meta(line: &Value) -> LineMeta {
         _ => {}
     }
     meta
+}
+
+fn blocks<'a>(line: &'a Value, kind: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
+    line.pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(move |b| b.get("type").and_then(Value::as_str) == Some(kind))
+}
+
+/// Tool calls in flight, oldest first: a call adds one, its result takes it away.
+fn track_steps(steps: &mut Vec<(String, Value)>, line: &Value) {
+    match line.get("type").and_then(Value::as_str) {
+        Some("assistant") => {
+            for block in blocks(line, "tool_use") {
+                if let Some(id) = block.get("id").and_then(Value::as_str) {
+                    steps.push((id.to_string(), step_of(block)));
+                }
+            }
+        }
+        Some("user") => {
+            for block in blocks(line, "tool_result") {
+                if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
+                    steps.retain(|(step, _)| step != id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A tool call as the thread list shows it: its name, and the short fields of its input
+/// (a path, a query, a command and its description), not what it writes.
+fn step_of(block: &Value) -> Value {
+    let mut args = serde_json::Map::new();
+    if let Some(Value::Object(input)) = block.get("input") {
+        for (k, v) in input {
+            match v {
+                Value::String(text) if !matches!(k.as_str(), "content" | "old_string" | "new_string" | "prompt") => {
+                    args.insert(k.clone(), json!(truncate(text, STEP_ARG_MAX)));
+                }
+                Value::Bool(_) | Value::Number(_) => {
+                    args.insert(k.clone(), v.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    json!({ "name": block.get("name").and_then(Value::as_str).unwrap_or("tool"), "arguments": args })
+}
+
+/// Where a session's subagents keep their transcripts.
+fn helpers_dir(transcript: &Path) -> PathBuf {
+    transcript.with_extension("").join("subagents")
+}
+
+/// A session's subagents that wrote lately, rereading only the ones that changed since `known`.
+fn scan_helpers(dir: &Path, known: &HashMap<String, Helper>, now: u64) -> HashMap<String, Helper> {
+    let mut out = HashMap::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("agent-")?.strip_suffix(".jsonl")) else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else { continue };
+        let modified = modified_ms(&meta);
+        if now.saturating_sub(modified) > HELPER_STALE_MS {
+            continue;
+        }
+        let meta_path = path.with_extension("meta.json");
+        let meta_modified = std::fs::metadata(&meta_path).map(|m| modified_ms(&m)).unwrap_or(0);
+        let mut helper = match known.get(id) {
+            Some(h) if h.len == meta.len() && h.modified == modified && h.meta_modified == meta_modified => h.clone(),
+            _ => {
+                let (description, finished) = read_helper_meta(&meta_path);
+                Helper { len: meta.len(), modified, meta_modified, description, finished, step: helper_step(&path, meta.len()), working: false }
+            }
+        };
+        // Done, unless it wrote again after saying so (it was sent more work).
+        helper.working = !helper.finished || modified > meta_modified + HELPER_RESUMED_MS;
+        out.insert(id.to_string(), helper);
+    }
+    out
+}
+
+/// A subagent's tool call in flight, from the end of its transcript.
+fn helper_step(path: &Path, len: u64) -> Option<Value> {
+    let from = len.saturating_sub(HELPER_TAIL_BYTES);
+    let (lines, _, _) = read_lines(path, from, len, Vec::new(), from > 0).ok()?;
+    let mut steps = Vec::new();
+    for line in &lines {
+        track_steps(&mut steps, line);
+    }
+    steps.pop().map(|(_, step)| step)
+}
+
+/// What a subagent was sent to do, and whether Claude Code says it's finished.
+fn read_helper_meta(path: &Path) -> (Option<String>, bool) {
+    let meta: Value = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let description = meta.get("description").and_then(Value::as_str).map(str::trim).filter(|d| !d.is_empty()).map(str::to_string);
+    (description, meta.get("finished").and_then(Value::as_bool).unwrap_or(false))
 }
 
 fn chat_message(role: &str, content: Vec<Value>, ts: Option<u64>, id: &str) -> Value {
@@ -2074,6 +2236,9 @@ fn session_row(s: &Session) -> Value {
         "hasActiveRun": s.busy,
         "status": if s.busy { "running" } else { "done" },
     });
+    if let Some(activity) = s.activity() {
+        row["activity"] = activity;
+    }
     s.flags.add_to(&mut row);
     row
 }
@@ -3300,6 +3465,82 @@ mod tests {
         // Other hooks' feedback isn't yours.
         let other = json!({ "type": "user", "isMeta": true, "message": { "content": "Stop hook feedback:\nNew from agentbook" } });
         assert!(convert_line(&other, &mut tools).is_empty());
+    }
+
+    #[test]
+    fn steps_follow_tool_calls_until_their_results() {
+        let mut s = Session::new("s-1");
+        s.busy = true;
+        let call = |id: &str, name: &str, input: Value| {
+            json!({ "type": "assistant", "message": { "content": [{ "type": "tool_use", "id": id, "name": name, "input": input }] } })
+        };
+        let result = |id: &str| json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "tool_use_id": id }] } });
+        let mut emits = Vec::new();
+        note_line(&mut s, &call("t1", "Read", json!({ "file_path": "/w/a.ts" })), true, &mut emits);
+        note_line(&mut s, &call("t2", "Bash", json!({ "command": "pnpm test", "description": "Run the tests", "timeout": 600000 })), true, &mut emits);
+        assert_eq!(
+            s.activity(),
+            Some(json!({ "step": { "name": "Bash", "arguments": { "command": "pnpm test", "description": "Run the tests", "timeout": 600000 } }, "agents": [] }))
+        );
+        note_line(&mut s, &result("t2"), true, &mut emits);
+        assert_eq!(s.activity().unwrap()["step"]["name"], "Read");
+        note_line(&mut s, &result("t1"), true, &mut emits);
+        assert_eq!(s.activity(), None);
+        // What it writes stays off the thread list; a subagent's calls aren't its own.
+        note_line(&mut s, &call("t3", "Write", json!({ "file_path": "/w/b.ts", "content": "x".repeat(5000) })), true, &mut emits);
+        assert_eq!(s.activity().unwrap()["step"], json!({ "name": "Write", "arguments": { "file_path": "/w/b.ts" } }));
+        let mut side = call("t4", "Bash", json!({}));
+        side["isSidechain"] = json!(true);
+        note_line(&mut s, &side, true, &mut emits);
+        assert_eq!(s.activity().unwrap()["step"]["name"], "Write");
+        // The turn's end drops whatever never reported back.
+        s.hooked = true;
+        note_line(&mut s, &json!({ "type": "system", "subtype": "turn_duration" }), true, &mut emits);
+        assert_eq!(s.activity(), None);
+        note_line(&mut s, &call("t5", "Grep", json!({ "pattern": "x" })), true, &mut emits);
+        s.busy = false;
+        assert_eq!(s.activity(), None);
+    }
+
+    #[test]
+    fn subagents_show_while_they_work() {
+        let dir = std::env::temp_dir().join(format!("lg-helpers-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, lines: &[Value]| {
+            let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+            std::fs::write(dir.join(name), text).unwrap();
+        };
+        let call = |id: &str| json!({ "type": "assistant", "isSidechain": true, "message": { "content": [{ "type": "tool_use", "id": id, "name": "Bash", "input": { "description": "Run the parity check" } }] } });
+        let result = |id: &str| json!({ "type": "user", "isSidechain": true, "message": { "content": [{ "type": "tool_result", "tool_use_id": id }] } });
+        write("agent-a1.jsonl", &[json!({ "type": "user", "message": { "content": "go" } }), call("x1")]);
+        write("agent-a1.meta.json", &[json!({ "description": "Swap diffs for jsdiff", "requestShape": "background" })]);
+        write("agent-b2.jsonl", &[call("y1"), result("y1")]);
+        write("agent-b2.meta.json", &[json!({ "description": "Port the CLI" })]);
+        write("agent-c3.jsonl", &[call("z1"), result("z1")]);
+        write("agent-c3.meta.json", &[json!({ "description": "Catalog the drivers", "finished": true })]);
+        std::fs::write(dir.join("notes.txt"), "not a subagent").unwrap();
+
+        let helpers = scan_helpers(&dir, &HashMap::new(), now_ms());
+        assert_eq!(helpers.len(), 3);
+        assert!(helpers["a1"].working && helpers["b2"].working && !helpers["c3"].working);
+        assert_eq!(helpers["a1"].step.as_ref().unwrap()["arguments"]["description"], "Run the parity check");
+        assert_eq!(helpers["b2"].step, None);
+        // Unchanged files aren't read again; long-quiet ones drop off.
+        assert_eq!(scan_helpers(&dir, &helpers, now_ms()), helpers);
+        assert!(scan_helpers(&dir, &helpers, now_ms() + HELPER_STALE_MS + 60_000).is_empty());
+
+        let mut s = Session::new("s-1");
+        s.busy = true;
+        s.helpers = helpers;
+        assert_eq!(
+            s.activity(),
+            Some(json!({ "step": null, "agents": [
+                { "description": "Swap diffs for jsdiff", "step": { "name": "Bash", "arguments": { "description": "Run the parity check" } } },
+                { "description": "Port the CLI", "step": null },
+            ] }))
+        );
+        assert_eq!(helpers_dir(Path::new("/p/-w/abc.jsonl")), Path::new("/p/-w/abc/subagents"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
