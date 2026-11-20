@@ -2,11 +2,29 @@ import { CornerDownLeft, MessageCircleReply, Plus, Power, Settings } from "lucid
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { COMPUTER, shortcut } from "../lib/platform";
 import { chat as chatApi } from "../lib/gateway";
-import { activityFor, cleanPreview, defaultThread, gatewayOf, guyName, isMultiGateway, liveGateways, needsAction, needsProxyFix, statusLabel, threadKind } from "../lib/guys";
+import {
+  type ActiveThread,
+  activeThreads,
+  activityFor,
+  cleanPreview,
+  defaultThread,
+  gatewayOf,
+  guyName,
+  hasMainChat,
+  isMultiGateway,
+  liveGateways,
+  needsAction,
+  needsProxyFix,
+  relativeTime,
+  statusLabel,
+  threadKind,
+  threadTitle,
+} from "../lib/guys";
 import { core, errorMessage, listen } from "../lib/ipc";
 import { limitLine, limitProvider } from "../lib/limits";
+import { doingNow, rowActivity } from "../lib/toolPhrases";
 import type { GatewayRoster, Guy, Limit, LimitProvider, Roster } from "../lib/types";
-import { sortGuys, useApp } from "../stores/app";
+import { readPopoverShows, sortGuys, useApp } from "../stores/app";
 import { Avatar, GuyMark } from "../ui/Avatar";
 import { Spinner, TypingDots } from "../ui/kit";
 
@@ -47,10 +65,12 @@ function useLimits(providers: string) {
 export function Popover() {
   const roster = useApp((s) => s.roster);
   const order = useApp((s) => s.order);
+  const shows = useApp((s) => s.popoverShows);
   const rootRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<string | null>(null);
 
   const guys = useMemo(() => sortGuys(roster, order), [roster, order]);
+  const threads = useMemo(() => (shows === "threads" ? activeThreads(roster) : []), [roster, shows]);
   const multi = isMultiGateway(roster);
   const live = liveGateways(roster);
   const enabled = roster.gateways.filter((g) => g.enabled);
@@ -80,13 +100,14 @@ export function Popover() {
     window.addEventListener("keydown", onKey);
     const unlisten = listen("lg:popover-shown", () => {
       setReplyTo(null);
-      // Pick up order changes made in the main window.
+      // Pick up order and Settings changes made in the main window.
       try {
         const raw = localStorage.getItem("littleguys.order");
         if (raw) useApp.setState({ order: JSON.parse(raw) });
       } catch {
         /* ignore */
       }
+      useApp.setState({ popoverShows: readPopoverShows() });
     });
     return () => {
       window.removeEventListener("keydown", onKey);
@@ -118,7 +139,26 @@ export function Popover() {
             </div>
           )}
           {live.some((g) => g.loaded) && guys.length === 0 && <EmptyRoster />}
-          {multi
+          {shows === "threads"
+            ? guys.length > 0 &&
+              (threads.length ? (
+                threads.map((t) => {
+                  const id = `${t.guy.gatewayId}|${t.row.key}`;
+                  return (
+                    <ThreadRow
+                      key={id}
+                      thread={t}
+                      roster={roster}
+                      limit={t.running ? limitOf(t.guy) : undefined}
+                      replying={replyTo === id}
+                      onReply={() => setReplyTo(replyTo === id ? null : id)}
+                    />
+                  );
+                })
+              ) : (
+                <AllQuiet />
+              ))
+            : multi
             ? live.map((g) => {
                 const theirs = guys.filter((guy) => guy.gatewayId === g.id);
                 if (!theirs.length) return null;
@@ -248,24 +288,97 @@ function GuyRow({ guy, roster, limit, replying, onReply }: { guy: Guy; roster: R
             <p className={`min-w-0 flex-1 truncate text-[12px] ${act.unread ? "text-[var(--color-ink)]" : "text-[var(--color-ink-3)]"}`}>
               {preview || (act.running ? "Working on it…" : "No messages yet")}
             </p>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onReply();
-              }}
-              title={`Message ${guyName(guy)}`}
-              className={`shrink-0 rounded-md p-1 text-[var(--color-ink-3)] transition hover:bg-black/5 hover:text-[var(--color-ink)] dark:hover:bg-white/10 ${
-                replying ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-              }`}
-            >
-              <MessageCircleReply size={14} />
-            </button>
+            <ReplyButton guy={guy} replying={replying} onReply={onReply} />
           </div>
           <LimitBar limit={limit} />
         </div>
       </div>
       {replying && <QuickReply guy={guy} sessionKey={target} />}
     </div>
+  );
+}
+
+/** A thread on the "Active threads" list: its guy's face, its title, and what's going on in it. */
+function ThreadRow({
+  thread: { guy, row, running, needsYou },
+  roster,
+  limit,
+  replying,
+  onReply,
+}: {
+  thread: ActiveThread;
+  roster: Roster;
+  limit: Limit | null | undefined;
+  replying: boolean;
+  onReply: () => void;
+}) {
+  const unread = Boolean(row.unread);
+  const ring = needsYou ? "needs-you" : running ? "working" : unread ? "unread" : "idle";
+  const mainChat = hasMainChat(roster, guy.gatewayId);
+  // A guy's main chat is just them, like a DM.
+  const isMain = mainChat && threadKind(row.key) === "main";
+  const preview = cleanPreview(row.lastMessagePreview);
+  const line = (running && doingNow(rowActivity(row))) || preview || (running ? "Working on it…" : "No messages yet");
+  const open = () => core.openMain({ gatewayId: guy.gatewayId, agentId: guy.id, sessionKey: row.key });
+
+  return (
+    <div className={`group rounded-xl transition ${replying ? "bg-[var(--color-chip)]" : "hover:bg-[var(--color-chip)]"}`}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={open}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") open();
+        }}
+        className="flex items-center gap-3 px-2 py-2 outline-none"
+      >
+        <Avatar agent={guy} size={40} ring={ring} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className={`truncate ${unread ? "font-semibold" : "font-medium"}`}>{isMain ? guyName(guy) : threadTitle(row, mainChat)}</span>
+            <span
+              className={`shrink-0 text-[11px] ${
+                needsYou
+                  ? "font-medium text-[var(--color-bad)]"
+                  : running
+                    ? "text-[var(--color-accent-strong)]"
+                    : unread
+                      ? "font-medium text-[var(--color-accent-strong)]"
+                      : "text-[var(--color-ink-3)]"
+              }`}
+            >
+              {needsYou ? "needs your OK" : running ? <TypingDots /> : row.updatedAt ? relativeTime(row.updatedAt) : ""}
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
+            <p className={`min-w-0 flex-1 truncate text-[12px] ${unread ? "text-[var(--color-ink)]" : "text-[var(--color-ink-3)]"}`}>
+              {!isMain && <span className="text-[var(--color-ink-2)]">{guyName(guy)}: </span>}
+              {line}
+            </p>
+            <ReplyButton guy={guy} replying={replying} onReply={onReply} />
+          </div>
+          <LimitBar limit={limit} />
+        </div>
+      </div>
+      {replying && <QuickReply guy={guy} sessionKey={row.key} />}
+    </div>
+  );
+}
+
+function ReplyButton({ guy, replying, onReply }: { guy: Guy; replying: boolean; onReply: () => void }) {
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        onReply();
+      }}
+      title={`Message ${guyName(guy)}`}
+      className={`shrink-0 rounded-md p-1 text-[var(--color-ink-3)] transition hover:bg-black/5 hover:text-[var(--color-ink)] dark:hover:bg-white/10 ${
+        replying ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+      }`}
+    >
+      <MessageCircleReply size={14} />
+    </button>
   );
 }
 
@@ -317,6 +430,16 @@ function EmptyRoster() {
       <GuyMark size={64} mood="wave" />
       <p className="mt-1 font-medium">No little guys yet</p>
       <p className="mt-0.5 text-[12px] text-[var(--color-ink-3)]">Make your first one — it takes a few seconds.</p>
+    </div>
+  );
+}
+
+function AllQuiet() {
+  return (
+    <div className="flex flex-col items-center px-6 pb-4 pt-2 text-center">
+      <GuyMark size={64} mood="sleepy" />
+      <p className="mt-1 font-medium">All quiet</p>
+      <p className="mt-0.5 text-[12px] text-[var(--color-ink-3)]">Threads show up here while they work or wait on you, and for a day after.</p>
     </div>
   );
 }

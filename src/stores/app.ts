@@ -10,6 +10,7 @@ const LAST_GUY_KEY = "littleguys.lastGuy";
 /** How long launch waits for the last guy's gateway before showing someone else. */
 const RESTORE_WAIT_MS = 8_000;
 const BROWSER_KEY = "littleguys.browser";
+const POPOVER_KEY = "littleguys.popoverShows";
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -24,6 +25,9 @@ function readJson<T>(key: string, fallback: T): T {
 export type MainView = "chat" | "routines" | "files" | "skills" | "past";
 /** The "Add a bot" dialog's tabs. */
 export type AddBotTab = "openclaw" | "hermes" | "claude" | "codex" | "acp";
+
+/** What the menu bar popover lists: your guys, or the threads that are going on. */
+export type PopoverShows = "guys" | "threads";
 
 /** The browser panel beside the chat: open per guy, one shared width. */
 interface BrowserPanelPrefs {
@@ -61,6 +65,7 @@ interface AppState {
    */
   keptUnread: string | null;
   browser: BrowserPanelPrefs;
+  popoverShows: PopoverShows;
   editor: { open: boolean; uid: string | null };
   settingsOpen: boolean;
   addGatewayOpen: boolean;
@@ -85,6 +90,7 @@ interface AppState {
   setBrowserOpen(uid: string, open: boolean): void;
   setBrowserWidth(width: number): void;
   setOrder(order: string[]): void;
+  setPopoverShows(shows: PopoverShows): void;
   openEditor(uid: string | null): void;
   closeEditor(): void;
   setSettingsOpen(open: boolean): void;
@@ -112,6 +118,7 @@ export const useApp = create<AppState>((set, get) => ({
   abilityByGuy: {},
   keptUnread: null,
   browser: readJson<BrowserPanelPrefs>(BROWSER_KEY, { open: {}, width: 520 }),
+  popoverShows: readPopoverShows(),
   editor: { open: false, uid: null },
   settingsOpen: false,
   addGatewayOpen: false,
@@ -197,6 +204,10 @@ export const useApp = create<AppState>((set, get) => ({
     localStorage.setItem(ORDER_KEY, JSON.stringify(order));
     set({ order });
   },
+  setPopoverShows: (popoverShows) => {
+    localStorage.setItem(POPOVER_KEY, JSON.stringify(popoverShows));
+    set({ popoverShows });
+  },
   openEditor: (uid) => set({ editor: { open: true, uid } }),
   closeEditor: () => set({ editor: { open: false, uid: null } }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
@@ -221,6 +232,11 @@ export const useApp = create<AppState>((set, get) => ({
     if (nav.view === "routines" || nav.view === "files" || nav.view === "skills") set({ view: nav.view, sidebarTab: nav.view });
   },
 }));
+
+/** The popover's list, as Settings last saved it (the two windows share localStorage). */
+export function readPopoverShows(): PopoverShows {
+  return readJson<PopoverShows>(POPOVER_KEY, "threads") === "guys" ? "guys" : "threads";
+}
 
 /**
  * Make a guy the one on screen (and the one to reopen at launch), keeping the

@@ -208,6 +208,42 @@ export function activityFor(roster: Roster, guy: Pick<Guy, "gatewayId" | "id">):
   return { running, unread, needsYou, latest, status };
 }
 
+/** A thread on the menu bar's "Active threads" list. */
+export interface ActiveThread {
+  guy: Guy;
+  row: SessionRow;
+  running: boolean;
+  needsYou: boolean;
+}
+
+/** How long a quiet thread stays on the menu bar's "Active threads" list. */
+export const ACTIVE_FOR_MS = 24 * 60 * 60_000;
+
+/**
+ * Every guy's threads worth a look: waiting on you, working, unread, or
+ * touched in the last day. Waiting first, then working, then newest.
+ */
+export function activeThreads(roster: Roster, now = Date.now()): ActiveThread[] {
+  const threads: ActiveThread[] = [];
+  for (const guy of allGuys(roster)) {
+    const g = gatewayOf(roster, guy.gatewayId);
+    if (!g) continue;
+    // An approval that doesn't name its thread goes on the guy's main chat.
+    const waiting = new Set(
+      g.approvals.map((a) => a.sessionKey ?? a.request?.sessionKey ?? `agent:${a.agentId ?? a.request?.agentId}:main`),
+    );
+    for (const row of sessionsFor(roster, guy)) {
+      if (row.archived || !["main", "chat", "channel"].includes(threadKind(row.key))) continue;
+      const running = g.running.includes(row.key);
+      const needsYou = waiting.has(row.key);
+      if (!running && !needsYou && !row.unread && now - (row.updatedAt ?? 0) > ACTIVE_FOR_MS) continue;
+      threads.push({ guy, row, running, needsYou });
+    }
+  }
+  const rank = (t: ActiveThread) => (t.needsYou ? 0 : t.running ? 1 : 2);
+  return threads.sort((a, b) => rank(a) - rank(b) || (b.row.updatedAt ?? 0) - (a.row.updatedAt ?? 0));
+}
+
 export function relativeTime(ms: number, now = Date.now()): string {
   const s = Math.round((now - ms) / 1000);
   if (s < 45) return "just now";

@@ -1,10 +1,10 @@
 import { Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { shortcut } from "../lib/platform";
+import { shortcut, TRAY } from "../lib/platform";
 import { followsSessions, needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
 import { core, errorMessage, isTauri, listen } from "../lib/ipc";
 import type { GatewayRoster, UpdateState } from "../lib/types";
-import { useApp } from "../stores/app";
+import { type PopoverShows, useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputClass, Modal, Segmented } from "../ui/kit";
@@ -12,6 +12,11 @@ import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix
 import { GuyVisibility } from "./GuyVisibility";
 import { Notifications } from "./Notifications";
 import { Phones } from "./Phones";
+
+const POPOVER_SHOWS: Array<{ value: PopoverShows; label: string }> = [
+  { value: "threads", label: "Active threads" },
+  { value: "guys", label: "Little guys" },
+];
 
 type Tab = "connections" | "agents" | "notifications" | "phones" | "general";
 
@@ -28,6 +33,8 @@ export function Settings() {
   const [tab, setTab] = useState<Tab>("connections");
   const roster = useApp((s) => s.roster);
   const setAddGatewayOpen = useApp((s) => s.setAddGatewayOpen);
+  const popoverShows = useApp((s) => s.popoverShows);
+  const setPopoverShows = useApp((s) => s.setPopoverShows);
   const [autostart, setAutostart] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -93,6 +100,11 @@ export function Settings() {
                     checked={Boolean(autostart)}
                     onChange={(e) => toggleAutostart(e.target.checked)}
                   />
+                </Row>
+                <Row label={`${TRAY[0].toUpperCase()}${TRAY.slice(1)} shows`}>
+                  <div className="w-[220px]">
+                    <Segmented value={popoverShows} options={POPOVER_SHOWS} onChange={setPopoverShows} />
+                  </div>
                 </Row>
                 <Row label="Open littleguys">
                   <kbd className="rounded bg-[var(--color-chip)] px-1.5 py-0.5 text-[11px]">{shortcut("L", true)}</kbd>
