@@ -16,7 +16,8 @@ interface ChatState {
   threads: Record<string, ThreadState>;
   open(id: string): Promise<void>;
   reload(id: string): Promise<void>;
-  send(id: string, text: string, attachments: Attachment[], cwd?: string): Promise<void>;
+  /** `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode). */
+  send(id: string, text: string, attachments: Attachment[], cwd?: string, worktree?: boolean): Promise<void>;
   abort(id: string): Promise<void>;
   handleEvent(gateway: string, name: string, payload: Record<string, unknown>): void;
   disconnect(gateway: string): void;
@@ -44,7 +45,7 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
         try { dispatch(key, { type: "history", request: ticket, epoch, history: await api.history(gw, sessionKey), now: Date.now() }); }
         catch (e) { dispatch(key, { type: "loadError", request: ticket, epoch, error: errorMessage(e) }); }
       },
-      async send(key, text, attachments, cwd) {
+      async send(key, text, attachments, cwd, worktree) {
         const id = crypto.randomUUID();
         const message: ChatMessage = { role: "user", content: [
           ...(text ? [{ type: "text" as const, text }] : []),
@@ -53,7 +54,7 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
         dispatch(key, { type: "send", pending: { idempotencyKey: id, message, status: "sending" } });
         const [gw, sessionKey] = splitThreadId(key);
         try {
-          const receipt = await api.send(gw, sessionKey, text, attachments, cwd, id);
+          const receipt = await api.send(gw, sessionKey, text, attachments, cwd, id, worktree);
           dispatch(key, { type: "receipt", id, receipt });
         } catch (e) {
           const code = e && typeof e === "object" && "code" in e ? String(e.code) : "";

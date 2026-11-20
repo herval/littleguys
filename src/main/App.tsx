@@ -7,6 +7,7 @@ import { recentGuys, useApp, useSelectedGuy } from "../stores/app";
 import { IconButton } from "../ui/kit";
 import { AddGateway } from "./AddGateway";
 import { BrowserPanel } from "./BrowserPanel";
+import { ChangesSide } from "./ChangesPanel";
 import { ChatView } from "./ChatView";
 import { Doctor } from "./Doctor";
 import { FilesView } from "./Files";
@@ -92,6 +93,7 @@ export function App() {
                     <div className="flex min-w-0 flex-1 flex-col">
                       <ChatView key={`${guy.gatewayId}|${selectedSessionKey}`} guy={guy} sessionKey={selectedSessionKey} />
                     </div>
+                    {caps.code && <ChangesSide key={`${guy.gatewayId}|${selectedSessionKey}`} guy={guy} sessionKey={selectedSessionKey} />}
                     {caps.browser && browserOpen && <BrowserPanel key={guy.uid} guy={guy} />}
                   </div>
                 ) : null)}

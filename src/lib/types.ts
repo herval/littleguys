@@ -43,6 +43,8 @@ export interface Capabilities {
   browser: boolean;
   /** Past sessions from every folder can be listed and resumed (`sessions.past` / `sessions.open`, ACP). */
   pastSessions: boolean;
+  /** Threads work in folders on this computer, so coder mode can read their repo (`code.*`, see src/lib/code.ts). */
+  code: boolean;
 }
 
 /** A session the agent can resume, from any folder (`sessions.past`). */
@@ -151,7 +153,25 @@ export interface Roster {
   notifications: Notifications;
   /** Guys with a photo picked in littleguys (`gatewayId/agentId`); it's already their `identity.avatarUrl`. */
   faces: string[];
+  /** Settings → Coder mode. */
+  coder: CoderPrefs;
   updatedAt: number;
+}
+
+/** Settings → Coder mode (docs/CODER-MODE.md). */
+export interface CoderPrefs {
+  /** The switch: off, coder mode shows nothing and runs no git. */
+  on: boolean;
+  /** "Start chats in": folders always offered when a thread picks where it works. */
+  folders: string[];
+  /** The Changes panel opens on its own beside a thread with changes. */
+  panel: boolean;
+  /** New threads can start in their own worktree. */
+  worktrees: boolean;
+  /** Pull requests and checks, through gh. */
+  prs: boolean;
+  /** The one-time "Turn on Coder mode" line was answered. */
+  offered: boolean;
 }
 
 /** A little guy = an OpenClaw agent on a particular gateway. */

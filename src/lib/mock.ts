@@ -7,7 +7,7 @@
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { bridgeMockInvoke } from "./bridge";
 import type { Backend } from "./ipc";
-import type { ChatMessage, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster } from "./types";
+import type { ChatMessage, CoderPrefs, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster } from "./types";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -35,7 +35,7 @@ function status(id: string, name: string, url: string, phase: ConnStatus["phase"
     credentialIssue: null,
     hello: { policy: { attachments: { maxBytes: 20 << 20, maxImageBytes: 6 << 20 } } },
     kind: "openclaw",
-    capabilities: { manageGuys: true, routines: true, routinesLocal: false, approvals: true, threadActions: true, newThreads: true, attachments: true, models: true, files: true, skills: true, commands: true, tools: true, plugins: true, browser: true, pastSessions: false },
+    capabilities: { manageGuys: true, routines: true, routinesLocal: false, approvals: true, threadActions: true, newThreads: true, attachments: true, models: true, files: true, skills: true, commands: true, tools: true, plugins: true, browser: true, pastSessions: false, code: false },
     ...extra,
   };
 }
@@ -123,7 +123,7 @@ claude.status = {
   ...claude.status,
   kind: "acp",
   mode: null,
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true },
 };
 
 // ?claudecode=1: Claude Code as its own kind (every session on this Mac is a thread) instead of an ACP agent.
@@ -155,7 +155,7 @@ claudeCode.status = {
   mode: "local",
   serverVersion: "2.1.296",
   hello: { approvals: true },
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true },
 };
 
 const codex = gateway("acp-codex", "Codex", "npx -y @agentclientprotocol/codex-acp", "connected", {
@@ -201,7 +201,7 @@ codexSessions.status = {
   kind: "codex",
   mode: "local",
   serverVersion: "0.166.0",
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true },
 };
 
 /** The face each bot gave a guy, from before a photo was picked for them. */
@@ -216,6 +216,8 @@ const roster: Roster = {
   hidden: ["hermes-1/research"],
   notifications: { everyone: { replies: true, routines: "all" }, guys: {} },
   faces: [],
+  // ?coder=1: coder mode on, with pull requests (see coderMock below).
+  coder: { on: params.has("coder"), folders: params.has("coder") ? ["/Users/you/dev/shop-api"] : [], panel: true, worktrees: true, prs: true, offered: params.has("coder") },
   updatedAt: now,
 };
 
@@ -657,6 +659,121 @@ async function mockFrame(): Promise<ArrayBuffer> {
   return out.buffer;
 }
 
+// ---- coder mode (?coder=1) ---------------------------------------------------------------
+
+type MockRepo = { dir: string; name: string; worktree?: string; branch: string; commits: number; dirty: number; ahead?: number; files: Array<[string, string, number, number]>; pr?: Record<string, unknown> };
+
+/** Where each mock thread's work stands. Fictional repos, branches and pull requests. */
+const coderRepos: Record<string, MockRepo> = {
+  [ccKey("c1")]: {
+    dir: "/Users/you/dev/shop-api",
+    name: "shop-api",
+    branch: "fix-checkout-rounding",
+    commits: 0,
+    dirty: 3,
+    files: [
+      ["src/checkout/totals.ts", "modified", 2, 1],
+      ["src/checkout/checkout.spec.ts", "modified", 9, 4],
+      ["notes/flaky-runs.md", "untracked", 6, 0],
+    ],
+  },
+  [ccKey("c2")]: {
+    dir: "/Users/you/dev/infra",
+    name: "infra",
+    branch: "terraform-providers",
+    commits: 2,
+    dirty: 0,
+    files: [
+      ["providers.tf", "modified", 6, 6],
+      [".terraform.lock.hcl", "modified", 12, 12],
+    ],
+    pr: { number: 31, url: "https://github.com/example/infra/pull/31", title: "Upgrade the Terraform providers", state: "open", draft: false, checks: "running", failing: [], review: "pending" },
+  },
+  [ccKey("c3")]: {
+    dir: "/Users/you/dev/billing-api",
+    name: "billing-api",
+    worktree: "/Users/you/dev/billing-api/.claude/worktrees/csv-export",
+    branch: "csv-export",
+    commits: 3,
+    dirty: 0,
+    files: [
+      ["src/export/csv.ts", "added", 48, 0],
+      ["src/export/routes.ts", "modified", 7, 1],
+      ["tests/export.test.ts", "added", 31, 0],
+    ],
+    pr: { number: 12, url: "https://github.com/example/billing-api/pull/12", title: "Add CSV export", state: "open", draft: false, checks: "failing", failing: ["test (ubuntu-latest)"], review: null },
+  },
+  [ccKey("c4")]: { dir: "/Users/you/dev/shop-api", name: "shop-api", branch: "main", commits: 0, dirty: 0, files: [] },
+  [cxKey("x1")]: {
+    dir: "/Users/you/dev/shop-api",
+    name: "shop-api",
+    worktree: "/Users/you/.codex/worktrees/a1f3/shop-api",
+    branch: "search-tokenizer",
+    commits: 1,
+    dirty: 2,
+    files: [
+      ["src/search/tokenize.ts", "modified", 22, 9],
+      ["src/search/index.ts", "modified", 3, 3],
+    ],
+  },
+  [cxKey("x2")]: { dir: "/Users/you/dev/infra", name: "infra", branch: "main", commits: 0, dirty: 3, files: [["build/legacy/make.sh", "deleted", 0, 40], ["build/legacy/env.sh", "deleted", 0, 12], ["README.md", "modified", 1, 3]] },
+  [cxKey("x3")]: { dir: "/Users/you/dev/billing-api", name: "billing-api", branch: "main", commits: 1, dirty: 0, ahead: 1, files: [["CHANGELOG.md", "modified", 14, 0]] },
+  "agent:bot:main": { dir: "/Users/you/dev/littleguy", name: "littleguy", branch: "main", commits: 2, dirty: 0, ahead: 2, files: [["src/Export.tsx", "modified", 3, 1], ["src/Export.test.tsx", "added", 18, 0]] },
+};
+
+function coderPatch(repo: MockRepo): string {
+  return repo.files
+    .filter(([, status]) => status !== "deleted")
+    .map(([path, status, added, removed]) => {
+      if (path === "src/checkout/totals.ts")
+        return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -12,7 +12,8 @@ export function totals(lines: Line[], rate: number) {\n   const subtotal = lines.reduce((sum, l) => sum + l.price * l.qty, 0);\n-  const tax = lines.reduce((sum, l) => sum + round(l.price * l.qty * rate), 0);\n+  // Round once, on the total: rounding each line drifts a cent on some carts.\n+  const tax = round(lines.reduce((sum, l) => sum + l.price * l.qty * rate, 0));\n   const shipping = subtotal > 50 ? 0 : 4.99;\n   return { subtotal, tax, shipping, total: round(subtotal + tax + shipping) };\n }\n`;
+      const created = status === "added" || status === "untracked";
+      const rows = Array.from({ length: Math.min(added, 8) }, (_, i) => `+${created ? "" : "  "}// ${path.split("/").pop()} line ${i + 1}`);
+      const gone = Array.from({ length: Math.min(removed, 4) }, (_, i) => `-  // old line ${i + 1}`);
+      return `diff --git a/${path} b/${path}\n--- ${created ? "/dev/null" : `a/${path}`}\n+++ b/${path}\n@@ -${created ? 0 : 1},${gone.length} +1,${rows.length} @@\n${[...gone, ...rows].join("\n")}\n`;
+    })
+    .join("");
+}
+
+function coderMock(gateway: string, method: string, p: Record<string, unknown>): unknown {
+  const prefs = roster.coder;
+  const repo = coderRepos[String(p.sessionKey)];
+  if (method === "code.pr") return prefs.on && prefs.prs ? { pr: repo?.pr ?? null } : { unavailable: "off" };
+  if (!prefs.on) return method === "code.status" ? { repo: null, why: "off" } : { files: [] };
+  if (!repo || !gateway) return method === "code.status" ? { repo: null, why: "not-a-repo" } : { files: [] };
+  const onMain = repo.branch === "main";
+  const base = { ref: "origin/main", sha: "4e1c09b" };
+  if (method === "code.status") {
+    return {
+      repo: { root: repo.worktree ?? repo.dir, name: repo.name, mainRoot: repo.worktree ? repo.dir : null, worktree: Boolean(repo.worktree) },
+      branch: repo.branch,
+      detached: false,
+      head: "9b2d77e",
+      base,
+      upstream: onMain ? "origin/main" : repo.pr ? `origin/${repo.branch}` : null,
+      ahead: repo.ahead ?? 0,
+      behind: 0,
+      commits: repo.commits,
+      dirty: repo.dirty,
+      changes: {
+        files: repo.files.length,
+        added: repo.files.reduce((n, f) => n + f[2], 0),
+        removed: repo.files.reduce((n, f) => n + f[3], 0),
+        untracked: repo.files.filter((f) => f[1] === "untracked").length,
+      },
+      conflicted: 0,
+    };
+  }
+  const only = typeof p.path === "string" ? p.path : null;
+  const files = repo.files.filter(([path]) => !only || path === only);
+  return {
+    base,
+    files: files.map(([path, status, added, removed]) => ({ path, status, added, removed, binary: false })),
+    patch: coderPatch({ ...repo, files }),
+    truncated: false,
+  };
+}
+
 function browserRequest(p: Record<string, unknown>): unknown {
   const body = (p.body ?? {}) as Record<string, unknown>;
   const route = `${p.method} ${p.path}`;
@@ -701,6 +818,10 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
       }
       return { key: past.key };
     }
+    case "code.status":
+    case "code.diff":
+    case "code.pr":
+      return coderMock(gateway, method, p);
     case "chat.send":
       return streamReply(gateway, String(p.sessionKey), String(p.message), typeof p.idempotencyKey === "string" ? p.idempotencyKey : undefined);
     case "sessions.list": {
@@ -897,6 +1018,14 @@ export const mockBackend: Backend = {
         emit("lg:roster", { ...roster, hidden: [...roster.hidden] });
         return undefined as T;
       }
+      case "set_coder_prefs":
+        roster.coder = args?.prefs as CoderPrefs;
+        emit("lg:roster", { ...roster });
+        return undefined as T;
+      case "in_git_repo":
+        return String(args?.folder).startsWith("/Users/you/dev/") as T;
+      case "coder_tools":
+        return { git: true, gh: true } as T;
       case "set_notifications": {
         const prefs = args?.prefs as NotifyPrefs;
         const { everyone, guys } = roster.notifications;

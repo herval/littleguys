@@ -7,14 +7,16 @@ import { core } from "../lib/ipc";
 import { doingNow, presentTense, rowActivity, toolKind } from "../lib/toolPhrases";
 import { firstUnread } from "../lib/transcript";
 import type { Guy, SessionRow } from "../lib/types";
+import { useChangesOpen, usePullRequest, useRepoStatus } from "../lib/code";
 import { useApp } from "../stores/app";
 import { useArchive, useArchivedRow } from "../stores/archive";
 import { threadId, useChat, waitingCount } from "../stores/chat";
 import { Avatar, GuyMark } from "../ui/Avatar";
 import { Button, IconButton, Spinner } from "../ui/kit";
 import { Approvals } from "./Approvals";
+import { CoderOffer, NextSteps, RepoButtons, RepoPlace } from "./ChangesPanel";
 import { Composer } from "./Composer";
-import { FolderPicker, threadFolder, tildify, usePendingFolder } from "./FolderPicker";
+import { FolderPicker, threadFolder, tildify, useCanWorktree, usePendingFolder } from "./FolderPicker";
 import { phaseLabel as livePhaseLabel, toItems, Transcript } from "./Transcript";
 
 /** How far down the pane an unread thread opens its "New" divider: under the day chip, with a bit of what you'd read. */
@@ -128,6 +130,9 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   const browsing = Boolean(activeTool && toolKind(activeTool.name) === "browse");
   // ACP and Claude Code threads can start in any folder on this Mac; it's fixed once they have messages.
   const [pendingFolder, setPendingFolder] = usePendingFolder(tid);
+  // Coder mode: start it in a new worktree of that folder.
+  const [worktree, setWorktree] = useState(false);
+  const canWorktree = useCanWorktree(guy, pendingFolder ?? threadFolder(guy, row));
   const folder = threadFolder(guy, row);
   const canPickFolder = useApp((s) => {
     const g = gatewayOf(s.roster, gw);
@@ -253,9 +258,11 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
       <Approvals guy={guy} sessionKey={sessionKey} />
       <div className="mx-auto w-full max-w-[900px]">
         {canPickFolder && unstarted && (pendingFolder ?? folder) && (
-          <FolderPicker guy={guy} value={(pendingFolder ?? folder) as string} onChange={setPendingFolder} />
+          <FolderPicker guy={guy} value={(pendingFolder ?? folder) as string} onChange={setPendingFolder} worktree={worktree} onWorktree={setWorktree} />
         )}
         {row?.archived && <ArchivedNote guy={guy} row={row} />}
+        {!running && !unstarted && <ComposerSteps guy={guy} sessionKey={sessionKey} />}
+        {!unstarted && <CoderOffer guy={guy} folder={folder} />}
         <Composer
           gatewayId={gw}
           agentId={guy.id}
@@ -271,14 +278,25 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             if (row?.archived) await useArchive.getState().unarchive(guy, row);
             setFollow(true);
             const cwd = canPickFolder && unstarted && pendingFolder !== folder ? (pendingFolder ?? undefined) : undefined;
-            await send(tid, text, attachments, cwd);
+            await send(tid, text, attachments, cwd, canPickFolder && unstarted && worktree && canWorktree);
             setPendingFolder(null);
+            setWorktree(false);
           }}
           onStop={() => abort(tid)}
         />
       </div>
     </div>
   );
+}
+
+/** Over the composer once a turn ends with something to do about it: commit, push, open a PR. */
+function ComposerSteps({ guy, sessionKey }: { guy: Guy; sessionKey: string }) {
+  const status = useRepoStatus(guy.gatewayId, sessionKey);
+  const pr = usePullRequest(guy.gatewayId, sessionKey);
+  // The Changes panel has its own.
+  const panelOpen = useChangesOpen(guy.gatewayId, sessionKey, status);
+  if (!status || panelOpen) return null;
+  return <NextSteps guy={guy} sessionKey={sessionKey} status={status} pr={pr} className="px-6 pb-1.5" />;
 }
 
 /** Over an archived thread's composer: writing in it brings it back. */
@@ -358,14 +376,21 @@ function ChatHeader({
             <span className="flex items-center gap-1 text-[var(--color-ink-3)]">
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-ok)]" /> online
               {showFolder && (
-                <span className="truncate" title={folder}>
-                  · in <span className="font-mono text-[11px]">{tildify(folder)}</span>
-                </span>
+                <RepoPlace
+                  gatewayId={guy.gatewayId}
+                  sessionKey={sessionKey}
+                  fallback={
+                    <span className="truncate" title={folder}>
+                      · in <span className="font-mono text-[11px]">{tildify(folder)}</span>
+                    </span>
+                  }
+                />
               )}
             </span>
           )}
         </p>
       </div>
+      {showFolder && <RepoButtons guy={guy} sessionKey={sessionKey} />}
       {hasBrowser && (
         <IconButton
           label={browserOpen ? "Hide browser" : `Show ${name}'s browser`}

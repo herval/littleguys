@@ -23,7 +23,7 @@ impl Activity {
             .collect();
         let mut with_faces: Vec<String> = faces.keys().cloned().collect();
         with_faces.sort();
-        Roster { gateways, hidden, notifications, faces: with_faces, updated_at: now_ms() }
+        Roster { gateways, hidden, notifications, faces: with_faces, coder: crate::code::prefs(), updated_at: now_ms() }
     }
 
     /// Streamed text arrives in bursts across every running thread; one roster

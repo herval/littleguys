@@ -8,6 +8,7 @@ import { type PopoverShows, useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputClass, Modal, Segmented } from "../ui/kit";
+import { CoderMode } from "./CoderMode";
 import { ClaudePluginFix, CredentialFix, needsClaudePlugin, PairingFix, ProxyFix } from "./GatewayFix";
 import { GuyVisibility } from "./GuyVisibility";
 import { Notifications } from "./Notifications";
@@ -18,13 +19,14 @@ const POPOVER_SHOWS: Array<{ value: PopoverShows; label: string }> = [
   { value: "guys", label: "Little guys" },
 ];
 
-type Tab = "connections" | "agents" | "notifications" | "phones" | "general";
+type Tab = "connections" | "agents" | "notifications" | "phones" | "coder" | "general";
 
 const TABS: Array<{ value: Tab; label: string }> = [
   { value: "connections", label: "Connections" },
   { value: "agents", label: "Agents" },
   { value: "notifications", label: "Notifications" },
   { value: "phones", label: "Phones" },
+  { value: "coder", label: "Coder mode" },
   { value: "general", label: "General" },
 ];
 
@@ -87,6 +89,8 @@ export function Settings() {
           {tab === "notifications" && <Notifications />}
 
           {tab === "phones" && <Phones />}
+
+          {tab === "coder" && <CoderMode />}
 
           {tab === "general" && (
             <section className="mt-5">

@@ -69,6 +69,23 @@ export function Composer({
     taRef.current?.focus();
   }, [draftKey]);
 
+  // Text handed over from elsewhere (a line quoted from the Changes panel, a next-step chip).
+  useEffect(() => {
+    const onCompose = (e: Event) => {
+      const { draftKey: key, text: add } = (e as CustomEvent<{ draftKey: string; text: string }>).detail;
+      if (key !== draftKey) return;
+      setText((t) => (t.trim() ? `${t.replace(/\s+$/, "")}\n\n${add}` : add));
+      requestAnimationFrame(() => {
+        const ta = taRef.current;
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      });
+    };
+    document.addEventListener("lg:compose", onCompose);
+    return () => document.removeEventListener("lg:compose", onCompose);
+  }, [draftKey]);
+
   // Auto-grow
   useEffect(() => {
     const ta = taRef.current;

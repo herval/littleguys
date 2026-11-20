@@ -2,6 +2,7 @@ mod activity;
 mod avatar_file;
 pub mod bridge;
 mod browser_stream;
+pub mod code;
 mod commands;
 mod doctor;
 pub mod gateway;
@@ -76,6 +77,9 @@ pub fn run() {
             commands::set_focused_session,
             commands::set_guy_hidden,
             commands::set_notifications,
+            commands::set_coder_prefs,
+            commands::coder_tools,
+            commands::in_git_repo,
             commands::set_guy_face,
             commands::set_workspace_avatar,
             commands::open_main,

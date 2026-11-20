@@ -145,6 +145,7 @@ fn capabilities(config: &ClaudeCodeConfig) -> Capabilities {
         plugins: true,
         browser: false,
         past_sessions: true,
+        code: true,
     }
 }
 
@@ -264,6 +265,8 @@ struct Draft {
     launching: bool,
     /// Your messages, for when it has.
     outbox: Vec<PendingMessage>,
+    /// Start it in a new worktree of this name (coder mode's "In a new worktree").
+    worktree: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2340,7 +2343,7 @@ fn sessions_create(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
     {
         let mut st = inner.st.lock().unwrap();
         let cwd = st.default_folder();
-        st.drafts.insert(key.clone(), Draft { cwd, created_at: now_ms(), launching: false, outbox: Vec::new() });
+        st.drafts.insert(key.clone(), Draft { cwd, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
     }
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "created" }));
     Ok(json!({ "ok": true, "key": key }))
@@ -2392,12 +2395,16 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
         Thread::Session(sid) => sid,
         Thread::Draft => {
             let cwd = params.get("cwd").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+            let worktree = params.get("worktree").and_then(Value::as_bool) == Some(true) && crate::code::worktrees_allowed();
             let start = {
                 let mut st = inner.st.lock().unwrap();
                 let fallback = st.default_folder();
-                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft { cwd: fallback, created_at: now_ms(), launching: false, outbox: Vec::new() });
+                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft { cwd: fallback, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
                 if let Some(cwd) = cwd.filter(|_| !d.launching) {
                     d.cwd = cwd;
+                }
+                if worktree && !d.launching && d.worktree.is_none() && crate::code::repo_root(Path::new(&d.cwd)).is_some() {
+                    d.worktree = Some(crate::code::worktree_name(&text));
                 }
                 d.outbox.push(PendingMessage::new(text, params));
                 !std::mem::replace(&mut d.launching, true)
@@ -2536,11 +2543,11 @@ async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, ru
 async fn start_draft(inner: Arc<Inner>, key: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
-        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone()))
+        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone(), d.worktree.clone()))
     };
-    let Some((batch, cwd)) = job else { return };
+    let Some((batch, cwd, worktree)) = job else { return };
     let text = delivery::text(&batch);
-    let result = launch(&inner, &key, &cwd, &text, None, true).await;
+    let result = launch(&inner, &key, &cwd, &text, None, worktree.as_deref(), true).await;
     let mut emits: Emits = vec![refresh(), delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
@@ -2567,9 +2574,10 @@ async fn start_draft(inner: Arc<Inner>, key: String) {
     inner.poke.store(true, Ordering::SeqCst);
 }
 
-/// `claude "<text>" --bg` in `cwd`: a new background session, shown as thread `key`.
-/// Resolves to its session id once Claude Code lists it.
-async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Option<&str>, keep: bool) -> Result<String, String> {
+/// `claude "<text>" --bg` in `cwd`: a new background session, shown as thread `key`, in a
+/// new worktree with `-w <worktree>`. Resolves to its session id once Claude Code lists it.
+#[allow(clippy::too_many_arguments)]
+async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Option<&str>, worktree: Option<&str>, keep: bool) -> Result<String, String> {
     let claude = inner.claude.lock().unwrap().clone().ok_or("Claude Code isn't installed")?;
     if !Path::new(cwd).is_dir() {
         return Err(format!("{cwd} isn't a folder on this {}.", crate::platform::COMPUTER));
@@ -2581,6 +2589,9 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
     add_attachments_dir(&mut cmd, &inner.data_dir);
     if let Some(name) = name {
         cmd.args(["--name", name]);
+    }
+    if let Some(worktree) = worktree {
+        cmd.args(["-w", worktree]);
     }
     let out = output(cmd, Duration::from_secs(60)).await?;
     let short = backgrounded_id(&out).ok_or_else(|| format!("Claude Code didn't say which session it started ({})", first_line(&out)))?;
@@ -2685,7 +2696,7 @@ impl RoutineRunner for Runner {
                     let text = |p: &str| job.as_ref().and_then(|j| j.pointer(p)).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
                     let cwd = text("/payload/cwd").unwrap_or_else(|| inner.st.lock().unwrap().default_folder());
                     let key = keys::routine_run(AGENT_ID, &job_id, &uuid::Uuid::new_v4().to_string());
-                    let sid = launch(&inner, &key, &cwd, &message, text("/name").as_deref(), false).await?;
+                    let sid = launch(&inner, &key, &cwd, &message, text("/name").as_deref(), None, false).await?;
                     (key, sid, Box::new(|s: &Session| s.turn > 0 && !s.busy))
                 }
                 Some(key) => {
@@ -3731,7 +3742,7 @@ mod tests {
     fn threads_resolve_to_drafts_and_the_sessions_littleguys_started() {
         let mut st = State::default();
         let draft = keys::thread(AGENT_ID, "d-1");
-        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: false, outbox: Vec::new() });
+        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: false, outbox: Vec::new(), worktree: None });
         assert!(matches!(st.thread(&draft), Some(Thread::Draft)));
         // The guy's main key is a draft until a session has it.
         let main = keys::main(AGENT_ID);
@@ -3756,7 +3767,7 @@ mod tests {
         // Reported before its id was known: matched by the short id `claude --bg` printed,
         // it takes over its draft (and what you wrote meanwhile).
         let draft = keys::thread(AGENT_ID, "d-2");
-        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: true, outbox: vec!["and then".into()] });
+        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: true, outbox: vec!["and then".into()], worktree: None });
         st.pending.insert("31009426".into(), draft.clone());
         let sid = "31009426-f4da-4001-87f2-0d40829fb8af";
         assert_eq!(st.session(sid).key(), draft);

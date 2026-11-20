@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { repoKey, useCoderOn, useRepoStatus, useRepoStatuses } from "../lib/code";
 import { COMPUTER, IS_MAC, shortcut } from "../lib/platform";
 import { photoToAvatar } from "../lib/avatarImage";
 import { sessions as sessionsApi } from "../lib/gateway";
@@ -54,6 +55,7 @@ import { useArchive } from "../stores/archive";
 import { threadId } from "../stores/chat";
 import { Avatar } from "../ui/Avatar";
 import { IconButton, inputClass, TypingDots } from "../ui/kit";
+import { RepoLine } from "./ChangesPanel";
 import { FileTree } from "./Files";
 import { GatewayBanner } from "./GatewayBanner";
 import { GuyList } from "./GuyList";
@@ -222,6 +224,31 @@ function GuyHeader({ guy }: { guy: Guy }) {
 type Group = { id: string; title: string; rows: SessionRow[]; collapsible: boolean };
 
 /**
+ * Coder mode: a guy's threads under the repo each works in (a worktree under the repo it came
+ * from), when they span more than one; the rest under "Other chats". Null to leave them be.
+ */
+function groupByRepo(gatewayId: string, rows: SessionRow[], statuses: ReturnType<typeof useRepoStatuses>): Group[] | null {
+  const repos = new Map<string, { name: string; rows: SessionRow[] }>();
+  const other: SessionRow[] = [];
+  for (const row of rows) {
+    const status = statuses[`${gatewayId}|${row.key}`]?.value;
+    if (!status) {
+      other.push(row);
+      continue;
+    }
+    const key = repoKey(status);
+    const group = repos.get(key) ?? { name: status.repo.name, rows: [] };
+    group.rows.push(row);
+    repos.set(key, group);
+  }
+  if (repos.size < 2) return null;
+  // Rows come newest first, so each repo sits where its newest thread would.
+  const groups: Group[] = [...repos.entries()].map(([key, g]) => ({ id: `repo:${key}`, title: g.name, rows: g.rows, collapsible: true }));
+  if (other.length) groups.push({ id: "repo:other", title: "Other chats", rows: other, collapsible: true });
+  return groups;
+}
+
+/**
  * A guy's face; click it (or drop an image on it) to give them a picture, for
  * any kind of guy (see lib/guyPicture.ts for where it's kept).
  */
@@ -299,6 +326,8 @@ function ThreadList({ guy }: { guy: Guy }) {
   const [showArchived, setShowArchived] = useState<boolean | null>(null);
 
   const withMain = hasMainChat(roster, guy.gatewayId);
+  const coderOn = useCoderOn(guy.gatewayId);
+  const repoStatuses = useRepoStatuses();
   const groups = useMemo<Group[]>(() => {
     const rows = sessionsFor(roster, guy).filter((r) => !r.archived);
     const byActivity = (a: SessionRow, b: SessionRow) =>
@@ -308,6 +337,8 @@ function ThreadList({ guy }: { guy: Guy }) {
       const all = rows.filter((r) => ["main", "chat", "channel"].includes(threadKind(r.key))).sort(byActivity);
       const draftKey = mainSessionKey(guy.id);
       const draft = selected === draftKey && !all.some((r) => r.key === draftKey) ? [{ key: draftKey, kind: "direct", updatedAt: null } as SessionRow] : [];
+      const byRepo = coderOn ? groupByRepo(guy.gatewayId, all, repoStatuses) : null;
+      if (byRepo) return draft.length ? [{ id: "threads", title: "", rows: draft, collapsible: false }, ...byRepo] : byRepo;
       return [{ id: "threads", title: "", rows: [...draft, ...all], collapsible: false }];
     }
     const main = rows.find((r) => threadKind(r.key) === "main");
@@ -315,7 +346,7 @@ function ThreadList({ guy }: { guy: Guy }) {
     const threads = rows.filter((r) => ["chat", "channel"].includes(threadKind(r.key))).sort(byActivity);
     const mainRow: SessionRow = main ?? ({ key: mainSessionKey(guy.id), kind: "direct", updatedAt: null } as SessionRow);
     return [{ id: "threads", title: "", rows: [mainRow, ...threads], collapsible: false }];
-  }, [roster, guy, withMain, selected]);
+  }, [roster, guy, withMain, selected, coderOn, repoStatuses]);
 
   const newThread = useCallback(async () => {
     if (creating || !caps.newThreads) return;
@@ -555,6 +586,8 @@ function ThreadRow({
   const [menu, setMenu] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const preview = cleanPreview(row.lastMessagePreview);
+  // Coder mode: a thread working in a repo says its branch where the preview sits (read again when a turn ends).
+  const repo = useRepoStatus(gatewayId, row.key, running);
   const title = threadTitle(row, mainChat);
   const channel = kind === "channel" ? channelName(row.key) : null;
   // The open thread reads itself, unless you marked it unread from here.
@@ -602,6 +635,8 @@ function ThreadRow({
           )}
           {needsYou ? (
             <p className={`truncate text-[12px] font-medium ${selected ? "text-white" : "text-[var(--color-bad)]"}`}>needs your OK</p>
+          ) : repo && !running ? (
+            <RepoLine gatewayId={gatewayId} sessionKey={row.key} status={repo} selected={selected} />
           ) : (
             <p className={`truncate text-[12px] ${selected ? "text-white/80" : "text-[var(--color-ink-3)]"}`}>
               {running

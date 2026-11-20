@@ -11,6 +11,9 @@ pub(super) struct Prefs {
     pub hidden_guys: Vec<String>,
     #[serde(default)]
     pub notifications: Notifications,
+    /// Settings → Coder mode (code.rs).
+    #[serde(default)]
+    pub coder: crate::code::CoderPrefs,
 }
 
 /// What notifies you: everyone's setting, and the guys (`gatewayId/agentId`) set otherwise.
@@ -128,6 +131,9 @@ impl Preferences {
     }
     pub fn set_notifications(&self, uid: Option<&str>, prefs: NotifyPrefs) -> anyhow::Result<()> {
         self.store.edit(|saved| saved.notifications.set(uid, prefs))
+    }
+    pub fn set_coder(&self, coder: crate::code::CoderPrefs) -> anyhow::Result<()> {
+        self.store.edit(|saved| saved.coder = coder)
     }
 }
 

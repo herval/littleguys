@@ -187,6 +187,25 @@ pub fn set_notifications(activity: State<'_, Arc<Activity>>, uid: Option<String>
     activity.set_notifications(uid.as_deref(), prefs).map_err(|e| e.to_string())
 }
 
+/// Settings → Coder mode (see code.rs); the roster carries them back to every window.
+#[tauri::command]
+pub fn set_coder_prefs(activity: State<'_, Arc<Activity>>, prefs: crate::code::CoderPrefs) -> Result<(), String> {
+    activity.set_coder_prefs(prefs).map_err(|e| e.to_string())
+}
+
+/// Whether a folder is in a git repo: a `.git` in it or above it, no git run (coder mode's
+/// one-time offer).
+#[tauri::command]
+pub fn in_git_repo(folder: String) -> bool {
+    crate::code::repo_root(std::path::Path::new(&folder)).is_some()
+}
+
+/// Whether git and the GitHub CLI are on this computer (Settings → Coder mode).
+#[tauri::command]
+pub async fn coder_tools() -> Value {
+    tauri::async_runtime::spawn_blocking(crate::code::tools).await.unwrap_or_default()
+}
+
 /// Give a guy (`gatewayId/agentId`) a photo for their face, or `None` to go back
 /// to the bot's; kept in littleguys only.
 #[tauri::command]

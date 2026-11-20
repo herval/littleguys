@@ -65,6 +65,8 @@ pub struct Roster {
     /// Guys with a photo picked in littleguys (`gatewayId/agentId`). It's kept on
     /// this Mac, never sent to the bot, and is already in their `identity.avatarUrl`.
     pub faces: Vec<String>,
+    /// Settings → Coder mode (code.rs).
+    pub coder: crate::code::CoderPrefs,
     pub updated_at: u64,
 }
 
@@ -86,6 +88,7 @@ impl Activity {
     pub fn new(app: AppHandle, tray: TrayAnimator) -> Arc<Self> {
         let data_dir = app.path().app_data_dir().ok();
         let preferences = Preferences::new(data_dir.as_deref());
+        crate::code::set_prefs(preferences.snapshot().coder);
         let avatars = AvatarStore::new(data_dir.as_deref());
         Arc::new(Self {
             app,
@@ -113,6 +116,14 @@ impl Activity {
 
     pub fn set_notifications(&self, uid: Option<&str>, prefs: NotifyPrefs) -> anyhow::Result<()> {
         self.preferences.set_notifications(uid, prefs)?;
+        self.publish();
+        Ok(())
+    }
+
+    /// Settings → Coder mode: saved, in force at once, and sent to every window and phone.
+    pub fn set_coder_prefs(&self, coder: crate::code::CoderPrefs) -> anyhow::Result<()> {
+        self.preferences.set_coder(coder.clone())?;
+        crate::code::set_prefs(coder);
         self.publish();
         Ok(())
     }

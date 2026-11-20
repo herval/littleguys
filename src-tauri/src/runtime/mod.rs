@@ -123,6 +123,9 @@ pub struct Capabilities {
     pub browser: bool,
     /// Past sessions from every folder can be listed and resumed (`sessions.past` / `sessions.open`).
     pub past_sessions: bool,
+    /// Threads work in folders on this machine, so coder mode can read their git repo
+    /// (`code.status|diff|pr`, see code.rs). The Coder mode settings decide whether it does.
+    pub code: bool,
 }
 
 impl Capabilities {
@@ -143,6 +146,7 @@ impl Capabilities {
             plugins: true,
             browser: false,
             past_sessions: false,
+            code: false,
         }
     }
 
@@ -222,11 +226,31 @@ impl Runtime {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if let Some(op) = method.strip_prefix("code.") {
+            return self.code_call(op, params).await;
+        }
         each!(self, c => c.call(method, params).await)
     }
 
     pub async fn call_with_timeout(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, RpcError> {
+        if let Some(op) = method.strip_prefix("code.") {
+            return self.code_call(op, params).await;
+        }
         each!(self, c => c.call_with_timeout(method, params, timeout).await)
+    }
+
+    /// `code.*`: the same for every runtime whose threads work in folders here, so it's
+    /// answered here, from the thread's folder, rather than by each adapter.
+    async fn code_call(&self, op: &str, params: Value) -> Result<Value, RpcError> {
+        if !self.status().capabilities.code {
+            return Err(unsupported(&format!("code.{op}")));
+        }
+        let key = params.get("sessionKey").and_then(Value::as_str).filter(|k| !k.is_empty());
+        if key.is_none() {
+            return Err(RpcError::new("INVALID_REQUEST", "code calls need a sessionKey"));
+        }
+        let folder = self.local_folder(key, None).await;
+        crate::code::call(op, folder, &params).await
     }
 
     pub fn as_openclaw(&self) -> Option<&GatewayClient> {

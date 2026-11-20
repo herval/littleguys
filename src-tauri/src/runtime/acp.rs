@@ -217,6 +217,7 @@ fn capabilities(attachments: bool, local: bool, past: bool) -> Capabilities {
         plugins: local,
         browser: false,
         past_sessions: past,
+        code: local,
     }
 }
 

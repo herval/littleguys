@@ -123,6 +123,7 @@ fn capabilities() -> Capabilities {
         plugins: false,
         browser: false,
         past_sessions: true,
+        code: true,
     }
 }
 
@@ -243,6 +244,8 @@ struct Draft {
     launching: bool,
     /// Your messages, for when it has.
     outbox: Vec<PendingMessage>,
+    /// Start it in a new worktree of this name (coder mode's "In a new worktree").
+    worktree: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1776,12 +1779,16 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
         Thread::Session(sid) => sid,
         Thread::Draft => {
             let cwd = params.get("cwd").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+            let worktree = params.get("worktree").and_then(Value::as_bool) == Some(true) && crate::code::worktrees_allowed();
             let start = {
                 let mut st = inner.st.lock().unwrap();
                 let fallback = st.default_folder();
-                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft { cwd: fallback, created_at: now_ms(), launching: false, outbox: Vec::new() });
+                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft { cwd: fallback, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
                 if let Some(cwd) = cwd.filter(|_| !d.launching) {
                     d.cwd = cwd;
+                }
+                if worktree && !d.launching && d.worktree.is_none() && crate::code::repo_root(Path::new(&d.cwd)).is_some() {
+                    d.worktree = Some(crate::code::worktree_name(&text));
                 }
                 d.outbox.push(PendingMessage::new(text, params));
                 !std::mem::replace(&mut d.launching, true)
@@ -2008,11 +2015,11 @@ async fn exec_resume(inner: &Arc<Inner>, sid: &str, text: &str, cwd: &str) -> Re
 async fn start_draft(inner: Arc<Inner>, key: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
-        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone()))
+        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone(), d.worktree.is_some()))
     };
-    let Some((batch, cwd)) = job else { return };
+    let Some((batch, cwd, worktree)) = job else { return };
     let text = delivery::text(&batch);
-    let result = launch(&inner, &key, &cwd, &text, true).await;
+    let result = launch(&inner, &key, &cwd, &text, worktree, true).await;
     let mut emits: Emits = vec![refresh(), delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
@@ -2072,11 +2079,13 @@ fn bind(inner: &Inner, sid: &str, key: &str, cwd: &str, keep: bool, path: Option
 }
 
 /// A new session in `cwd`, shown as thread `key`: on the shared server, else with `codex exec`.
-async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, keep: bool) -> Result<String, String> {
+/// With `worktree`, in a new worktree Codex makes, which only `codex exec --worktree` does
+/// (the app server has no such option), so that session runs outside the shared server.
+async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, worktree: bool, keep: bool) -> Result<String, String> {
     if !Path::new(cwd).is_dir() {
         return Err(format!("{cwd} isn't a folder on this {}.", crate::platform::COMPUTER));
     }
-    if let Some(srv) = server(inner) {
+    if let Some(srv) = server(inner).filter(|_| !worktree) {
         let mut params = json!({ "cwd": cwd });
         if let Some(model) = &inner.model {
             params["model"] = json!(model);
@@ -2094,6 +2103,9 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, keep: bool
         }
     }
     let mut args: Vec<String> = ["exec", "--json", "--skip-git-repo-check"].iter().map(|a| a.to_string()).collect();
+    if worktree {
+        args.push("--worktree".to_string());
+    }
     if let Some(model) = &inner.model {
         args.extend(["-m".to_string(), model.clone()]);
     }
@@ -2132,7 +2144,7 @@ impl RoutineRunner for Runner {
                     let folder = job.as_ref().and_then(|j| j.pointer("/payload/cwd")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
                     let cwd = folder.unwrap_or_else(|| inner.st.lock().unwrap().default_folder());
                     let key = keys::routine_run(AGENT_ID, &job_id, &uuid::Uuid::new_v4().to_string());
-                    let sid = launch(&inner, &key, &cwd, &message, false).await?;
+                    let sid = launch(&inner, &key, &cwd, &message, false, false).await?;
                     (key, sid, Box::new(|s: &Session| s.turn > 0 && !s.busy))
                 }
                 Some(key) => {
@@ -2337,7 +2349,7 @@ fn sessions_create(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
     {
         let mut st = inner.st.lock().unwrap();
         let cwd = st.default_folder();
-        st.drafts.insert(key.clone(), Draft { cwd, created_at: now_ms(), launching: false, outbox: Vec::new() });
+        st.drafts.insert(key.clone(), Draft { cwd, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
     }
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "created" }));
     Ok(json!({ "ok": true, "key": key }))
@@ -3153,7 +3165,7 @@ mod tests {
         assert!(st.thread("agent:claude:dashboard:x").is_none());
         st.started.insert("s1".into(), Started { key: "agent:codex:dashboard:mine".into(), ..Default::default() });
         assert!(matches!(st.thread("agent:codex:dashboard:mine"), Some(Thread::Session(sid)) if sid == "s1"));
-        st.drafts.insert("agent:codex:dashboard:new".into(), Draft { cwd: String::new(), created_at: 0, launching: false, outbox: Vec::new() });
+        st.drafts.insert("agent:codex:dashboard:new".into(), Draft { cwd: String::new(), created_at: 0, launching: false, outbox: Vec::new(), worktree: None });
         assert!(matches!(st.thread("agent:codex:dashboard:new"), Some(Thread::Draft)));
     }
 
