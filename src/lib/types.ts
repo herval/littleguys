@@ -290,7 +290,7 @@ export interface ChatMessage {
   diffs?: ToolDiff[];
   /** On a question tool's result: each question → the answer given. */
   answers?: Record<string, string>;
-  __openclaw?: { id?: string; seq?: number; runId?: string; kind?: string };
+  __openclaw?: { clientSendId?: string; id?: string; seq?: number; runId?: string; kind?: string };
 }
 
 /**

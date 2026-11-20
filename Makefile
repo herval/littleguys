@@ -54,7 +54,8 @@ check: prune-cache ## Typecheck the UI and the Rust core
 	pnpm typecheck
 	cd src-tauri && cargo check
 
-test: prune-cache ## Run the cache-cleanup and Rust tests
+test: prune-cache ## Run frontend, cache-cleanup and Rust tests
+	pnpm test
 	python3 -B -m unittest discover -s scripts -p 'test_*.py'
 	cd src-tauri && cargo test
 

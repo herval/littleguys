@@ -12,7 +12,7 @@
 //! - `sessions.create {agentId, label?}` → `{ok:true, key}`
 //! - `sessions.patch {key, label?, pinned?, archived?, unread?}`, `sessions.delete {key}` (if `thread_actions`)
 //! - `chat.history {sessionKey, limit?}` → `{sessionKey, messages:[ChatMessage], hasMore:false}`
-//! - `chat.send {sessionKey, message, idempotencyKey, attachments?}` → `{runId, status:"started"}`
+//! - `chat.send {sessionKey, message, idempotencyKey, attachments?}` → `{runId, status:"started", clientSendId?, delivery?}`
 //! - `chat.abort {sessionKey, runId?}`
 //! - `exec.approval.list` → `{approvals:[…]}`; `exec.approval.resolve {id, decision: allow-once|allow-always|deny}`
 //! - `cron.list|add|update|remove|run|runs` (if `routines`) — same shapes as OpenClaw
@@ -48,7 +48,8 @@
 //!
 //! Events (through `Hooks::event(name, payload, frame)`):
 //! - `chat {sessionKey, runId, state: status|delta|final|aborted|error, phase?, message?, deltaText?, errorMessage?}`
-//! - `session.message {sessionKey, runId?, message}` — every transcript append (user, assistant, toolResult)
+//! - `chat.delivery {sessionKey, clientSendIds, status:delivered|unknown, text?, errorMessage?}` — local CLI handoff acknowledgement
+//! - `session.message {sessionKey, runId?, clientSendId?, message}` — every transcript append (user, assistant, toolResult)
 //! - `agent {sessionKey, runId, stream:"tool", data:{kind:"tool", phase:start|end, toolCallId, name, title?, status?, isError?}}`
 //! - `sessions.changed {sessionKey, agentId, phase: start|end|error}` (or `{reason}` for "refetch everything")
 //! - `exec.approval.requested {id, agentId, sessionKey, presentation:{commandText, warningText?, allowedDecisions}}`
@@ -60,6 +61,9 @@ pub mod claudecode;
 pub mod codex;
 pub mod hermes;
 pub mod scheduler;
+mod delivery;
+pub(crate) mod events;
+pub mod registry;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;

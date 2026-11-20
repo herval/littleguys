@@ -1,6 +1,7 @@
 // Typed wrappers for the gateway methods littleguys uses. Every call names the
 // gateway it goes to (`gw` = gateway id).
 import { gwCall } from "./ipc";
+import type { SendReceipt } from "./chatEvents";
 import type {
   AgentSummary,
   Attachment,
@@ -37,8 +38,8 @@ export const agents = {
       "agents.files.get",
       { agentId, name },
     ),
-  setFile: (gw: string, agentId: string, name: string, content: string, expectedHash?: string) =>
-    gwCall<{ ok: boolean }>(gw, "agents.files.set", { agentId, name, content, ...(expectedHash ? { expectedHash } : {}) }),
+  setFile: (gw: string, agentId: string, name: string, content: string, expectedHash?: string, expectedMissing?: boolean) =>
+    gwCall<{ ok: boolean }>(gw, "agents.files.set", { agentId, name, content, ...(expectedMissing ? { expectedMissing: true } : expectedHash ? { expectedHash } : {}) }),
 };
 
 export const sessions = {
@@ -93,14 +94,14 @@ export const chat = {
   history: (gw: string, sessionKey: string, limit = 200) =>
     gwCall<ChatHistory>(gw, "chat.history", { sessionKey, limit, maxChars: 40_000 }, 60_000),
   /** `cwd`: folder for a thread's first message (ACP agents). */
-  send: (gw: string, sessionKey: string, message: string, attachments: Attachment[] = [], cwd?: string) =>
-    gwCall<{ runId: string; status: string }>(
+  send: (gw: string, sessionKey: string, message: string, attachments: Attachment[] = [], cwd?: string, clientSendId = newIdempotencyKey()) =>
+    gwCall<SendReceipt>(
       gw,
       "chat.send",
       {
         sessionKey,
         message,
-        idempotencyKey: newIdempotencyKey(),
+        idempotencyKey: clientSendId,
         ...(cwd ? { cwd } : {}),
         ...(attachments.length
           ? {

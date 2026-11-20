@@ -25,6 +25,7 @@
 //! - Routines run through a `LocalScheduler`, each run a new session started the same way
 //!   (or a message to the thread it targets).
 
+use super::delivery::{self, PendingMessage};
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -241,7 +242,7 @@ struct Draft {
     /// Its session is being started.
     launching: bool,
     /// Your messages, for when it has.
-    outbox: Vec<String>,
+    outbox: Vec<PendingMessage>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -270,7 +271,7 @@ fn load_started(path: &Path) -> HashMap<String, Started> {
 
 /// Remembers `sid` as `thread` and saves; the oldest past the newest `STARTED_MAX` that
 /// aren't kept are forgotten.
-fn remember(path: &Path, started: &mut HashMap<String, Started>, sid: &str, thread: Started) {
+fn remember(path: &Path, started: &mut HashMap<String, Started>, sid: &str, thread: Started) -> Result<(), RpcError> {
     started.insert(sid.to_string(), thread);
     let runs = started.values().filter(|t| !t.keep).count();
     if runs > STARTED_MAX {
@@ -280,15 +281,12 @@ fn remember(path: &Path, started: &mut HashMap<String, Started>, sid: &str, thre
             started.remove(&sid);
         }
     }
-    save_started(path, started);
+    save_started(path, started)
 }
 
-fn save_started(path: &Path, started: &HashMap<String, Started>) {
-    if let Ok(bytes) = serde_json::to_vec_pretty(started) {
-        if let Err(e) = write_private(path, &bytes) {
-            log::warn!("[codex] couldn't save the threads littleguys keeps: {e}");
-        }
-    }
+fn save_started(path: &Path, started: &HashMap<String, Started>) -> Result<(), RpcError> {
+    let bytes = serde_json::to_vec_pretty(started).map_err(|e| RpcError::new("PERSISTENCE", e.to_string()))?;
+    write_private(path, &bytes).map_err(|e| RpcError::new("PERSISTENCE", format!("Couldn't save threads: {e}")))
 }
 
 #[derive(Default)]
@@ -334,7 +332,7 @@ struct Session {
     /// call id → tool name, for naming tool results.
     calls: HashMap<String, String>,
     /// Your messages waiting for the session.
-    outbox: Vec<String>,
+    outbox: Vec<PendingMessage>,
     delivering: bool,
     /// How many times the outbox was handed over (a routine waits for its message's turn).
     handed: u64,
@@ -408,7 +406,7 @@ impl Session {
             self.turn += 1;
             // At work again: whether it's archived is back to whether it's live.
             self.unsaved |= self.flags.archived.take().is_some();
-            emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "start" })));
+            emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": self.run_id(), "phase": "start" })));
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "status", "phase": "thinking" })));
         } else {
             self.assumed = None;
@@ -418,7 +416,7 @@ impl Session {
                 self.unsaved = true;
             }
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "final" })));
-            emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "end" })));
+            emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": self.run_id(), "phase": "end" })));
         }
         true
     }
@@ -699,7 +697,7 @@ async fn serve(inner: &Arc<Inner>) {
         settle_turns(inner);
         join_waiting(inner);
         release_joined(inner);
-        save_flags(inner);
+        if let Err(e) = save_flags(inner) { log::warn!("{e}"); }
         wait_or_wake(inner, TICK).await;
         if inner.stopped.load(Ordering::SeqCst) || inner.restart.load(Ordering::SeqCst) {
             break;
@@ -1785,20 +1783,20 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
                 if let Some(cwd) = cwd.filter(|_| !d.launching) {
                     d.cwd = cwd;
                 }
-                d.outbox.push(text);
+                d.outbox.push(PendingMessage::new(text, params));
                 !std::mem::replace(&mut d.launching, true)
             };
             if start {
                 let inner = inner.clone();
                 tauri::async_runtime::spawn(async move { start_draft(inner, key).await });
             }
-            return Ok(json!({ "runId": run_id, "status": "started" }));
+            return Ok(delivery::receipt(&run_id, params));
         }
     };
     let deliver_now = {
         let mut st = inner.st.lock().unwrap();
         let s = st.sessions.get_mut(&sid).filter(|s| s.tail.is_some() && !s.skip).ok_or_else(|| RpcError::new("NOT_FOUND", "littleguys lost track of this session."))?;
-        s.outbox.push(text);
+        s.outbox.push(PendingMessage::new(text, params));
         // You wrote to it: it stays in the list once it ends.
         if !s.kept {
             s.kept = true;
@@ -1810,7 +1808,7 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
         let inner = inner.clone();
         tauri::async_runtime::spawn(async move { deliver(inner, sid).await });
     }
-    Ok(json!({ "runId": run_id, "status": "started" }))
+    Ok(delivery::receipt(&run_id, params))
 }
 
 #[derive(Debug, PartialEq)]
@@ -1830,14 +1828,15 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
                 return;
             }
             s.handed += 1;
-            (std::mem::take(&mut s.outbox).join("\n\n"), s.busy, s.live, s.interrupted, s.cwd.clone(), s.key())
+            (std::mem::take(&mut s.outbox), s.busy, s.live, s.interrupted, s.cwd.clone(), s.key())
         };
-        let (text, busy, live, interrupted, cwd, key) = job;
+        let (batch, busy, live, interrupted, cwd, key) = job;
+        let text = delivery::text(&batch);
         let result = hand_over(&inner, &sid, &text, busy, live, &cwd).await;
         if let Err(e) = &result {
             log::warn!("[codex] couldn't reach {sid}: {e}");
         }
-        let mut emits: Emits = Vec::new();
+        let mut emits: Emits = vec![delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
         {
             let mut st = inner.st.lock().unwrap();
             if let Some(s) = st.sessions.get_mut(&sid) {
@@ -1869,29 +1868,20 @@ async fn hand_over(inner: &Arc<Inner>, sid: &str, text: &str, busy: bool, live: 
         Route::Exec => exec_resume(inner, sid, text, cwd).await.map(|()| Handed::Turn),
         Route::Turn => {
             let srv = srv.ok_or("lost the connection to Codex")?;
-            match start_turn(inner, &srv, sid, text).await {
-                Ok(()) => Ok(Handed::Turn),
-                // It's open somewhere the server can't reach: an active writer of its own.
-                Err(e) if can_queue => {
-                    log::debug!("[codex] no turn on the shared server for {sid}: {e}");
-                    queue(inner, sid, text).await.map(|()| Handed::Queued)
-                }
-                Err(e) => Err(e),
+            // Failure to attach is safe to route through the queue: no prompt was submitted.
+            // Once turn/start is sent, an error may mean its reply was lost. Never queue it again.
+            if let Err(e) = srv.call("thread/resume", json!({ "threadId": sid, "excludeTurns": true })).await {
+                return if can_queue { queue(inner, sid, text).await.map(|()| Handed::Queued) } else { Err(e) };
             }
+            inner.st.lock().unwrap().joined.insert(sid.to_string(), Instant::now());
+            srv.call("turn/start", json!({ "threadId": sid, "input": turn_input(text) })).await?;
+            Ok(Handed::Turn)
         }
     }
 }
 
 fn turn_input(text: &str) -> Value {
     json!([{ "type": "text", "text": text, "text_elements": [] }])
-}
-
-/// Joins the session on the shared server (which loads it if it ended) and starts a turn.
-async fn start_turn(inner: &Inner, srv: &Server, sid: &str, text: &str) -> Result<(), String> {
-    srv.call("thread/resume", json!({ "threadId": sid, "excludeTurns": true })).await?;
-    inner.st.lock().unwrap().joined.insert(sid.to_string(), Instant::now());
-    srv.call("turn/start", json!({ "threadId": sid, "input": turn_input(text) })).await?;
-    Ok(())
 }
 
 /// `codex queue --thread <id> --message <text> --resume`: safe however the session is
@@ -2018,11 +2008,12 @@ async fn exec_resume(inner: &Arc<Inner>, sid: &str, text: &str, cwd: &str) -> Re
 async fn start_draft(inner: Arc<Inner>, key: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
-        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox).join("\n\n"), d.cwd.clone()))
+        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone()))
     };
-    let Some((text, cwd)) = job else { return };
+    let Some((batch, cwd)) = job else { return };
+    let text = delivery::text(&batch);
     let result = launch(&inner, &key, &cwd, &text, true).await;
-    let mut emits: Emits = vec![refresh()];
+    let mut emits: Emits = vec![refresh(), delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
         match result {
@@ -2043,6 +2034,7 @@ async fn start_draft(inner: Arc<Inner>, key: String) {
                 log::warn!("[codex] couldn't start a session in {cwd}: {e}");
                 if let Some(d) = st.drafts.get_mut(&key) {
                     d.launching = false;
+                    emits.push(delivery::event(&key, &d.outbox, Some(&e)));
                     d.outbox.clear();
                 }
                 let run_id = uuid::Uuid::new_v4().to_string();
@@ -2061,8 +2053,9 @@ fn bind(inner: &Inner, sid: &str, key: &str, cwd: &str, keep: bool, path: Option
         let st = &mut *st;
         let known = st.started.remove(sid).unwrap_or_default();
         let thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep, ..known };
-        remember(&inner.started_path, &mut st.started, sid, thread);
+        if let Err(e) = remember(&inner.started_path, &mut st.started, sid, thread) { log::warn!("{e}"); }
         let s = st.session(sid);
+        s.unsaved = true;
         s.kept = keep;
         s.key = Some(key.to_string());
         s.tail = Some(Tail::default());
@@ -2276,7 +2269,7 @@ fn sessions_patch(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
             }
         }
     };
-    save_flags(inner);
+    save_flags(inner)?;
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "patch" }));
     Ok(row)
 }
@@ -2299,18 +2292,17 @@ fn sessions_delete(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
             }
         }
     }
-    save_flags(inner);
+    save_flags(inner)?;
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "deleted" }));
     Ok(json!({ "ok": true, "deleted": true, "key": key }))
 }
 
 /// Saves what changed on threads (your flags, a delete) with the threads littleguys keeps.
-fn save_flags(inner: &Inner) {
+fn save_flags(inner: &Inner) -> Result<(), RpcError> {
     let mut st = inner.st.lock().unwrap();
     let st = &mut *st;
     let mut changed = false;
     for s in st.sessions.values_mut().filter(|s| s.unsaved) {
-        s.unsaved = false;
         let cwd = (!s.cwd.is_empty()).then(|| s.cwd.clone());
         let thread = st.started.entry(s.id.clone()).or_insert_with(|| Started { key: s.key(), at: now_ms(), cwd, ..Default::default() });
         thread.flags = s.flags.clone();
@@ -2319,8 +2311,10 @@ fn save_flags(inner: &Inner) {
         changed = true;
     }
     if changed {
-        save_started(&inner.started_path, &st.started);
+        save_started(&inner.started_path, &st.started)?;
+        for s in st.sessions.values_mut() { s.unsaved = false; }
     }
+    Ok(())
 }
 
 /// The thread a call is about.
@@ -2452,7 +2446,7 @@ fn sessions_open(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
             Some(t) => Started { keep: true, hidden: false, ..t },
             None => Started { key: key.clone(), at, cwd, keep: true, ..Default::default() },
         };
-        remember(&inner.started_path, &mut st.started, &sid, thread);
+        remember(&inner.started_path, &mut st.started, &sid, thread)?;
         key
     };
     inner.wake.notify_one();
@@ -2603,6 +2597,29 @@ mod tests {
 
     fn convert(line: &Value) -> Vec<Value> {
         convert_line(line, &mut HashMap::new())
+    }
+
+    #[test]
+    fn failed_flag_save_stays_dirty_until_retry() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&root).unwrap();
+        let client = CodexClient::new("persist-test".into(), "test".into(), CodexConfig::default(), root.clone(), Hooks {
+            status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}),
+        });
+        std::fs::create_dir_all(&client.inner.started_path).unwrap();
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            let s = st.session("s1");
+            s.flags.label = Some("Keep this".into());
+            s.unsaved = true;
+        }
+        assert_eq!(save_flags(&client.inner).unwrap_err().code, "PERSISTENCE");
+        assert!(client.inner.st.lock().unwrap().sessions["s1"].unsaved);
+        std::fs::remove_dir(&client.inner.started_path).unwrap();
+        save_flags(&client.inner).unwrap();
+        assert!(!client.inner.st.lock().unwrap().sessions["s1"].unsaved);
+        assert_eq!(load_started(&client.inner.started_path)["s1"].flags.label.as_deref(), Some("Keep this"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3146,8 +3163,8 @@ mod tests {
         let path = dir.join("codex-threads-x.json");
         let mut started = HashMap::new();
         let flags = ThreadFlags { label: Some("Mine".into()), pinned: true, ..Default::default() };
-        remember(&path, &mut started, ID, Started { key: "agent:codex:dashboard:a".into(), at: 1, keep: true, flags, ..Default::default() });
-        remember(&path, &mut started, "old", Started { key: "agent:codex:dashboard:b".into(), at: 1, ..Default::default() });
+        remember(&path, &mut started, ID, Started { key: "agent:codex:dashboard:a".into(), at: 1, keep: true, flags, ..Default::default() }).unwrap();
+        remember(&path, &mut started, "old", Started { key: "agent:codex:dashboard:b".into(), at: 1, ..Default::default() }).unwrap();
         let loaded = load_started(&path);
         assert!(loaded[ID].keep);
         assert_eq!(loaded[ID].flags.label.as_deref(), Some("Mine"));

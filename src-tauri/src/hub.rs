@@ -23,7 +23,6 @@ pub struct Hub {
     store: GatewayStore,
     activity: Arc<Activity>,
     entries: Mutex<Vec<GatewayEntry>>,
-    clients: Mutex<Vec<Runtime>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,7 +48,6 @@ impl Hub {
             store,
             activity,
             entries: Mutex::new(entries),
-            clients: Mutex::new(Vec::new()),
         }))
     }
 
@@ -95,13 +93,14 @@ impl Hub {
 
     fn spawn(&self, entry: &GatewayEntry) {
         let name = self.display_name(entry);
+        let generation = self.activity.next_generation();
         let hooks = {
-            let (a, b, c) = (self.activity.clone(), self.activity.clone(), self.activity.clone());
+            let (a, b, c) = (Arc::downgrade(&self.activity), Arc::downgrade(&self.activity), Arc::downgrade(&self.activity));
             let (gid_b, gid_c) = (entry.id.clone(), entry.id.clone());
             Hooks {
-                status: Box::new(move |status| a.on_status(status)),
-                event: Box::new(move |name, payload, _frame| b.on_event(&gid_b, name, payload)),
-                connected: Box::new(move || c.on_connected(&gid_c)),
+                status: Box::new(move |status| { if let Some(a) = a.upgrade() { a.on_status(status, generation); } }),
+                event: Box::new(move |name, payload, _frame| { if let Some(b) = b.upgrade() { b.on_event(&gid_b, generation, name, payload); } }),
+                connected: Box::new(move || { if let Some(c) = c.upgrade() { c.on_connected(&gid_c, generation); } }),
             }
         };
         let credential = self.store.credential(&entry.id);
@@ -154,15 +153,14 @@ impl Hub {
                 hooks,
             )),
         };
-        self.activity.attach(client.clone(), name, entry.enabled);
+        self.activity.attach(generation, client.clone(), name, entry.enabled);
         if entry.enabled {
             client.start();
         }
-        self.clients.lock().unwrap().push(client);
     }
 
     pub fn client(&self, id: &str) -> Option<Runtime> {
-        self.clients.lock().unwrap().iter().find(|c| c.id() == id).cloned()
+        self.activity.client(id)
     }
 
     /// The `~/.openclaw` gateway (Doctor fixes this one).
@@ -171,11 +169,11 @@ impl Hub {
     }
 
     pub fn statuses(&self) -> Vec<ConnStatus> {
-        self.clients.lock().unwrap().iter().map(Runtime::status).collect()
+        self.activity.clients().iter().map(Runtime::status).collect()
     }
 
     pub fn reconnect(&self, id: Option<&str>) {
-        for client in self.clients.lock().unwrap().iter() {
+        for client in self.activity.clients().iter() {
             if id.is_none_or(|id| client.id() == id) {
                 client.reconnect_now();
             }
@@ -231,9 +229,11 @@ impl Hub {
             self.store.set_credential(&entry.id, credential.as_ref()).map_err(|e| e.to_string())?;
         }
         {
-            let mut entries = self.entries.lock().unwrap();
+            let mut saved = self.entries.lock().unwrap();
+            let mut entries = saved.clone();
             entries.push(entry.clone());
             self.store.save(&entries).map_err(|e| e.to_string())?;
+            *saved = entries;
         }
         self.spawn(&entry);
         Ok(entry)
@@ -328,9 +328,11 @@ impl Hub {
             self.store.set_credential(&entry.id, credential.as_ref()).map_err(|e| e.to_string())?;
         }
         {
-            let mut entries = self.entries.lock().unwrap();
+            let mut saved = self.entries.lock().unwrap();
+            let mut entries = saved.clone();
             entries.push(entry.clone());
             self.store.save(&entries).map_err(|e| e.to_string())?;
+            *saved = entries;
         }
         self.spawn(&entry);
         Ok(entry)
@@ -338,7 +340,8 @@ impl Hub {
 
     pub fn update(&self, id: &str, name: Option<String>, enabled: Option<bool>) -> Result<(), String> {
         let entry = {
-            let mut entries = self.entries.lock().unwrap();
+            let mut saved = self.entries.lock().unwrap();
+            let mut entries = saved.clone();
             let entry = entries.iter_mut().find(|e| e.id == id).ok_or("unknown gateway")?;
             if let Some(name) = &name {
                 entry.name = name.trim().to_string();
@@ -348,6 +351,7 @@ impl Hub {
             }
             let entry = entry.clone();
             self.store.save(&entries).map_err(|e| e.to_string())?;
+            *saved = entries;
             entry
         };
         let display = self.display_name(&entry);
@@ -360,7 +364,6 @@ impl Hub {
                 Some(true) => {
                     // A stopped client can't be restarted; replace it.
                     client.stop();
-                    self.clients.lock().unwrap().retain(|c| c.id() != id);
                     self.activity.detach(id);
                     self.spawn(&entry);
                 }
@@ -374,16 +377,17 @@ impl Hub {
     /// Change a Claude Code connection's settings; it reconnects with them.
     pub fn configure_claude(&self, id: &str, claude: ClaudeCodeConfig) -> Result<(), String> {
         let entry = {
-            let mut entries = self.entries.lock().unwrap();
+            let mut saved = self.entries.lock().unwrap();
+            let mut entries = saved.clone();
             let entry = entries.iter_mut().find(|e| e.id == id && e.kind == RuntimeKind::Claudecode).ok_or("unknown Claude Code connection")?;
             entry.claude = Some(claude);
             let entry = entry.clone();
             self.store.save(&entries).map_err(|e| e.to_string())?;
+            *saved = entries;
             entry
         };
         if let Some(client) = self.client(id) {
             client.stop();
-            self.clients.lock().unwrap().retain(|c| c.id() != id);
             self.activity.detach(id);
             self.spawn(&entry);
         }
@@ -394,10 +398,12 @@ impl Hub {
     /// routines carry on.
     pub fn configure_codex(&self, id: &str, codex: CodexConfig) -> Result<(), String> {
         {
-            let mut entries = self.entries.lock().unwrap();
+            let mut saved = self.entries.lock().unwrap();
+            let mut entries = saved.clone();
             let entry = entries.iter_mut().find(|e| e.id == id && e.kind == RuntimeKind::Codex).ok_or("unknown Codex connection")?;
             entry.codex = Some(codex.clone());
             self.store.save(&entries).map_err(|e| e.to_string())?;
+            *saved = entries;
         }
         if let Some(Runtime::Codex(client)) = self.client(id) {
             client.set_approvals(codex.approvals);
@@ -408,7 +414,7 @@ impl Hub {
     /// Installs the littleguys plugin in Claude Code, then reconnects Claude Code.
     pub async fn install_claude_plugin(&self) -> Result<(), String> {
         crate::runtime::claudecode::install_plugin(&self.data_dir).await?;
-        for client in self.clients.lock().unwrap().iter() {
+        for client in self.activity.clients().iter() {
             if matches!(client, Runtime::ClaudeCode(_)) {
                 client.reconnect_now();
             }
@@ -420,6 +426,13 @@ impl Hub {
         if id == OPENCLAW_GATEWAY_ID {
             return Err("Your OpenClaw config's gateway can be turned off, but not removed.".into());
         }
+        {
+            let mut saved = self.entries.lock().unwrap();
+            let mut entries = saved.clone();
+            entries.retain(|e| e.id != id);
+            self.store.save(&entries).map_err(|e| e.to_string())?;
+            *saved = entries;
+        }
         if let Some(client) = self.client(id) {
             client.stop();
             // Without this bot, Settings has no switch left for it.
@@ -429,12 +442,7 @@ impl Hub {
                 }
             }
         }
-        self.clients.lock().unwrap().retain(|c| c.id() != id);
-        {
-            let mut entries = self.entries.lock().unwrap();
-            entries.retain(|e| e.id != id);
-            self.store.save(&entries).map_err(|e| e.to_string())?;
-        }
+
         let _ = self.store.set_credential(id, None);
         self.activity.detach(id);
         Ok(())

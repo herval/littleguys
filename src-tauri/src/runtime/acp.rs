@@ -1589,8 +1589,12 @@ impl Inner {
         let known = |m: &SessionMeta| {
             m.session_id.as_deref() == Some(sid) || m.aliases.iter().any(|a| a == sid) || implied_session_id(&m.key).as_deref() == Some(sid)
         };
-        if let Some(meta) = self.store.lock().unwrap().index.sessions.iter().find(|m| known(m)) {
-            return Ok(json!({ "key": meta.key }));
+        {
+            let mut store = self.store.lock().unwrap();
+            if let Some(key) = store.index.sessions.iter().find(|m| known(m)).map(|m| m.key.clone()) {
+                store.save_checked()?;
+                return Ok(json!({ "key": key }));
+            }
         }
         let cwd = match param_str(params, &["cwd"]).map(str::trim).filter(|c| !c.is_empty()) {
             Some(c) => Some(
@@ -1614,7 +1618,7 @@ impl Inner {
                 updated_at: updated,
                 ..Default::default()
             });
-            store.save();
+            store.save_checked()?;
         }
         Ok(json!({ "key": key }))
     }
@@ -1679,7 +1683,7 @@ impl Inner {
                     updated_at: now,
                     ..Default::default()
                 });
-                store.save();
+                store.save_checked()?;
             }
             inner.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "created" }));
             Ok(json!({ "ok": true, "key": key, "sessionId": sid }))
@@ -1696,22 +1700,14 @@ impl Inner {
         let meta = store.get_mut(&key).ok_or_else(|| RpcError::new("NOT_FOUND", "no such thread"))?;
         meta.flags.patch(params);
         let row = session_row(meta, running, &cwd);
-        store.save();
+        store.save_checked()?;
         Ok(row)
     }
 
     async fn sessions_delete(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
         let key = session_key(params)?;
+        let ids = self.store.lock().unwrap().remove_checked(&key)?;
         let _ = self.chat_abort(&json!({ "sessionKey": key }));
-        let meta = self.store.lock().unwrap().remove(&key);
-        let mut ids: Vec<String> = Vec::new();
-        if let Some(meta) = &meta {
-            ids.extend(meta.session_id.iter().cloned());
-            ids.extend(meta.aliases.iter().cloned());
-        }
-        ids.extend(implied_session_id(&key));
-        ids.sort();
-        ids.dedup();
         let agent = self.agent();
         if agent.session_cap("delete") {
             if let Ok(conn) = self.require_conn() {
@@ -1727,18 +1723,6 @@ impl Inner {
             for sid in &ids {
                 live.remove(sid);
             }
-        }
-        {
-            let mut store = self.store.lock().unwrap();
-            store.delete_transcript(&key);
-            for sid in ids {
-                if !store.index.hidden.contains(&sid) {
-                    store.index.hidden.push(sid);
-                }
-            }
-            let excess = store.index.hidden.len().saturating_sub(MAX_HIDDEN);
-            store.index.hidden.drain(..excess);
-            store.save();
         }
         *self.list_cache.lock().unwrap() = None;
         Ok(json!({ "ok": true, "deleted": true, "key": key }))
@@ -2010,7 +1994,7 @@ impl Inner {
             None => None,
         };
         self.require_conn().map_err(|e| e.to_rpc())?;
-        let run_id = uuid::Uuid::new_v4().to_string();
+        let run_id = params.get("idempotencyKey").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let inner = self.clone();
         let (k, r) = (key.clone(), run_id.clone());
         tauri::async_runtime::spawn(async move {
@@ -2048,7 +2032,7 @@ impl Inner {
             key.clone(),
             Run { run_id: run_id.clone(), session_id: None, cancelled: false, builder: TurnBuilder::live(&key, &run_id) },
         );
-        self.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "start" }));
+        self.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": run_id, "phase": "start" }));
         self.emit_chat(&key, &run_id, json!({ "state": "status", "phase": "preparing_workspace" }));
 
         let live = match self.move_thread(&key, input.cwd.as_deref()).await {
@@ -2106,12 +2090,12 @@ impl Inner {
         match outcome {
             Ok(stop) if stop == "cancelled" => {
                 self.emit_chat(&key, &run_id, json!({ "state": "aborted", "stopReason": stop }));
-                self.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "end" }));
+                self.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": run_id, "phase": "end" }));
                 Err("The run was stopped.".into())
             }
             Ok(stop) => {
                 self.emit_chat(&key, &run_id, json!({ "state": "final", "stopReason": stop, "message": last_assistant }));
-                self.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "end" }));
+                self.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": run_id, "phase": "end" }));
                 Ok(TurnResult { final_text })
             }
             Err(e) => {
@@ -2123,7 +2107,7 @@ impl Inner {
                 };
                 log::info!("[acp {}] turn on {key} failed: {e}", self.id);
                 self.emit_chat(&key, &run_id, json!({ "state": "error", "errorMessage": message }));
-                self.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "error" }));
+                self.emit("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": run_id, "phase": "error" }));
                 Err(message)
             }
         }
@@ -3828,7 +3812,7 @@ struct SessionMeta {
     flags: ThreadFlags,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Index {
     #[serde(default)]
@@ -3854,16 +3838,15 @@ impl Store {
         Self { dir, index }
     }
 
-    fn save(&mut self) {
+    fn save_checked(&mut self) -> Result<(), RpcError> {
         self.index.version = 1;
-        match serde_json::to_vec_pretty(&self.index) {
-            Ok(bytes) => {
-                if let Err(e) = write_private(&self.dir.join("index.json"), &bytes) {
-                    log::warn!("could not save ACP thread index: {e}");
-                }
-            }
-            Err(e) => log::warn!("could not encode ACP thread index: {e}"),
-        }
+        let bytes = serde_json::to_vec_pretty(&self.index).map_err(|e| RpcError::new("PERSISTENCE", e.to_string()))?;
+        write_private(&self.dir.join("index.json"), &bytes)
+            .map_err(|e| RpcError::new("PERSISTENCE", format!("Couldn't save threads: {e}")))
+    }
+
+    fn save(&mut self) {
+        if let Err(e) = self.save_checked() { log::warn!("{e}"); }
     }
 
     fn get(&self, key: &str) -> Option<&SessionMeta> {
@@ -3892,11 +3875,24 @@ impl Store {
         self.save();
     }
 
-    fn remove(&mut self, key: &str) -> Option<SessionMeta> {
-        let pos = self.index.sessions.iter().position(|m| m.key == key)?;
-        let meta = self.index.sessions.remove(pos);
-        self.save();
-        Some(meta)
+    fn remove_checked(&mut self, key: &str) -> Result<Vec<String>, RpcError> {
+        let before = self.index.clone();
+        let mut ids = Vec::new();
+        if let Some(meta) = self.get(key) {
+            ids.extend(meta.session_id.iter().cloned());
+            ids.extend(meta.aliases.iter().cloned());
+        }
+        ids.extend(implied_session_id(key));
+        ids.sort(); ids.dedup();
+        self.index.sessions.retain(|m| m.key != key);
+        for id in &ids {
+            if !self.index.hidden.contains(id) { self.index.hidden.push(id.clone()); }
+        }
+        let excess = self.index.hidden.len().saturating_sub(MAX_HIDDEN);
+        self.index.hidden.drain(..excess);
+        if let Err(error) = self.save_checked() { self.index = before; return Err(error); }
+        self.delete_transcript(key);
+        Ok(ids)
     }
 
     fn key_for_session(&self, sid: &str) -> Option<String> {
@@ -4114,6 +4110,38 @@ mod tests {
 
     fn chunk(kind: &str, text: &str) -> Value {
         json!({ "sessionUpdate": kind, "content": { "type": "text", "text": text } })
+    }
+
+
+    #[test]
+    fn failed_deletion_keeps_the_index_and_transcript() {
+        let root=std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(root.join("index.json")).unwrap();
+        let mut store=Store::open(root.clone());
+        let key="agent:a:dashboard:session";
+        store.index.sessions.push(SessionMeta{key:key.into(),session_id:Some("session".into()),..Default::default()});
+        let transcript=store.transcript_path(key);
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript,"keep me").unwrap();
+        assert!(store.remove_checked(key).is_err());
+        assert!(store.get(key).is_some());assert!(store.index.hidden.is_empty());
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(),"keep me");
+        std::fs::remove_dir(root.join("index.json")).unwrap();
+        assert_eq!(store.remove_checked(key).unwrap(),vec!["session"]);
+        assert!(store.get(key).is_none());assert!(!transcript.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn index_write_failure_is_returned_and_can_be_retried() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(root.join("index.json")).unwrap();
+        let mut store = Store::open(root.clone());
+        store.index.hidden.push("keep-hidden".into());
+        assert_eq!(store.save_checked().unwrap_err().code, "PERSISTENCE");
+        std::fs::remove_dir(root.join("index.json")).unwrap();
+        store.save_checked().unwrap();
+        assert_eq!(Store::open(root.clone()).index.hidden, vec!["keep-hidden"]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

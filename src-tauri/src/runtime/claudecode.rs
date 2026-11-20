@@ -31,6 +31,7 @@
 //! - Routines run through a `LocalScheduler`: each run starts a background session
 //!   the same way (or writes to the thread it targets) and waits for its turn to end.
 
+use super::delivery::{self, PendingMessage};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -262,7 +263,7 @@ struct Draft {
     /// Its session is being started.
     launching: bool,
     /// Your messages, for when it has.
-    outbox: Vec<String>,
+    outbox: Vec<PendingMessage>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -292,7 +293,7 @@ fn load_started(path: &Path) -> HashMap<String, Started> {
 
 /// Remembers `sid` as `thread` and saves; the oldest past the newest `STARTED_MAX` that
 /// aren't kept (routine runs, threads you've only read) are forgotten.
-fn remember(path: &Path, started: &mut HashMap<String, Started>, sid: &str, thread: Started) {
+fn remember(path: &Path, started: &mut HashMap<String, Started>, sid: &str, thread: Started) -> Result<(), RpcError> {
     started.insert(sid.to_string(), thread);
     let runs = started.values().filter(|t| !t.keep).count();
     if runs > STARTED_MAX {
@@ -302,15 +303,12 @@ fn remember(path: &Path, started: &mut HashMap<String, Started>, sid: &str, thre
             started.remove(&sid);
         }
     }
-    save_started(path, started);
+    save_started(path, started)
 }
 
-fn save_started(path: &Path, started: &HashMap<String, Started>) {
-    if let Ok(bytes) = serde_json::to_vec_pretty(started) {
-        if let Err(e) = write_private(path, &bytes) {
-            log::warn!("[claude] couldn't save the threads littleguys started: {e}");
-        }
-    }
+fn save_started(path: &Path, started: &HashMap<String, Started>) -> Result<(), RpcError> {
+    let bytes = serde_json::to_vec_pretty(started).map_err(|e| RpcError::new("PERSISTENCE", e.to_string()))?;
+    write_private(path, &bytes).map_err(|e| RpcError::new("PERSISTENCE", format!("Couldn't save threads: {e}")))
 }
 
 #[derive(Default)]
@@ -360,7 +358,7 @@ struct Session {
     /// by agent id.
     helpers: HashMap<String, Helper>,
     /// Your messages waiting for the session.
-    outbox: Vec<String>,
+    outbox: Vec<PendingMessage>,
     delivering: bool,
     /// How many times the outbox was handed over (a routine waits for its message's turn).
     handed: u64,
@@ -376,7 +374,7 @@ impl Session {
     }
 
     /// The messages waiting for it, handed over.
-    fn take_outbox(&mut self) -> Vec<String> {
+    fn take_outbox(&mut self) -> Vec<PendingMessage> {
         self.handed += 1;
         std::mem::take(&mut self.outbox)
     }
@@ -448,7 +446,7 @@ impl Session {
             self.waiting_for = None;
             // At work again: whether it's archived is Claude Code's say once more.
             self.unsaved |= self.flags.archived.take().is_some();
-            emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "start" })));
+            emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": self.run_id(), "phase": "start" })));
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "status", "phase": "thinking" })));
         } else {
             self.steps.clear();
@@ -459,7 +457,7 @@ impl Session {
                 self.unsaved = true;
             }
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "final" })));
-            emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "phase": "end" })));
+            emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": self.run_id(), "phase": "end" })));
         }
         true
     }
@@ -876,7 +874,7 @@ async fn serve(inner: &Arc<Inner>, listener: HookListener) {
             deliver_due(inner);
         }
         follow_transcripts(inner).await;
-        save_flags(inner);
+        if let Err(e) = save_flags(inner) { log::warn!("{e}"); }
         tick = tick.wrapping_add(1);
     }
     acceptor.abort();
@@ -979,8 +977,9 @@ async fn handle_conn(inner: &Arc<Inner>, mut stream: HookStream) -> std::io::Res
     if !secret_ok(&request) {
         return Ok(());
     }
+    let mut handoffs = Vec::new();
     let reply = match request.path.strip_prefix("/hook/") {
-        Some(event) => on_hook(inner, event, &request, &mut stream).await,
+        Some(event) => on_hook(inner, event, &request, &mut stream, &mut handoffs).await,
         None => {
             if request.path == crate::limits::CLAUDE_REPORT_PATH {
                 crate::limits::record_claude(&request.body);
@@ -988,7 +987,10 @@ async fn handle_conn(inner: &Arc<Inner>, mut stream: HookStream) -> std::io::Res
             String::new()
         }
     };
-    write_response(&mut stream, &reply).await
+    let result = write_response(&mut stream, &reply).await;
+    let error = result.as_ref().err().map(|e| format!("Hook response could not be delivered: {e}"));
+    flush(inner, handoffs.iter().map(|(key, batch): &(String, Vec<PendingMessage>)| delivery::event(key, batch, error.as_deref())).collect());
+    result
 }
 
 /// Resolves once the hook's end of the connection goes away (Claude Code gave up on it).
@@ -1003,7 +1005,7 @@ async fn peer_closed(stream: &mut HookStream) {
 }
 
 /// One hook event from a session; returns what the hook prints for Claude Code.
-async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mut HookStream) -> String {
+async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mut HookStream, handoffs: &mut Vec<(String, Vec<PendingMessage>)>) -> String {
     let Ok(input) = serde_json::from_slice::<Value>(&request.body) else { return String::new() };
     // Subagents' hooks belong to their parent's turn.
     if input.get("agent_id").and_then(Value::as_str).is_some_and(|a| !a.is_empty()) {
@@ -1061,7 +1063,9 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
                 s.set_busy(true, &mut emits);
                 // A terminal session that was idle: what you sent rides along with this prompt.
                 if !s.outbox.is_empty() && !s.background && !s.delivering {
-                    reply = handover(&s.take_outbox());
+                    let batch = s.take_outbox();
+                    reply = handover(&batch);
+                    handoffs.push((s.key(), batch));
                 }
             }
             "Notification" => match input.get("notification_type").and_then(Value::as_str) {
@@ -1078,7 +1082,9 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
                 s.waiting_for = None;
                 if !s.outbox.is_empty() && !s.delivering {
                     // Your message keeps the turn going.
-                    let reason = handover(&s.take_outbox());
+                    let batch = s.take_outbox();
+                    let reason = handover(&batch);
+                    handoffs.push((s.key(), batch));
                     reply = json!({ "decision": "block", "reason": reason }).to_string();
                 } else {
                     s.set_busy(false, &mut emits);
@@ -1110,8 +1116,8 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
 }
 
 /// The text a session gets for your queued messages.
-fn handover(outbox: &[String]) -> String {
-    format!("{MARK}\n\n{}", outbox.join("\n\n"))
+fn handover(outbox: &[PendingMessage]) -> String {
+    format!("{MARK}\n\n{}", delivery::text(outbox))
 }
 
 /// Whether an approval card can stand in for this prompt. Questions need their answers
@@ -2263,7 +2269,7 @@ fn sessions_patch(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
             }
         }
     };
-    save_flags(inner);
+    save_flags(inner)?;
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "patch" }));
     Ok(row)
 }
@@ -2290,18 +2296,17 @@ async fn sessions_delete(inner: &Arc<Inner>, params: &Value) -> Result<Value, Rp
             }
         }
     }
-    save_flags(inner);
+    save_flags(inner)?;
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "deleted" }));
     Ok(json!({ "ok": true, "deleted": true, "key": key }))
 }
 
 /// Saves what changed on threads (your flags, a delete) with the threads littleguys keeps.
-fn save_flags(inner: &Inner) {
+fn save_flags(inner: &Inner) -> Result<(), RpcError> {
     let mut st = inner.st.lock().unwrap();
     let st = &mut *st;
     let mut changed = false;
     for s in st.sessions.values_mut().filter(|s| s.unsaved) {
-        s.unsaved = false;
         let cwd = (!s.cwd.is_empty()).then(|| s.cwd.clone());
         let thread = st.started.entry(s.id.clone()).or_insert_with(|| Started { key: s.key(), at: now_ms(), cwd, ..Default::default() });
         thread.flags = s.flags.clone();
@@ -2309,8 +2314,10 @@ fn save_flags(inner: &Inner) {
         changed = true;
     }
     if changed {
-        save_started(&inner.started_path, &st.started);
+        save_started(&inner.started_path, &st.started)?;
+        for s in st.sessions.values_mut() { s.unsaved = false; }
     }
+    Ok(())
 }
 
 /// The thread a call is about.
@@ -2392,14 +2399,14 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
                 if let Some(cwd) = cwd.filter(|_| !d.launching) {
                     d.cwd = cwd;
                 }
-                d.outbox.push(text);
+                d.outbox.push(PendingMessage::new(text, params));
                 !std::mem::replace(&mut d.launching, true)
             };
             if start {
                 let inner = inner.clone();
                 tauri::async_runtime::spawn(async move { start_draft(inner, key).await });
             }
-            return Ok(json!({ "runId": run_id, "status": "started" }));
+            return Ok(delivery::receipt(&run_id, params));
         }
     };
     let mut deliver_now = false;
@@ -2413,7 +2420,7 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
                 "This session is open in a terminal that started before the littleguys plugin was installed. Write to it there.",
             ));
         }
-        s.outbox.push(text);
+        s.outbox.push(PendingMessage::new(text, params));
         if s.delivering || (s.busy && (s.hooked || s.background)) {
             // The Stop hook (or the delivery under way) takes it from here.
         } else if s.running && !s.background {
@@ -2431,7 +2438,7 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
         let inner = inner.clone();
         tauri::async_runtime::spawn(async move { deliver(inner, sid).await });
     }
-    Ok(json!({ "runId": run_id, "status": "started" }))
+    Ok(delivery::receipt(&run_id, params))
 }
 
 /// Sessions with messages waiting that no hook will take: idle background sessions
@@ -2458,16 +2465,17 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
         st.sessions.get_mut(&sid).map(|s| {
-            let text = s.take_outbox().join("\n\n");
+            let text = s.take_outbox();
             (text, s.short_id.clone(), s.running && s.background, s.cwd.clone(), s.key())
         })
     };
-    let Some((text, short_id, running_bg, cwd, key)) = job else { return };
+    let Some((batch, short_id, running_bg, cwd, key)) = job else { return };
+    let text = delivery::text(&batch);
     let result = resume(&inner, &sid, &text, short_id.as_deref(), running_bg, &cwd).await;
     if let Err(e) = &result {
         log::warn!("[claude] couldn't resume {sid}: {e}");
     }
-    let mut emits: Emits = Vec::new();
+    let mut emits: Emits = vec![delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
         if let Some(s) = st.sessions.get_mut(&sid) {
@@ -2528,11 +2536,12 @@ async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, ru
 async fn start_draft(inner: Arc<Inner>, key: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
-        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox).join("\n\n"), d.cwd.clone()))
+        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone()))
     };
-    let Some((text, cwd)) = job else { return };
+    let Some((batch, cwd)) = job else { return };
+    let text = delivery::text(&batch);
     let result = launch(&inner, &key, &cwd, &text, None, true).await;
-    let mut emits: Emits = vec![refresh()];
+    let mut emits: Emits = vec![refresh(), delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
         match result {
@@ -2546,6 +2555,7 @@ async fn start_draft(inner: Arc<Inner>, key: String) {
                 log::warn!("[claude] couldn't start a session in {cwd}: {e}");
                 if let Some(d) = st.drafts.get_mut(&key) {
                     d.launching = false;
+                    emits.push(delivery::event(&key, &d.outbox, Some(&e)));
                     d.outbox.clear();
                 }
                 let run_id = uuid::Uuid::new_v4().to_string();
@@ -2587,7 +2597,7 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
                 st.pending.remove(&short);
                 let known = st.started.remove(&sid).unwrap_or_default();
                 let thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep, ..known };
-                remember(&inner.started_path, &mut st.started, &sid, thread);
+                remember(&inner.started_path, &mut st.started, &sid, thread).map_err(|e| e.to_string())?;
                 let s = st.session(&sid);
                 s.kept = keep;
                 if s.key.as_deref() != Some(key) {
@@ -2758,8 +2768,8 @@ async fn chat_abort(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcErro
             s.set_busy(false, &mut emits);
         }
     }
-    flush(inner, emits);
     emit(inner, "chat", json!({ "sessionKey": key, "runId": run_id, "state": "aborted" }));
+    flush(inner, emits);
     Ok(json!({ "ok": true, "aborted": true, "runIds": [run_id] }))
 }
 
@@ -2815,7 +2825,7 @@ fn sessions_open(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
             Some(t) => Started { keep: true, hidden: false, ..t },
             None => Started { key: key.clone(), at, cwd: cwd.clone(), keep: true, ..Default::default() },
         };
-        remember(&inner.started_path, &mut st.started, &sid, thread);
+        remember(&inner.started_path, &mut st.started, &sid, thread)?;
         key
     };
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "opened" }));
@@ -3291,6 +3301,29 @@ mod tests {
     }
 
     #[test]
+    fn failed_flag_save_stays_dirty_until_retry() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&root).unwrap();
+        let client = ClaudeCodeClient::new("persist-test".into(), "test".into(), ClaudeCodeConfig::default(), root.clone(), Hooks {
+            status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}),
+        });
+        std::fs::create_dir_all(&client.inner.started_path).unwrap();
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            let s = st.session("s1");
+            s.flags.label = Some("Keep this".into());
+            s.unsaved = true;
+        }
+        assert_eq!(save_flags(&client.inner).unwrap_err().code, "PERSISTENCE");
+        assert!(client.inner.st.lock().unwrap().sessions["s1"].unsaved);
+        std::fs::remove_dir(&client.inner.started_path).unwrap();
+        save_flags(&client.inner).unwrap();
+        assert!(!client.inner.st.lock().unwrap().sessions["s1"].unsaved);
+        assert_eq!(load_started(&client.inner.started_path)["s1"].flags.label.as_deref(), Some("Keep this"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn slugs_match_claude_codes_project_folders() {
         assert_eq!(project_slug("/Users/me/dev/littleguy"), "-Users-me-dev-littleguy");
         assert_eq!(
@@ -3666,7 +3699,7 @@ mod tests {
             s.set_busy(true, &mut emits);
             s.set_busy(false, &mut emits);
         }
-        save_flags(&client.inner);
+        save_flags(&client.inner).unwrap();
 
         let again = open();
         let listed = again.call("sessions.list", json!({ "archived": "all" })).await.unwrap();
@@ -3727,7 +3760,7 @@ mod tests {
         st.pending.insert("31009426".into(), draft.clone());
         let sid = "31009426-f4da-4001-87f2-0d40829fb8af";
         assert_eq!(st.session(sid).key(), draft);
-        assert_eq!(st.session(sid).outbox, vec!["and then".to_string()]);
+        assert_eq!(delivery::text(&st.session(sid).outbox), "and then");
         assert!(st.pending.is_empty() && st.drafts.is_empty());
         assert!(matches!(st.thread(&draft), Some(Thread::Session(s)) if s == sid));
         assert_eq!(st.session("other").key(), keys::thread(AGENT_ID, "other"));
@@ -3761,7 +3794,7 @@ mod tests {
             ("new".to_string(), Started { key: "agent:claude:main".into(), at: now, ..Default::default() }),
             ("old".to_string(), Started { key: "agent:claude:dashboard:x".into(), at: now - STARTED_KEEP_MS - 1, ..Default::default() }),
         ]);
-        save_started(&path, &started);
+        save_started(&path, &started).unwrap();
         let loaded = load_started(&path);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded["new"].key, "agent:claude:main");
@@ -3997,7 +4030,7 @@ mod tests {
         let inner = client.inner.clone();
         let body = json!({ "session_id": "s1", "cwd": "/work/shop", "tool_name": tool, "tool_input": { "command": "cargo test" }, "permission_suggestions": rules() });
         let request = hook_request("PermissionRequest", body);
-        let reply = tokio::spawn(async move { on_hook(&inner, "PermissionRequest", &request, &mut ours).await });
+        let reply = tokio::spawn(async move { on_hook(&inner, "PermissionRequest", &request, &mut ours, &mut Vec::new()).await });
         tokio::task::yield_now().await;
         (reply, theirs)
     }
@@ -4125,7 +4158,7 @@ mod tests {
         let (reply, _hook) = card_up(&client).await;
         let (mut stop, _other) = hook_pair().await;
         let request = hook_request("Stop", json!({ "session_id": "s1" }));
-        on_hook(&client.inner, "Stop", &request, &mut stop).await;
+        on_hook(&client.inner, "Stop", &request, &mut stop, &mut Vec::new()).await;
         assert_eq!(reply.await.unwrap(), "");
         assert!(cards(&client).await.is_empty());
     }

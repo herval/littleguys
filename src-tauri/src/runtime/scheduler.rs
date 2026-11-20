@@ -87,7 +87,7 @@ pub struct RunEntry {
     pub duration_ms: u64,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Store {
     jobs: Vec<Job>,
     #[serde(default)]
@@ -101,6 +101,7 @@ pub struct LocalScheduler {
     store: Mutex<Store>,
     running: Mutex<HashSet<String>>,
     stopped: AtomicBool,
+    dirty: AtomicBool,
     runner: Mutex<Option<Arc<dyn RoutineRunner>>>,
     wake: tokio::sync::Notify,
 }
@@ -123,6 +124,7 @@ impl LocalScheduler {
             store: Mutex::new(store),
             running: Mutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
             runner: Mutex::new(None),
             wake: tokio::sync::Notify::new(),
         })
@@ -135,6 +137,10 @@ impl LocalScheduler {
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
             while !this.stopped.load(Ordering::SeqCst) {
+                if this.dirty.load(Ordering::SeqCst) {
+                    let store = this.store.lock().unwrap();
+                    if let Err(e) = this.persist(&store) { log::warn!("{e}"); }
+                }
                 let now = now_ms();
                 let due: Vec<String> = {
                     let store = this.store.lock().unwrap();
@@ -164,12 +170,11 @@ impl LocalScheduler {
         self.wake.notify_one();
     }
 
-    fn persist(&self, store: &Store) {
-        if let Ok(bytes) = serde_json::to_vec_pretty(store) {
-            if let Err(e) = write_private(&self.path, &bytes) {
-                log::warn!("could not save routines: {e}");
-            }
-        }
+    fn persist(&self, store: &Store) -> Result<(), RpcError> {
+        let result = serde_json::to_vec_pretty(store).map_err(anyhow::Error::from)
+            .and_then(|bytes| write_private(&self.path, &bytes));
+        self.dirty.store(result.is_err(), Ordering::SeqCst);
+        result.map_err(|e| RpcError::new("PERSISTENCE", format!("Couldn't save routines: {e}")))
     }
 
     fn spawn_run(self: Arc<Self>, job_id: String) {
@@ -189,7 +194,7 @@ impl LocalScheduler {
             let started = now_ms();
             let run_id = format!("local:{}:{started}", job.id);
             let result = runner.run_turn(job.agent_id.clone(), job.session_target.clone(), job.id.clone(), message).await;
-            let (status, summary, error, session_key) = match result {
+            let (mut status, summary, mut error, session_key) = match result {
                 Ok(o) => ("ok", o.summary, None, Some(o.session_key)),
                 Err(e) => ("error", None, Some(e), None),
             };
@@ -221,7 +226,10 @@ impl LocalScheduler {
                     }
                     j.clone()
                 });
-                self.persist(&store);
+                if let Err(e) = self.persist(&store) {
+                    status = "error";
+                    error = Some(format!("The run finished, but its history couldn't be saved: {e}"));
+                }
                 updated
             };
             self.running.lock().unwrap().remove(&job.id);
@@ -232,7 +240,7 @@ impl LocalScheduler {
                     "jobId": job.id,
                     "job": public_job(updated.as_ref().unwrap_or(&job)),
                     "status": status,
-                    "summary": summary.or(error),
+                    "summary": error.or(summary),
                     "sessionKey": session_key,
                 }),
             );
@@ -278,10 +286,12 @@ impl LocalScheduler {
                     last_run_error: None,
                 };
                 let out = public_job(&job);
-                let mut store = self.store.lock().unwrap();
+                let mut saved = self.store.lock().unwrap();
+                let mut store = saved.clone();
                 store.jobs.push(job);
-                self.persist(&store);
-                drop(store);
+                self.persist(&store)?;
+                *saved = store;
+                drop(saved);
                 self.wake.notify_one();
                 self.announce("added", &out);
                 Ok(out)
@@ -293,7 +303,8 @@ impl LocalScheduler {
                     validate_schedule(s)?;
                 }
                 let out = {
-                    let mut store = self.store.lock().unwrap();
+                    let mut saved = self.store.lock().unwrap();
+                    let mut store = saved.clone();
                     let job = store.jobs.iter_mut().find(|j| j.id == id).ok_or_else(not_found)?;
                     if let Some(v) = patch.get("name").and_then(Value::as_str) {
                         job.name = v.to_string();
@@ -313,7 +324,8 @@ impl LocalScheduler {
                     job.updated_at_ms = now_ms();
                     job.next_run_at_ms = if job.enabled { next_run(&job.schedule, now_ms(), job.last_run_at_ms) } else { None };
                     let out = public_job(job);
-                    self.persist(&store);
+                    self.persist(&store)?;
+                    *saved = store;
                     out
                 };
                 self.wake.notify_one();
@@ -322,15 +334,17 @@ impl LocalScheduler {
             }
             "cron.remove" => {
                 let id = id.ok_or_else(|| bad("id is required"))?;
-                let mut store = self.store.lock().unwrap();
+                let mut saved = self.store.lock().unwrap();
+                let mut store = saved.clone();
                 let before = store.jobs.len();
                 store.jobs.retain(|j| j.id != id);
                 store.runs.remove(&id);
                 if store.jobs.len() == before {
                     return Err(not_found());
                 }
-                self.persist(&store);
-                drop(store);
+                self.persist(&store)?;
+                *saved = store;
+                drop(saved);
                 self.announce("removed", &json!({ "id": id }));
                 Ok(json!({ "ok": true, "removed": true }))
             }
@@ -455,6 +469,19 @@ pub fn next_run(schedule: &Value, after_ms: u64, last_run_ms: Option<u64>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_add_does_not_commit_a_routine() {
+        let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::write(&dir, "not a directory").unwrap();
+        let scheduler = LocalScheduler::new(&dir, "test");
+        let result = scheduler.handle("cron.add", json!({
+            "agentId": "main", "schedule": {"kind": "every", "everyMs": 60000}
+        })).await;
+        assert_eq!(result.unwrap_err().code, "PERSISTENCE");
+        assert!(scheduler.store.lock().unwrap().jobs.is_empty());
+        std::fs::remove_file(dir).unwrap();
+    }
 
     #[test]
     fn cron_next_run_respects_timezone() {

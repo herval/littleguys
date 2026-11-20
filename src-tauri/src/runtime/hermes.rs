@@ -2374,7 +2374,7 @@ async fn local_chat_send(inner: &Arc<Inner>, params: &Value, timeout: Duration) 
             Slash::Output(output) => return Ok(slash_output(inner, &key, &message, &output)),
         }
     }
-    let run_id = new_run_id();
+    let run_id = params.get("idempotencyKey").and_then(Value::as_str).map(str::to_string).unwrap_or_else(new_run_id);
     inner.st.lock().unwrap().queued_runs.entry(sid.clone()).or_default().push_back(run_id.clone());
     let submit = |sid: String| rpc(inner, "prompt.submit", json!({ "session_id": sid, "text": prompt }), timeout);
     let res = match submit(sid.clone()).await {
@@ -2419,7 +2419,7 @@ async fn local_chat_send(inner: &Arc<Inner>, params: &Value, timeout: Duration) 
         row["lastMessagePreview"] = json!(truncate(&message, 120));
     }
     note_last_text(inner, &key, &message);
-    emit(inner, "session.message", json!({ "sessionKey": key, "runId": run_id, "message": user_message(&message, id, &run_id) }));
+    emit(inner, "session.message", json!({ "sessionKey": key, "runId": run_id, "clientSendId": params.get("idempotencyKey"), "message": user_message(&message, id, &run_id) }));
     Ok(json!({ "runId": run_id, "status": "started", "hermesStatus": status }))
 }
 
@@ -2568,7 +2568,7 @@ async fn api_chat_send(inner: &Arc<Inner>, params: &Value, timeout: Duration) ->
     inner.st.lock().unwrap().turns.insert(run_id.clone(), turn);
     note_last_text(inner, &key, &message);
     emit(inner, "session.message", json!({
-        "sessionKey": key, "runId": run_id,
+        "sessionKey": key, "runId": run_id, "clientSendId": params.get("idempotencyKey"),
         "message": user_message(&message, format!("live:{run_id}:user"), &run_id),
     }));
     flush(inner, started);

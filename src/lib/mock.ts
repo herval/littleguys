@@ -479,13 +479,15 @@ const discovered: DiscoveredGateway[] = [
   { name: "studio", url: "ws://studio.local:18789", via: "bonjour", host: "studio.local", addedAs: null },
 ];
 
-function streamReply(gateway: string, sessionKey: string, text: string) {
+function streamReply(gateway: string, sessionKey: string, text: string, clientSendId?: string) {
   const runId = crypto.randomUUID();
   const reply = text.startsWith("/")
     ? `⚙️ Ran \`${text.split(/\s/)[0]}\` (mock).`
     : `You said: “${text}”. On it! 🫡\n\nThis is the mock backend — run \`pnpm tauri dev\` to talk to a real gateway.`;
   const ev = (event: string, payload: object) => emit("gw:event", { gateway, event, payload: { sessionKey, ...payload } });
-  ev("session.message", { message: { role: "user", content: text, timestamp: Date.now(), ...oc(crypto.randomUUID()) } });
+  const user: ChatMessage = { role: "user", content: text, timestamp: Date.now(), ...oc(crypto.randomUUID(), { runId, clientSendId }) };
+  (history[`${gateway}|${sessionKey}`] ??= []).push(user);
+  ev("session.message", { runId, clientSendId, message: user });
   ev("chat", { runId, state: "status", phase: "starting_model" });
   let i = 0;
   const words = reply.split(" ");
@@ -495,10 +497,7 @@ function streamReply(gateway: string, sessionKey: string, text: string) {
     if (i >= words.length) {
       clearInterval(tick);
       const message = { role: "assistant", content: [{ type: "text", text: reply }], timestamp: Date.now(), ...oc(crypto.randomUUID(), { runId }) };
-      (history[`${gateway}|${sessionKey}`] ??= []).push(
-        { role: "user", content: text, timestamp: Date.now(), ...oc(crypto.randomUUID()) },
-        message as ChatMessage,
-      );
+      history[`${gateway}|${sessionKey}`].push(message as ChatMessage);
       ev("session.message", { runId, message });
       ev("chat", { runId, state: "final", message });
     }
@@ -703,7 +702,7 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
       return { key: past.key };
     }
     case "chat.send":
-      return streamReply(gateway, String(p.sessionKey), String(p.message));
+      return streamReply(gateway, String(p.sessionKey), String(p.message), typeof p.idempotencyKey === "string" ? p.idempotencyKey : undefined);
     case "sessions.list": {
       // Like the runtimes: archived threads only when asked for.
       const want = p.archived === "all" ? null : p.archived === true;

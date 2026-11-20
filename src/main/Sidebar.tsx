@@ -1,3 +1,4 @@
+import { reportError } from "../ui/reportError";
 import {
   AlarmClock,
   Archive,
@@ -645,7 +646,7 @@ function RenameInput({ gatewayId, row, onDone }: { gatewayId: string; row: Sessi
     const label = value.trim();
     onDone();
     if (label && label !== threadTitle(row)) {
-      await sessionsApi.patch(gatewayId, row.key, { label }).catch(() => {});
+      await sessionsApi.patch(gatewayId, row.key, { label }).catch(reportError);
       core.refreshRoster(gatewayId).catch(() => {});
     }
   };
@@ -694,7 +695,7 @@ function ThreadMenu({
 
   const act = async (fn: () => Promise<unknown>) => {
     onClose();
-    await fn().catch(() => {});
+    try { await fn(); } catch (error) { await reportError(error); return; }
     const refreshed = core.refreshRoster(gatewayId).catch(() => {});
     // Archived threads aren't in the roster: look at the archive again too.
     if (row.archived) refreshed.then(() => useArchive.getState().load({ uid: guyUid(gatewayId, agentId), gatewayId, id: agentId }));
@@ -714,7 +715,7 @@ function ThreadMenu({
         s.selectedUid === guyUid(gatewayId, agentId) &&
         (s.view === "routines" ? s.routineRunByGuy[s.selectedUid] : s.selectedSessionKey) === row.key;
       if (open) s.keepUnread(unread ? threadId(gatewayId, row.key) : null);
-      await sessionsApi.patch(gatewayId, row.key, { unread }).catch(() => open && s.keepUnread(null));
+      await sessionsApi.patch(gatewayId, row.key, { unread }).catch((error) => { if (open) s.keepUnread(null); throw error; });
     });
 
   return (

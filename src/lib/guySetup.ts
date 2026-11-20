@@ -2,6 +2,7 @@
 // defaults: a filled-in identity, an optional personality, and its own
 // managed browser profile. All of it uses OpenClaw's own files and config.
 import { agents, config } from "./gateway";
+import { readEditableFile, writeEditedFile } from "./fileEdit";
 
 const PERSONALITY_HEADING = "## Personality (from littleguys)";
 const BROWSER_HEADING = "## Browser (from littleguys)";
@@ -58,10 +59,10 @@ export async function readPersonality(gw: string, agentId: string): Promise<stri
 }
 
 export async function writePersonality(gw: string, agentId: string, personality: string): Promise<void> {
-  const res = await agents.getFile(gw, agentId, "SOUL.md").catch(() => null);
-  const current = res?.file?.content ?? "# SOUL.md - Who You Are\n";
+  const file = await readEditableFile(gw, agentId, "SOUL.md", "# SOUL.md - Who You Are\n");
+  const current = file.content;
   const next = upsertSection(current, PERSONALITY_HEADING, personality);
-  if (next !== current) await agents.setFile(gw, agentId, "SOUL.md", next, res?.file?.hash);
+  await writeEditedFile(gw, agentId, "SOUL.md", file, next);
 }
 
 export function browserProfileName(agentId: string): string {
@@ -74,6 +75,7 @@ export function browserProfileName(agentId: string): string {
  * named profile + an AGENTS.md instruction.
  */
 export async function giveOwnBrowser(gw: string, agentId: string, displayName: string): Promise<string> {
+  const file = await readEditableFile(gw, agentId, "AGENTS.md");
   const snapshot = await config.get(gw);
   const parsed = (snapshot.parsed ?? snapshot.config ?? {}) as {
     gateway?: { port?: number };
@@ -82,6 +84,7 @@ export async function giveOwnBrowser(gw: string, agentId: string, displayName: s
   const profile = browserProfileName(agentId);
   const existing = parsed.browser?.profiles ?? {};
   if (!existing[profile]) {
+    if (!snapshot.hash) throw new Error("Couldn't read browser configuration safely. Refresh and try again.");
     const base = parsed.gateway?.port ?? 18789;
     const used = new Set(Object.values(existing).map((p) => p.cdpPort).filter(Boolean));
     // Managed CDP ports live at gateway+11 … gateway+110; +11 is the default profile.
@@ -94,14 +97,13 @@ export async function giveOwnBrowser(gw: string, agentId: string, displayName: s
       `littleguys: browser profile for ${displayName}`,
     );
   }
-  const file = await agents.getFile(gw, agentId, "AGENTS.md").catch(() => null);
-  const current = file?.file?.content ?? "";
+  const current = file.content;
   const next = upsertSection(
     current,
     BROWSER_HEADING,
     `You have your own browser. Whenever you use the browser tool, always pass \`profile="${profile}"\` so you use your own window, cookies and logins — never another guy's.`,
   );
-  if (next !== current) await agents.setFile(gw, agentId, "AGENTS.md", next, file?.file?.hash);
+  await writeEditedFile(gw, agentId, "AGENTS.md", file, next);
   return profile;
 }
 

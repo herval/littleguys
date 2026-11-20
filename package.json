@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "cache:prune": "python3 scripts/prune_rust_cache.py",
     "tauri": "tauri",
-    "icons": "node scripts/gen-icons.mjs"
+    "icons": "node scripts/gen-icons.mjs",
+    "test": "node --import ./scripts/register-tests.mjs --test tests/*.test.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.13",

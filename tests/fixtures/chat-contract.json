@@ -1,0 +1,73 @@
+{
+  "receipt": {
+    "runId": "run-1",
+    "status": "started",
+    "clientSendId": "send-1",
+    "delivery": "queued"
+  },
+  "events": [
+    {
+      "event": "sessions.changed",
+      "payload": {
+        "sessionKey": "agent:a:main",
+        "runId": "run-1",
+        "phase": "start"
+      }
+    },
+    {
+      "event": "chat",
+      "payload": {
+        "sessionKey": "agent:a:main",
+        "runId": "run-1",
+        "state": "status",
+        "phase": "thinking"
+      }
+    },
+    {
+      "event": "session.message",
+      "payload": {
+        "sessionKey": "agent:a:main",
+        "runId": "run-1",
+        "clientSendId": "send-1",
+        "message": {
+          "role": "user",
+          "content": "hello",
+          "timestamp": 1,
+          "__openclaw": {
+            "id": "message-1",
+            "runId": "run-1",
+            "clientSendId": "send-1"
+          }
+        }
+      }
+    },
+    {
+      "event": "chat",
+      "payload": {
+        "sessionKey": "agent:a:main",
+        "runId": "run-1",
+        "state": "delta",
+        "message": {
+          "role": "assistant",
+          "content": "Hi"
+        }
+      }
+    },
+    {
+      "event": "chat",
+      "payload": {
+        "sessionKey": "agent:a:main",
+        "runId": "run-1",
+        "state": "final"
+      }
+    },
+    {
+      "event": "sessions.changed",
+      "payload": {
+        "sessionKey": "agent:a:main",
+        "runId": "run-1",
+        "phase": "end"
+      }
+    }
+  ]
+}

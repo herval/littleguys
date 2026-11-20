@@ -1,3 +1,4 @@
+import { reportError } from "../ui/reportError";
 import { Archive, ArrowDown, Globe, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { sessions as sessionsApi } from "../lib/gateway";
@@ -223,6 +224,11 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             toolStatus={thread?.toolStatus ?? {}}
             newFrom={newFrom}
           />
+          {thread?.pending.some((p) => p.status === "unknown") && (
+            <p className="mt-3 text-center text-[12px] text-[var(--color-ink-3)]">
+              A message's delivery is unconfirmed. Check the conversation before sending it again.
+            </p>
+          )}
           {thread?.sendError && (
             <p className="mt-3 text-center text-[12px] text-[var(--color-bad)]">{thread.sendError}</p>
           )}
@@ -286,7 +292,7 @@ function ArchivedNote({ guy, row }: { guy: Guy; row: SessionRow }) {
         disabled={busy}
         onClick={async () => {
           setBusy(true);
-          await useArchive.getState().unarchive(guy, row).catch(() => {});
+          await useArchive.getState().unarchive(guy, row).catch(reportError);
           setBusy(false);
         }}
         className="shrink-0 rounded-full px-2 py-0.5 font-medium text-[var(--color-accent-strong)] transition hover:bg-[var(--color-chip)] disabled:opacity-50"
