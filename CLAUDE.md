@@ -20,6 +20,7 @@ To cut one (vX.Y.Z):
 
 If it fails:
 - **"Signing and notarization credentials work" fails:** a secret is missing or stale. Ask herval to run `make release-secrets` and replace the one the error names. Claude can't set GitHub secrets, because auto mode blocks it.
+- **It fails with "A required agreement is missing or has expired" (HTTP 403):** the secrets are fine. Apple has updated its Program License Agreement. herval accepts it at developer.apple.com/account; only the Account Holder can. Notarization can take about 25 minutes to see the acceptance, so `gh run rerun <id>` every 10 minutes until the check passes. No draft exists yet at that point, so the tag stays where it is.
 - **It fails later:** the release stays a draft, which the updater and brew never see. Fix the cause, `gh release delete vX.Y.Z`, move the tag to the fix (`git push origin :refs/tags/vX.Y.Z`, then tag and push again).
 - **Never move the tag of a published release.** Ship the next patch version instead.
 
