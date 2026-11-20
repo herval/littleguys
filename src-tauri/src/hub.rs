@@ -444,6 +444,8 @@ impl Hub {
         }
 
         let _ = self.store.set_credential(id, None);
+        // Its message index is only a cache of transcripts that stay where they are.
+        crate::runtime::search::forget(&self.data_dir, id);
         self.activity.detach(id);
         Ok(())
     }

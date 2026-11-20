@@ -10,6 +10,7 @@ import type {
   CronJob,
   CronRunLogEntry,
   McpServer,
+  MessageHit,
   ModelChoice,
   PastSession,
   PluginEntry,
@@ -72,6 +73,13 @@ export const sessions = {
       includeDerivedTitles: true,
       includeLastMessage: true,
     }),
+  /**
+   * Messages matching `query`: in the threads `sessionKeys` names (OpenClaw, every word
+   * as a whole word), or in all of them (Claude Code, Codex and ACP, from littleguys'
+   * index, every word as the start of one). `indexing`: some aren't in yet.
+   */
+  search: (gw: string, agentId: string, sessionKeys: string[], query: string, limit = 10) =>
+    gwCall<{ results: MessageHit[]; indexing?: boolean }>(gw, "sessions.search", { query, agentId, sessionKeys, limit }),
   subscribeMessages: (gw: string, key: string) => gwCall<{ subscribed: boolean }>(gw, "sessions.messages.subscribe", { key }),
   /** Every session the agent can resume, from every folder, newest first (ACP). */
   past: (gw: string) => gwCall<{ sessions: PastSession[] }>(gw, "sessions.past", {}, 60_000),

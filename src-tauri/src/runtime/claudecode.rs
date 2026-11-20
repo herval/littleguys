@@ -57,6 +57,7 @@ use crate::openclaw::config::{Credential, GatewayMode};
 use crate::openclaw::runtime as cli;
 use crate::runtime::acp;
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
+use crate::runtime::search;
 use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
 
 const AGENT_ID: &str = "claude";
@@ -177,6 +178,8 @@ struct Inner {
     scheduler: Arc<LocalScheduler>,
     /// `<data_dir>/claude-threads-<id>.json`: [`State::started`].
     started_path: PathBuf,
+    /// Every transcript's messages, for `sessions.search`.
+    search: Arc<search::Index>,
 }
 
 #[derive(Default)]
@@ -535,6 +538,7 @@ impl ClaudeCodeClient {
         };
         let scheduler = LocalScheduler::new(&data_dir, &id);
         let started_path = data_dir.join(format!("claude-threads-{id}.json"));
+        let search = search::Index::built_apart(search::index_path(&data_dir, &id), Transcripts, "claudecode", String::new());
         let mut st = State { started: load_started(&started_path), ..Default::default() };
         // Threads littleguys started or opened show up again, however old.
         for sid in st.started.keys().cloned().collect::<Vec<_>>() {
@@ -557,6 +561,7 @@ impl ClaudeCodeClient {
                 st: Mutex::new(st),
                 scheduler,
                 started_path,
+                search,
             }),
         }
     }
@@ -574,6 +579,10 @@ impl ClaudeCodeClient {
             return;
         }
         self.inner.scheduler.start(Arc::new(Runner(Arc::downgrade(&self.inner))));
+        // (Tests run against the real ~/.claude: they don't index it.)
+        if !cfg!(test) {
+            self.inner.search.build_later(search::BUILD_DELAY);
+        }
         let inner = self.inner.clone();
         tauri::async_runtime::spawn(async move { run(inner).await });
     }
@@ -581,6 +590,7 @@ impl ClaudeCodeClient {
     /// Stop for good (bot removed or turned off).
     pub fn stop(&self) {
         self.inner.stopped.store(true, Ordering::SeqCst);
+        self.inner.search.stop();
         self.inner.scheduler.stop();
         self.inner.wake.notify_one();
     }
@@ -633,6 +643,7 @@ impl ClaudeCodeClient {
             "chat.abort" => chat_abort(inner, &params).await,
             "sessions.past" => sessions_past(inner).await,
             "sessions.open" => sessions_open(inner, &params),
+            "sessions.search" => sessions_search(inner, &params).await,
             // The folder of the thread you're on (`sessionKey`), else the one you last worked in.
             "agents.workspace.list" | "agents.workspace.get" => {
                 check_agent(&params)?;
@@ -2858,6 +2869,86 @@ async fn sessions_past(inner: &Arc<Inner>) -> Result<Value, RpcError> {
     Ok(json!({ "sessions": rows }))
 }
 
+/// Messages matching `query` in every session's transcript (not the ones you deleted), the
+/// best per thread. Sessions that aren't threads (older than the list goes back) come with
+/// what `sessions.open` needs to make them one.
+async fn sessions_search(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    let (query, limit) = search::search_params(params)?;
+    let hidden: HashSet<String> = {
+        let st = inner.st.lock().unwrap();
+        let deleted = st.started.iter().filter(|(_, t)| t.hidden).map(|(sid, _)| sid.clone());
+        deleted.chain(st.sessions.values().filter(|s| s.hidden).map(|s| s.id.clone())).collect()
+    };
+    let (hits, indexing) = inner.search.find(query, limit, hidden).await?;
+    let st = inner.st.lock().unwrap();
+    let results: Vec<Value> = hits
+        .iter()
+        .map(|h| {
+            let known = st.sessions.get(&h.thread);
+            let key = known
+                .map(Session::key)
+                .or_else(|| st.started.get(&h.thread).map(|t| t.key.clone()))
+                .unwrap_or_else(|| keys::thread(AGENT_ID, &h.thread));
+            let cwd = known.map(|s| s.cwd.clone()).filter(|c| !c.is_empty());
+            h.to_json(&key, None, known.and_then(Session::title), cwd)
+        })
+        .collect();
+    Ok(json!({ "results": results, "indexing": indexing }))
+}
+
+/// Claude Code's transcripts, for the message index: `projects/<folder>/<session id>.jsonl`
+/// (not their subagents').
+struct Transcripts;
+
+pub(super) fn search_transcripts() -> Box<dyn search::Transcripts> {
+    Box::new(Transcripts)
+}
+
+impl search::Transcripts for Transcripts {
+    fn list(&self) -> Vec<(PathBuf, String)> {
+        let mut out = Vec::new();
+        for dir in std::fs::read_dir(claude_home().join("projects")).into_iter().flatten().flatten() {
+            for file in std::fs::read_dir(dir.path()).into_iter().flatten().flatten() {
+                let path = file.path();
+                if path.extension().is_some_and(|e| e == "jsonl") {
+                    if let Some(sid) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) {
+                        out.push((path, sid));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Your messages, its replies and titles. (A quote inside a string is escaped, so these
+    /// only match the line's own fields.)
+    fn wanted(&self, raw: &[u8]) -> bool {
+        search::has_any(raw, &["\"type\":\"user\"", "\"type\":\"assistant\"", "\"type\":\"attachment\"", "\"type\":\"ai-title\""])
+    }
+
+    fn read(&self, line: &Value) -> search::Line {
+        if flag(line, "isSidechain") {
+            return search::Line::default();
+        }
+        let kind = line.get("type").and_then(Value::as_str).unwrap_or_default();
+        // What you typed is in a user line's text (the rest of them are tool results).
+        let worth = match kind {
+            "assistant" | "attachment" => true,
+            "user" => match line.pointer("/message/content") {
+                Some(Value::Array(blocks)) => blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("text")),
+                _ => true,
+            },
+            _ => false,
+        };
+        search::Line {
+            messages: if worth { search::words_of(&convert_line(line, &mut HashMap::new())) } else { Vec::new() },
+            title: if kind == "ai-title" { line_meta(line).ai_title } else { None },
+            cwd: line.get("cwd").and_then(Value::as_str).map(str::to_string),
+            skip: false,
+        }
+    }
+}
+
 /// A past session, as a thread that stays in the list.
 fn sessions_open(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
     let sid = params
@@ -3385,6 +3476,35 @@ mod tests {
         assert!(!client.inner.st.lock().unwrap().sessions["s1"].unsaved);
         assert_eq!(load_started(&client.inner.started_path)["s1"].flags.label.as_deref(), Some("Keep this"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_reads_what_was_said() {
+        let read = |line: Value| search::Transcripts::read(&Transcripts, &line);
+        let typed = read(json!({
+            "type": "user", "uuid": "u1", "timestamp": "2026-11-01T10:00:00.000Z", "cwd": "/w/app",
+            "message": { "role": "user", "content": "<system-reminder>be nice</system-reminder>Fix the login" },
+        }));
+        assert_eq!(typed.messages.len(), 1);
+        assert_eq!((typed.messages[0].id.as_str(), typed.messages[0].text.as_str()), ("u1", "Fix the login"));
+        assert_eq!((typed.messages[0].role, typed.cwd.as_deref()), (search::Role::User, Some("/w/app")));
+        let results = read(json!({
+            "type": "user", "uuid": "u2",
+            "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "tool output" }] },
+        }));
+        assert!(results.messages.is_empty());
+        let said = read(json!({
+            "type": "assistant", "uuid": "a1",
+            "message": { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "hmm" },
+                { "type": "text", "text": "Done." },
+                { "type": "tool_use", "id": "t2", "name": "Bash", "input": { "command": "ls" } },
+            ] },
+        }));
+        assert_eq!(said.messages.iter().map(|m| (m.role, m.text.as_str())).collect::<Vec<_>>(), [(search::Role::Assistant, "Done.")]);
+        assert_eq!(read(json!({ "type": "ai-title", "aiTitle": "Login fix" })).title.as_deref(), Some("Login fix"));
+        let helper = read(json!({ "type": "assistant", "uuid": "a2", "isSidechain": true, "message": { "content": [{ "type": "text", "text": "x" }] } }));
+        assert!(helper.messages.is_empty());
     }
 
     #[test]

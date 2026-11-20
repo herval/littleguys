@@ -68,6 +68,8 @@ interface AppState {
   popoverShows: PopoverShows;
   editor: { open: boolean; uid: string | null };
   settingsOpen: boolean;
+  /** The Cmd+K search over every guy, thread and message. */
+  searchOpen: boolean;
   addGatewayOpen: boolean;
   /** The tab the "Add a bot" dialog opens on. */
   addGatewayTab: AddBotTab;
@@ -94,6 +96,7 @@ interface AppState {
   openEditor(uid: string | null): void;
   closeEditor(): void;
   setSettingsOpen(open: boolean): void;
+  setSearchOpen(open: boolean): void;
   setAddGatewayOpen(open: boolean, tab?: AddBotTab): void;
   navigate(nav: Navigate): void;
   /** Make a guy on a gateway that can, else add another kind of bot. */
@@ -121,6 +124,7 @@ export const useApp = create<AppState>((set, get) => ({
   popoverShows: readPopoverShows(),
   editor: { open: false, uid: null },
   settingsOpen: false,
+  searchOpen: false,
   addGatewayOpen: false,
   addGatewayTab: "openclaw",
 
@@ -211,6 +215,7 @@ export const useApp = create<AppState>((set, get) => ({
   openEditor: (uid) => set({ editor: { open: true, uid } }),
   closeEditor: () => set({ editor: { open: false, uid: null } }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setSearchOpen: (searchOpen) => set({ searchOpen }),
   setAddGatewayOpen: (addGatewayOpen, tab = "openclaw") => set({ addGatewayOpen, addGatewayTab: tab }),
   startNewGuy: () => {
     const canMake = liveGateways(get().roster).some((g) => g.status.capabilities?.manageGuys);

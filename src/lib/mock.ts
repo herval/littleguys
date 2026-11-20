@@ -816,6 +816,47 @@ function browserRequest(p: Record<string, unknown>): unknown {
   return { ok: true };
 }
 
+/** Like OpenClaw's `sessions.search`: every word, as a whole word, in a user or assistant message. */
+function searchMessages(gateway: string, p: Record<string, unknown>) {
+  const g = roster.gateways.find((g) => g.id === gateway);
+  const kind = g?.status.kind;
+  if (kind !== "openclaw" && kind !== "acp" && kind !== "claudecode" && kind !== "codex") {
+    throw { code: "UNSUPPORTED", message: "sessions.search isn't supported by this bot" };
+  }
+  const words = String(p.query).toLowerCase().split(/\s+/).filter(Boolean);
+  // OpenClaw looks through the threads it's given; littleguys' index, through all of them.
+  const keys = kind === "openclaw" ? new Set(p.sessionKeys as string[]) : null;
+  const matches = (text: string) => words.every((w) => new RegExp(`(^|\\W)${w.replace(/\W/g, "\\$&")}`, "i").test(text));
+  // Sessions from before the thread list goes back.
+  const past =
+    gateway === claude.id
+      ? pastSessions
+          .filter((s) => !s.inThreads && matches(`Let's pick up "${s.title}".`))
+          .map((s) => ({
+            sessionKey: s.key, sessionId: s.sessionId, messageId: `${s.sessionId}-u`, role: "user", timestamp: s.updatedAt - 60_000,
+            snippet: `Let's pick up "${s.title}".`, score: 0.5, title: s.title, workspaceDir: s.cwd, updatedAt: s.updatedAt,
+          }))
+      : [];
+  const textOf = (m: ChatMessage) =>
+    typeof m.content === "string"
+      ? m.content
+      : (m.content as Array<{ type: string; text?: string }>).flatMap((c) => (c.type === "text" && c.text ? [c.text] : [])).join(" ");
+  const results = Object.entries(history)
+    .filter(([id]) => id.startsWith(`${gateway}|`) && (!keys || keys.has(id.slice(gateway.length + 1))))
+    .flatMap(([id, messages]) =>
+      messages.map((m, i) => ({ key: id.slice(gateway.length + 1), m, i, text: textOf(m).replace(/\s+/g, " ") })),
+    )
+    .filter(({ m, text }) => (m.role === "user" || m.role === "assistant") && words.every((w) => new RegExp(`(^|\\W)${w.replace(/\W/g, "\\$&")}(\\W|$)`, "i").test(text)))
+    .map(({ key, m, i, text }) => {
+      const all = text.split(" ");
+      const at = Math.max(0, all.findIndex((t) => t.toLowerCase().includes(words[0])));
+      const from = Math.max(0, at - 10);
+      const snippet = `${from ? "… " : ""}${all.slice(from, from + 24).join(" ")}${from + 24 < all.length ? " …" : ""}`;
+      return { sessionKey: key, sessionId: key, messageId: `${key}#${i}`, role: m.role, timestamp: m.timestamp ?? now, snippet, score: 1 };
+    });
+  return { results: [...results, ...past].slice(0, Number(p.limit ?? 10)) };
+}
+
 async function gwCall(gateway: string, method: string, p: Record<string, unknown>): Promise<unknown> {
   await new Promise((r) => setTimeout(r, 120));
   switch (method) {
@@ -876,6 +917,8 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
       const rows = roster.gateways.find((g) => g.id === gateway)?.sessions ?? [];
       return { sessions: rows.filter((r) => (!p.agentId || r.agentId === p.agentId) && (want === null || Boolean(r.archived) === want)) };
     }
+    case "sessions.search":
+      return searchMessages(gateway, p);
     case "sessions.create":
       return { ok: true, key: `agent:${p.agentId}:dashboard:${crypto.randomUUID()}` };
     case "sessions.patch": {

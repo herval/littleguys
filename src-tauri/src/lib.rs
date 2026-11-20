@@ -29,6 +29,10 @@ use crate::tray::TrayAnimator;
 use crate::updater::Updates;
 
 pub fn run() {
+    // Started to build a message index, out of the app's own memory: that, and nothing else.
+    if let Some(code) = runtime::search::child_main() {
+        std::process::exit(code);
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("littleguys_lib=info")).init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 

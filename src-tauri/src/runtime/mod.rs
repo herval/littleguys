@@ -68,6 +68,7 @@ pub mod scheduler;
 mod delivery;
 pub(crate) mod events;
 pub mod registry;
+pub mod search;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;

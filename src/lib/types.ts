@@ -69,6 +69,26 @@ export interface PastSession {
   inThreads: boolean;
 }
 
+/**
+ * A message that matched a `sessions.search`: OpenClaw's full-text index of transcripts, or
+ * littleguys' own (Claude Code, Codex, ACP).
+ */
+export interface MessageHit {
+  sessionKey: string;
+  sessionId: string;
+  messageId: string;
+  role: "user" | "assistant";
+  timestamp: number;
+  /** Plain text around the match, with " … " where it was cut. */
+  snippet: string;
+  /** Higher is better. */
+  score: number;
+  /** littleguys' index: the thread's title and folder, for sessions that aren't in the list. */
+  title?: string | null;
+  workspaceDir?: string | null;
+  updatedAt?: number;
+}
+
 export interface ConnStatus {
   gatewayId: string;
   gatewayName: string;

@@ -16,6 +16,7 @@ import {
   Pin,
   PinOff,
   Plus,
+  Search,
   Settings as SettingsIcon,
   Sparkles,
   SquarePen,
@@ -87,6 +88,7 @@ function SidebarTop({ back }: { back: boolean }) {
   const browse = useApp((s) => s.browse);
   const startNewGuy = useApp((s) => s.startNewGuy);
   const setSettingsOpen = useApp((s) => s.setSettingsOpen);
+  const setSearchOpen = useApp((s) => s.setSearchOpen);
   const canAdd = useApp((s) => s.roster.gateways.some((g) => g.loaded) || s.roster.gateways.length > 1);
   return (
     <div data-tauri-drag-region className={`flex h-14 shrink-0 items-center gap-0.5 ${IS_MAC ? "pl-[84px]" : "pl-2"} pr-2`}>
@@ -100,6 +102,9 @@ function SidebarTop({ back }: { back: boolean }) {
         </button>
       )}
       <div data-tauri-drag-region className="flex-1 self-stretch" />
+      <IconButton label={`Search (${shortcut("K")})`} onClick={() => setSearchOpen(true)}>
+        <Search size={15} />
+      </IconButton>
       {canAdd && (
         <IconButton label="New little guy" onClick={startNewGuy}>
           <Plus size={16} />

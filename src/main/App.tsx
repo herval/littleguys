@@ -14,6 +14,7 @@ import { FilesView } from "./Files";
 import { GuyEditor } from "./GuyEditor";
 import { PastSessions } from "./PastSessions";
 import { RoutinesPanel } from "./Routines";
+import { SearchPalette } from "./SearchPalette";
 import { Settings } from "./Settings";
 import { Sidebar } from "./Sidebar";
 import { SkillsView } from "./Skills";
@@ -24,6 +25,7 @@ export function App() {
   const selectedSessionKey = useApp((s) => s.selectedSessionKey);
   const editor = useApp((s) => s.editor);
   const settingsOpen = useApp((s) => s.settingsOpen);
+  const searchOpen = useApp((s) => s.searchOpen);
   const addGatewayOpen = useApp((s) => s.addGatewayOpen);
   const guy = useSelectedGuy();
   const browserOpen = useApp((s) => (guy ? Boolean(s.browser.open[guy.uid]) : false));
@@ -50,6 +52,11 @@ export function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (isModKey(e) && e.key.toLowerCase() === "k" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        const { searchOpen, setSearchOpen } = useApp.getState();
+        setSearchOpen(!searchOpen);
+      }
       if (isModKey(e) && e.key === ",") {
         e.preventDefault();
         useApp.getState().setSettingsOpen(true);
@@ -115,6 +122,8 @@ export function App() {
       {editor.open && <GuyEditor uid={editor.uid} />}
       {settingsOpen && <Settings />}
       {addGatewayOpen && <AddGateway />}
+      {/* Last, so Cmd+K comes up over any dialog that's open. */}
+      {searchOpen && connected && <SearchPalette />}
     </div>
   );
 }

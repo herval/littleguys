@@ -39,6 +39,7 @@ use crate::gateways::{AcpConfig, AcpTransport};
 use crate::openclaw::config::{Credential, GatewayMode};
 use crate::openclaw::runtime::login_path;
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
+use crate::runtime::search;
 use crate::runtime::{blocking, home, is_executable, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
 
 /// Every ACP entry is exactly one guy.
@@ -93,6 +94,7 @@ impl AcpClient {
         let scheduler = LocalScheduler::new(&data_dir, &id);
         let store = Store::open(dir.clone());
         let commands = load_commands(&dir);
+        let search = search::Index::built_apart(search::index_path(&data_dir, &id), Transcripts { dir: dir.clone() }, "acp", dir.display().to_string());
         Self {
             inner: Arc::new(Inner {
                 id,
@@ -120,6 +122,7 @@ impl AcpClient {
                 commands: Mutex::new(commands),
                 tried_auth: AtomicBool::new(false),
                 scheduler,
+                search,
             }),
         }
     }
@@ -135,6 +138,7 @@ impl AcpClient {
     /// Start (or restart) the agent and the routine scheduler.
     pub fn start(&self) {
         self.inner.stopped.store(false, Ordering::SeqCst);
+        self.inner.search.build_later(search::BUILD_DELAY);
         if !self.inner.scheduling.swap(true, Ordering::SeqCst) {
             let runner: Arc<dyn RoutineRunner> = Arc::new(Runner(Arc::downgrade(&self.inner)));
             self.inner.scheduler.start(runner);
@@ -153,6 +157,7 @@ impl AcpClient {
     /// Stop for good (bot removed or turned off): kills the agent process.
     pub fn stop(&self) {
         self.inner.stopped.store(true, Ordering::SeqCst);
+        self.inner.search.stop();
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
         self.inner.kick.notify_waiters();
         if self.inner.scheduling.swap(false, Ordering::SeqCst) {
@@ -291,6 +296,8 @@ struct Inner {
     commands: Mutex<Vec<Value>>,
     tried_auth: AtomicBool,
     scheduler: Arc<LocalScheduler>,
+    /// Every transcript's messages, for `sessions.search`.
+    search: Arc<search::Index>,
 }
 
 /// What the agent said about itself in `initialize`.
@@ -1414,6 +1421,7 @@ impl Inner {
             "sessions.create" => self.sessions_create(&params).await,
             "sessions.past" => self.sessions_past().await,
             "sessions.open" => self.sessions_open(&params),
+            "sessions.search" => self.sessions_search(&params).await,
             "sessions.patch" => self.sessions_patch(&params),
             "sessions.delete" => self.sessions_delete(&params).await,
             "chat.history" => self.chat_history(&params).await,
@@ -1586,6 +1594,25 @@ impl Inner {
     }
 
     /// A session from the resume picker, as a thread that works in the session's own folder.
+    /// Messages matching `query` in every thread's transcript, the best per thread.
+    async fn sessions_search(&self, params: &Value) -> Result<Value, RpcError> {
+        let (query, limit) = search::search_params(params)?;
+        let (hits, indexing) = self.search.find(query, limit, HashSet::new()).await?;
+        let guy_cwd = self.cwd_string();
+        let store = self.store.lock().unwrap();
+        let results: Vec<Value> = hits
+            .iter()
+            // A thread deleted since the last update.
+            .filter_map(|h| store.get(&h.thread).map(|meta| (h, meta)))
+            .map(|(h, meta)| {
+                let title = meta.flags.label.clone().or_else(|| meta.title.clone());
+                let cwd = Some(meta.cwd.clone().unwrap_or_else(|| guy_cwd.clone()));
+                h.to_json(&meta.key, meta.session_id.as_deref(), title, cwd)
+            })
+            .collect();
+        Ok(json!({ "results": results, "indexing": indexing }))
+    }
+
     fn sessions_open(&self, params: &Value) -> Result<Value, RpcError> {
         let sid = param_str(params, &["sessionId"]).map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| bad_request("sessionId is required"))?;
         let guy_cwd = self.cwd_string();
@@ -3974,6 +4001,27 @@ impl Store {
     }
 }
 
+/// The threads' transcripts, for the message index (each one's thread being its key).
+struct Transcripts {
+    /// `<data_dir>/acp-<id>`
+    dir: PathBuf,
+}
+
+pub(super) fn search_transcripts(dir: PathBuf) -> Box<dyn search::Transcripts> {
+    Box::new(Transcripts { dir })
+}
+
+impl search::Transcripts for Transcripts {
+    fn list(&self) -> Vec<(PathBuf, String)> {
+        let store = Store::open(self.dir.clone());
+        store.index.sessions.iter().map(|m| (store.transcript_path(&m.key), m.key.clone())).collect()
+    }
+
+    fn read(&self, line: &Value) -> search::Line {
+        search::Line { messages: search::words_of(std::slice::from_ref(line)), ..Default::default() }
+    }
+}
+
 /// Readable, collision-free file name for a session key.
 fn transcript_name(key: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -4732,6 +4780,30 @@ enabled = false
         assert!(same_dir(r"C:\Users\x\dev\", r"C:\Users\x\dev"));
         assert!(!same_dir("/tmp", "/usr"));
         assert!(!same_dir("/Users/x/dev", "/Users/x/dev2"));
+    }
+
+    #[test]
+    fn thread_transcripts_are_searched_by_key() {
+        let dir = std::env::temp_dir().join(format!("lg-acp-search-{}", uuid::Uuid::new_v4()));
+        let mut store = Store::open(dir.clone());
+        let key = "agent:bot:dashboard:s1";
+        store.update(key, |m| m.title = Some("Trip".into()));
+        store.append_all(key, &[
+            json!({ "role": "user", "content": [{ "type": "text", "text": "Plan a trip to Lisbon" }], "timestamp": 5, "__openclaw": { "id": "m1" } }),
+            json!({ "role": "toolResult", "content": "Lisbon weather: sunny" }),
+        ]);
+        // A transcript that's not a thread any more isn't searched.
+        std::fs::write(dir.join("transcripts").join("stray.jsonl"), "{\"role\":\"user\",\"content\":\"Lisbon\"}\n").unwrap();
+        let index = search::Index::new(dir.join("search.db"), Transcripts { dir: dir.clone() });
+        assert_eq!(index.update().unwrap(), search::Update::Done);
+        let hits = index.search("lisbon", 10, &HashSet::new()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].thread.as_str(), hits[0].message_id.as_str(), hits[0].snippet.as_str()), (key, "m1", "Plan a trip to Lisbon"));
+        assert!(index.search("sunny", 10, &HashSet::new()).unwrap().is_empty());
+        store.delete_transcript(key);
+        index.update().unwrap();
+        assert!(index.search("lisbon", 10, &HashSet::new()).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

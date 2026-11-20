@@ -51,6 +51,7 @@ use crate::openclaw::config::{Credential, GatewayMode};
 use crate::openclaw::runtime as cli;
 use crate::runtime::claudecode::{first_line, modified_ms, read_lines};
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
+use crate::runtime::search;
 use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
 
 const AGENT_ID: &str = "codex";
@@ -164,6 +165,8 @@ struct Inner {
     no_server: bool,
     /// littleguys shows and answers permission prompts.
     approvals: AtomicBool,
+    /// Every rollout's messages, for `sessions.search`.
+    search: Arc<search::Index>,
 }
 
 #[derive(Default)]
@@ -460,6 +463,9 @@ impl CodexClient {
         };
         let scheduler = LocalScheduler::new(&data_dir, &id);
         let started_path = data_dir.join(format!("codex-threads-{id}.json"));
+        let home = codex_home();
+        let sessions = home.join("sessions");
+        let search = search::Index::built_apart(search::index_path(&data_dir, &id), Transcripts { sessions: sessions.clone() }, "codex", sessions.display().to_string());
         let mut st = State { started: load_started(&started_path), ..Default::default() };
         // Threads littleguys keeps show up again, however old.
         for sid in st.started.keys().cloned().collect::<Vec<_>>() {
@@ -468,7 +474,7 @@ impl CodexClient {
         Self {
             inner: Arc::new(Inner {
                 id,
-                home: codex_home(),
+                home,
                 hooks,
                 status: Mutex::new(status),
                 started: AtomicBool::new(false),
@@ -486,6 +492,7 @@ impl CodexClient {
                 model: dev_env("LITTLEGUYS_CODEX_MODEL"),
                 no_server: dev_env("LITTLEGUYS_CODEX_SERVER").is_some_and(|v| v == "off"),
                 approvals: AtomicBool::new(config.approvals),
+                search,
             }),
         }
     }
@@ -503,6 +510,10 @@ impl CodexClient {
             return;
         }
         self.inner.scheduler.start(Arc::new(Runner(Arc::downgrade(&self.inner))));
+        // (Tests run against the real ~/.codex: they don't index it.)
+        if !cfg!(test) {
+            self.inner.search.build_later(search::BUILD_DELAY);
+        }
         let inner = self.inner.clone();
         tauri::async_runtime::spawn(async move { run(inner).await });
         let inner = self.inner.clone();
@@ -512,6 +523,7 @@ impl CodexClient {
     /// Stop for good (bot removed or turned off).
     pub fn stop(&self) {
         self.inner.stopped.store(true, Ordering::SeqCst);
+        self.inner.search.stop();
         self.inner.scheduler.stop();
         self.inner.wake.notify_one();
         self.inner.server_retry.notify_one();
@@ -584,6 +596,7 @@ impl CodexClient {
             "chat.abort" => chat_abort(inner, &params).await,
             "sessions.past" => sessions_past(inner).await,
             "sessions.open" => sessions_open(inner, &params),
+            "sessions.search" => sessions_search(inner, &params).await,
             // The folder of the thread you're on (`sessionKey`), else the one you last worked in.
             "agents.workspace.list" | "agents.workspace.get" => {
                 check_agent(&params)?;
@@ -1143,7 +1156,7 @@ fn user_text(line: &Value) -> Option<String> {
             }
             let text = blocks_text(item.get("content"));
             if text.is_empty() && item.get("content").and_then(Value::as_array).is_some_and(|c| !c.is_empty()) {
-                "(attachment)".to_string()
+                ATTACHMENT_ONLY.to_string()
             } else {
                 text
             }
@@ -2468,6 +2481,70 @@ async fn sessions_past(inner: &Arc<Inner>) -> Result<Value, RpcError> {
     Ok(json!({ "sessions": rows }))
 }
 
+/// Messages matching `query` in every rollout (not helpers', nor the threads you deleted),
+/// the best per thread. Sessions that aren't threads come with what `sessions.open` needs to
+/// make them one.
+async fn sessions_search(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    let (query, limit) = search::search_params(params)?;
+    let hidden: HashSet<String> = {
+        let st = inner.st.lock().unwrap();
+        let deleted = st.started.iter().filter(|(_, t)| t.hidden).map(|(sid, _)| sid.clone());
+        deleted.chain(st.sessions.values().filter(|s| s.hidden || s.skip).map(|s| s.id.clone())).collect()
+    };
+    let (hits, indexing) = inner.search.find(query, limit, hidden).await?;
+    let st = inner.st.lock().unwrap();
+    let results: Vec<Value> = hits
+        .iter()
+        .map(|h| {
+            let known = st.sessions.get(&h.thread);
+            let key = known
+                .map(Session::key)
+                .or_else(|| st.started.get(&h.thread).map(|t| t.key.clone()))
+                .unwrap_or_else(|| keys::thread(AGENT_ID, &h.thread));
+            let title = known.and_then(Session::title).or_else(|| st.names.get(&h.thread).cloned());
+            let cwd = known.map(|s| s.cwd.clone()).filter(|c| !c.is_empty());
+            h.to_json(&key, None, title, cwd)
+        })
+        .collect();
+    Ok(json!({ "results": results, "indexing": indexing }))
+}
+
+/// Codex's rollouts, for the message index.
+struct Transcripts {
+    /// `$CODEX_HOME/sessions`
+    sessions: PathBuf,
+}
+
+pub(super) fn search_transcripts(sessions: PathBuf) -> Box<dyn search::Transcripts> {
+    Box::new(Transcripts { sessions })
+}
+
+impl search::Transcripts for Transcripts {
+    fn list(&self) -> Vec<(PathBuf, String)> {
+        walk(&self.sessions).into_iter().map(|f| (f.path, f.id)).collect()
+    }
+
+    /// What it says and where: the session's start, your messages and its replies. (A quote
+    /// inside a string is escaped, so these only match the line's own fields.)
+    fn wanted(&self, raw: &[u8]) -> bool {
+        search::has_any(raw, &["\"session_meta\"", "\"UserMessage\"", "\"user_message\"", "\"assistant\""])
+    }
+
+    fn read(&self, line: &Value) -> search::Line {
+        let meta = session_meta(line);
+        let said = user_text(line).is_some_and(|t| t != ATTACHMENT_ONLY) || assistant_text(line).is_some();
+        search::Line {
+            messages: if said { search::words_of(&convert_line(line, &mut HashMap::new())) } else { Vec::new() },
+            title: None,
+            cwd: meta.as_ref().map(|m| m.cwd.clone()).filter(|c| !c.is_empty()),
+            skip: meta.is_some_and(|m| m.subagent),
+        }
+    }
+}
+
+/// A prompt of nothing but attachments.
+const ATTACHMENT_ONLY: &str = "(attachment)";
+
 /// A past session, as a thread that stays in the list.
 fn sessions_open(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
     let sid = params
@@ -2669,6 +2746,28 @@ mod tests {
         assert!(!client.inner.st.lock().unwrap().sessions["s1"].unsaved);
         assert_eq!(load_started(&client.inner.started_path)["s1"].flags.label.as_deref(), Some("Keep this"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollouts_are_searched_but_not_helpers() {
+        let dir = temp("search");
+        let day = dir.join("sessions/2026/11/01");
+        std::fs::create_dir_all(&day).unwrap();
+        let helper = "01a1a900-0000-7000-8000-00000000beef";
+        let main = jsonl(&[meta("/w/app", json!("cli")), user("u1", "Where is the parser?"), assistant("a1", "It lives in src/parse.rs, the parser.")]);
+        std::fs::write(day.join(format!("rollout-2026-11-01T10-00-00-{ID}.jsonl")), main).unwrap();
+        let review = jsonl(&[meta("/w/app", json!({ "subagent": "review" })), user("u2", "Review the parser")]);
+        std::fs::write(day.join(format!("rollout-2026-11-01T10-00-01-{helper}.jsonl")), review).unwrap();
+        let index = search::Index::new(dir.join("search.db"), Transcripts { sessions: dir.join("sessions") });
+        assert_eq!(index.update().unwrap(), search::Update::Done);
+        let hits = index.search("parser", 10, &HashSet::new()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].thread.as_str(), hits[0].cwd.as_deref()), (ID, Some("/w/app")));
+        assert_eq!(hits[0].title.as_deref(), Some("Where is the parser?"));
+        let hit = &index.search("parse.rs", 10, &HashSet::new()).unwrap()[0];
+        assert_eq!((hit.message_id.as_str(), hit.role), ("a1", search::Role::Assistant));
+        assert!(index.search("parser", 10, &HashSet::from([ID.to_string()])).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
