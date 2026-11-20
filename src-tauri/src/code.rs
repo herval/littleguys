@@ -222,8 +222,8 @@ async fn base_of(root: &Path) -> Result<Arc<Base>, GitError> {
     }
     let dirs = git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"]).await?;
     let mut lines = dirs.lines().map(str::trim);
-    let common = lines.next().map(PathBuf::from);
-    let top = lines.next().map(PathBuf::from);
+    let common = lines.next().map(native_path);
+    let top = lines.next().map(native_path);
     // A worktree's git dir lives in the main repo's `.git`; its parent is the repo.
     let main_root = match (common, top) {
         (Some(common), Some(top)) if common.file_name().is_some_and(|n| n == ".git") => {
@@ -247,6 +247,11 @@ async fn base_of(root: &Path) -> Result<Arc<Base>, GitError> {
     let base = Arc::new(Base { at: Instant::now(), name, main_root });
     BASES.lock().unwrap().insert(root.to_path_buf(), base.clone());
     Ok(base)
+}
+
+/// A path git printed, in this system's own form: git on Windows writes `C:/a/b`.
+fn native_path(printed: &str) -> PathBuf {
+    Path::new(printed).components().collect()
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -722,8 +727,13 @@ mod tests {
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lg-code-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        // Temp dirs on macOS sit behind a symlink; git reports the real path.
-        std::fs::canonicalize(&dir).unwrap()
+        // Temp dirs on macOS sit behind a symlink; git reports the real path. Windows writes
+        // the real path as `\\?\C:\…`, which git can't use.
+        let real = std::fs::canonicalize(&dir).unwrap();
+        match real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            Some(plain) => PathBuf::from(plain),
+            None => real,
+        }
     }
 
     fn run(dir: &Path, args: &[&str]) {
@@ -767,6 +777,17 @@ mod tests {
     fn clear_caches() {
         STATUS.lock().unwrap().clear();
         BASES.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn git_paths_read_as_this_systems_own() {
+        // (Paths compare equal whichever slash they use, so this compares what's shown.)
+        let shown = |printed: &str| native_path(printed).display().to_string();
+        if cfg!(windows) {
+            assert_eq!(shown("C:/Users/pat/shop/.git"), r"C:\Users\pat\shop\.git");
+        } else {
+            assert_eq!(shown("/Users/pat/shop/.git"), "/Users/pat/shop/.git");
+        }
     }
 
     #[test]
