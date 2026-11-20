@@ -1,4 +1,4 @@
-import type { ChatMessage } from "../lib/types";
+import type { ChatMessage, QueuedMessage } from "../lib/types";
 import type { ChatEvent, SendReceipt } from "../lib/chatEvents";
 import type { ChatHistory } from "../lib/gateway";
 
@@ -24,6 +24,8 @@ export interface ThreadState {
   live: LiveRun | null;
   toolStatus: Record<string, ToolState>;
   pending: PendingSend[];
+  /** Written while the guy worked: littleguys sends them when its turn ends (outbox.rs). */
+  queued: QueuedMessage[];
   sendError: string | null;
   epoch: number;
   request: number;
@@ -42,12 +44,14 @@ export type Action =
   | { type: "receipt"; id: string; receipt: SendReceipt }
   | { type: "sendError"; id: string; error: string; uncertain: boolean }
   | { type: "error"; error: string }
+  /** You took a queued message back (littleguys confirms with a `queue` event). */
+  | { type: "unqueue"; id: string }
   | { type: "event"; event: ChatEvent; now: number }
   | { type: "disconnect" };
 
 export const blank = (key: string): ThreadState => ({
   key, loading: false, loaded: false, error: null, messages: [], hasMore: false, live: null,
-  toolStatus: {}, pending: [], sendError: null, epoch: 0, request: 0, observed: [], historyObserved: [], retired: [],
+  toolStatus: {}, pending: [], queued: [], sendError: null, epoch: 0, request: 0, observed: [], historyObserved: [], retired: [],
 });
 export function textOf(message: ChatMessage | undefined): string {
   if (!message) return "";
@@ -115,7 +119,7 @@ export function reduceThread(t: ThreadState, a: Action): ThreadState {
       const live = t.live ?? (run?.runId && !t.retired.includes(run.runId) ?
         { runId: run.runId, text: textOf(run.message), phase: null, startedAt: a.now } : null);
       return { ...t, messages, observed, historyObserved: [], live, loading: false, loaded: true, hasMore: Boolean(a.history.hasMore),
-        pending: reconcilePending(t.pending, messages) };
+        pending: reconcilePending(t.pending, messages), queued: a.history.queued ?? t.queued };
     }
     case "loadError": return a.request === t.request && a.epoch === t.epoch ? { ...t, loading: false, error: a.error } : t;
     case "send": return { ...t, pending: [...t.pending, { ...a.pending, seen: t.messages.map(identity) }], sendError: null };
@@ -124,7 +128,7 @@ export function reduceThread(t: ThreadState, a: Action): ThreadState {
       const pending = t.pending.map((p) => p.idempotencyKey === a.id ? {
         ...p, runId: a.receipt.runId, status: "queued" as const,
         delivery: p.delivery ?? (a.receipt.delivery === "delivered" ? { ids: [a.id], texts: [textOf(p.message).trim()] } : undefined),
-      } : p).filter((p) => !(p.idempotencyKey === a.id && a.receipt.status === "ok"));
+      } : p).filter((p) => !(p.idempotencyKey === a.id && (a.receipt.status === "ok" || a.receipt.status === "held")));
       return { ...t, pending: reconcilePending(pending, t.messages) };
     }
     case "sendError":
@@ -133,6 +137,7 @@ export function reduceThread(t: ThreadState, a: Action): ThreadState {
       t.pending.map((p) => p.idempotencyKey === a.id ? { ...p, status: "unknown" } : p) :
       t.pending.filter((p) => p.idempotencyKey !== a.id) };
     case "error": return { ...t, sendError: a.error };
+    case "unqueue": return { ...t, queued: t.queued.filter((q) => q.id !== a.id) };
     case "disconnect": return { ...t, epoch: t.epoch + 1, loading: false, live: null, toolStatus: {},
       pending: t.pending.map((p) => p.delivery ? p : { ...p, status: "unknown" }) };
     case "event": {
@@ -141,6 +146,19 @@ export function reduceThread(t: ThreadState, a: Action): ThreadState {
         // A delayed start cannot reopen a completed tool call.
         if (t.toolStatus[e.id] && t.toolStatus[e.id] !== "running" && e.status === "running") return t;
         return { ...t, toolStatus: { ...t.toolStatus, [e.id]: e.status } };
+      }
+      if (e.kind === "queue") {
+        // Handed over by littleguys, not this window: it shows as sending, like one you just wrote.
+        let next: ThreadState = { ...t, queued: e.queued, sendError: e.error ?? t.sendError };
+        if (e.sent && !t.pending.some((p) => p.idempotencyKey === e.sent!.id)) {
+          const message: ChatMessage = { role: "user", content: e.sent.text ? [{ type: "text", text: e.sent.text }] : [],
+            timestamp: a.now, __openclaw: { clientSendId: e.sent.id } };
+          next = reduceThread(next, { type: "send", pending: { idempotencyKey: e.sent.id, message, status: "sending" } });
+          next = { ...next, sendError: e.error ?? t.sendError };
+        }
+        if (e.accepted) next = reduceThread(next, { type: "receipt", id: e.accepted.id, receipt: e.accepted.receipt });
+        if (e.unsent) next = { ...next, pending: next.pending.filter((p) => p.idempotencyKey !== e.unsent) };
+        return next;
       }
       if (e.kind === "delivery") {
         if (!t.pending.some((p) => e.ids.includes(p.idempotencyKey))) return t;

@@ -218,6 +218,8 @@ fn capabilities(attachments: bool, local: bool, past: bool) -> Capabilities {
         browser: false,
         past_sessions: past,
         code: local,
+        // ACP has no way into a turn under way.
+        steer: false,
     }
 }
 

@@ -37,7 +37,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   }, [inRoster, archiveLoaded, guy.uid, gw, guy.id]);
   const rosterRunning = useApp((s) => isRunning(s.roster, gw, sessionKey));
   const thread = useChat((s) => s.threads[tid]);
-  const { open, send, abort, reload } = useChat.getState();
+  const { open, send, sendQueued, unqueue, abort, reload } = useChat.getState();
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   // Follow mode: keep the newest message in view while anything grows (streaming
@@ -269,8 +269,12 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
           sessionKey={sessionKey}
           draftKey={tid}
           placeholder={kind === "channel" ? `Reply in ${channelName(sessionKey) ?? "channel"} as ${guyName(agent)}…` : `Message ${guyName(agent)}…`}
+          name={guyName(agent)}
           running={running}
-          onSend={async (text, attachments) => {
+          queued={thread?.queued ?? []}
+          onSendQueued={(id, delivery) => sendQueued(tid, id, delivery)}
+          onUnqueue={(id) => unqueue(tid, id)}
+          onSend={async (text, attachments, delivery) => {
             // Replying means you've caught up.
             atNew.current = false;
             setReadTo(null);
@@ -278,7 +282,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             if (row?.archived) await useArchive.getState().unarchive(guy, row);
             setFollow(true);
             const cwd = canPickFolder && unstarted && pendingFolder !== folder ? (pendingFolder ?? undefined) : undefined;
-            await send(tid, text, attachments, cwd, canPickFolder && unstarted && worktree && canWorktree);
+            await send(tid, text, attachments, cwd, canPickFolder && unstarted && worktree && canWorktree, delivery);
             setPendingFolder(null);
             setWorktree(false);
           }}

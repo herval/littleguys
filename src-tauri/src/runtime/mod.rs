@@ -12,7 +12,9 @@
 //! - `sessions.create {agentId, label?}` → `{ok:true, key}`
 //! - `sessions.patch {key, label?, pinned?, archived?, unread?}`, `sessions.delete {key}` (if `thread_actions`)
 //! - `chat.history {sessionKey, limit?}` → `{sessionKey, messages:[ChatMessage], hasMore:false}`
-//! - `chat.send {sessionKey, message, idempotencyKey, attachments?}` → `{runId, status:"started", clientSendId?, delivery?}`
+//! - `chat.send {sessionKey, message, idempotencyKey, attachments?, delivery?}` → `{runId, status:"started", clientSendId?, delivery?}`;
+//!   `delivery: "steer"` asks to take it into the turn under way (if `steer`). `delivery: "queue"` never
+//!   reaches a runtime: littleguys holds it while the thread works (outbox.rs, `status:"held"`)
 //! - `chat.abort {sessionKey, runId?}`
 //! - `exec.approval.list` → `{approvals:[…]}`; `exec.approval.resolve {id, decision: allow-once|allow-always|deny}`
 //! - `cron.list|add|update|remove|run|runs` (if `routines`) — same shapes as OpenClaw
@@ -55,6 +57,8 @@
 //! - `exec.approval.requested {id, agentId, sessionKey, presentation:{commandText, warningText?, allowedDecisions}}`
 //! - `exec.approval.resolved {id}`
 //! - `cron {action:"finished", jobId, job:{name, agentId}, status: ok|error, summary?, sessionKey?}`
+//! - `chat.queue {sessionKey, queued:[{id, text, attachments, at}], sent?:{id, text}, accepted?:{id, receipt}, unsent?, error?}` — what
+//!   littleguys holds for a thread changed (outbox.rs; Claude Code's Stop hook takes it too)
 
 pub mod acp;
 pub mod claudecode;
@@ -126,6 +130,9 @@ pub struct Capabilities {
     /// Threads work in folders on this machine, so coder mode can read their git repo
     /// (`code.status|diff|pr`, see code.rs). The Coder mode settings decide whether it does.
     pub code: bool,
+    /// A message can join the turn under way (`chat.send` with `delivery: "steer"`); without
+    /// it, what you send while a guy works waits for its turn to end.
+    pub steer: bool,
 }
 
 impl Capabilities {
@@ -147,6 +154,7 @@ impl Capabilities {
             browser: false,
             past_sessions: false,
             code: false,
+            steer: true,
         }
     }
 

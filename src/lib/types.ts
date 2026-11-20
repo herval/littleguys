@@ -45,6 +45,16 @@ export interface Capabilities {
   pastSessions: boolean;
   /** Threads work in folders on this computer, so coder mode can read their repo (`code.*`, see src/lib/code.ts). */
   code: boolean;
+  /** A message can join the turn under way (`chat.send` with `delivery: "steer"`). */
+  steer: boolean;
+}
+
+/** A message littleguys holds until the guy's turn ends (`chat.queue`, src-tauri/src/outbox.rs). */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  attachments: Array<{ type?: string; fileName?: string; mimeType?: string }>;
+  at: number;
 }
 
 /** A session the agent can resume, from any folder (`sessions.past`). */

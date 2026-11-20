@@ -12,6 +12,7 @@ mod limits;
 pub mod localfs;
 mod media;
 pub mod openclaw;
+mod outbox;
 pub mod platform;
 pub mod runtime;
 mod tray;

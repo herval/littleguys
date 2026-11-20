@@ -124,6 +124,8 @@ fn capabilities() -> Capabilities {
         browser: false,
         past_sessions: true,
         code: true,
+        // `turn/steer`, for sessions the shared server has open.
+        steer: true,
     }
 }
 
@@ -1800,10 +1802,44 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
             return Ok(delivery::receipt(&run_id, params));
         }
     };
+    let message = PendingMessage::new(text, params);
+    if params.get("delivery").and_then(Value::as_str) == Some("steer") {
+        let turn = {
+            let st = inner.st.lock().unwrap();
+            st.sessions.get(&sid).filter(|s| s.busy && !s.delivering).and_then(|s| s.turn_id.clone())
+        };
+        if let Some((srv, turn)) = server(inner).zip(turn) {
+            // Into the turn under way, at its next step. A session the shared server doesn't
+            // have open (or a turn that just ended) gets it the usual way.
+            let inner = inner.clone();
+            tauri::async_runtime::spawn(async move {
+                let input = turn_input(&message.text);
+                match srv.call("turn/steer", json!({ "threadId": sid, "expectedTurnId": turn, "input": input })).await {
+                    Ok(_) => {
+                        let (name, payload) = delivery::event(&key, std::slice::from_ref(&message), None);
+                        emit(&inner, name, payload);
+                    }
+                    Err(e) => {
+                        log::debug!("[codex] couldn't steer {sid}: {e}");
+                        if let Err(e) = enqueue(&inner, &sid, message) {
+                            log::warn!("[codex] lost a message for {sid}: {}", e.message);
+                        }
+                    }
+                }
+            });
+            return Ok(delivery::receipt(&run_id, params));
+        }
+    }
+    enqueue(inner, &sid, message)?;
+    Ok(delivery::receipt(&run_id, params))
+}
+
+/// Your message waits in the session's outbox, handed over as soon as it can be.
+fn enqueue(inner: &Arc<Inner>, sid: &str, message: PendingMessage) -> Result<(), RpcError> {
     let deliver_now = {
         let mut st = inner.st.lock().unwrap();
-        let s = st.sessions.get_mut(&sid).filter(|s| s.tail.is_some() && !s.skip).ok_or_else(|| RpcError::new("NOT_FOUND", "littleguys lost track of this session."))?;
-        s.outbox.push(PendingMessage::new(text, params));
+        let s = st.sessions.get_mut(sid).filter(|s| s.tail.is_some() && !s.skip).ok_or_else(|| RpcError::new("NOT_FOUND", "littleguys lost track of this session."))?;
+        s.outbox.push(message);
         // You wrote to it: it stays in the list once it ends.
         if !s.kept {
             s.kept = true;
@@ -1813,9 +1849,10 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
     };
     if deliver_now {
         let inner = inner.clone();
+        let sid = sid.to_string();
         tauri::async_runtime::spawn(async move { deliver(inner, sid).await });
     }
-    Ok(delivery::receipt(&run_id, params))
+    Ok(())
 }
 
 #[derive(Debug, PartialEq)]

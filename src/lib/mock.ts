@@ -4,6 +4,7 @@
 //   ?single=1                          one gateway only
 //   ?empty=1                           connected, but no guys yet
 //   ?stills=1                          the browser tab isn't in front, so its stream sends no frames
+//   ?slow=1                            replies take a while (time to queue messages while a guy works)
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { bridgeMockInvoke } from "./bridge";
 import type { Backend } from "./ipc";
@@ -35,7 +36,7 @@ function status(id: string, name: string, url: string, phase: ConnStatus["phase"
     credentialIssue: null,
     hello: { policy: { attachments: { maxBytes: 20 << 20, maxImageBytes: 6 << 20 } } },
     kind: "openclaw",
-    capabilities: { manageGuys: true, routines: true, routinesLocal: false, approvals: true, threadActions: true, newThreads: true, attachments: true, models: true, files: true, skills: true, commands: true, tools: true, plugins: true, browser: true, pastSessions: false, code: false },
+    capabilities: { manageGuys: true, routines: true, routinesLocal: false, approvals: true, threadActions: true, newThreads: true, attachments: true, models: true, files: true, skills: true, commands: true, tools: true, plugins: true, browser: true, pastSessions: false, code: false, steer: true },
     ...extra,
   };
 }
@@ -123,7 +124,7 @@ claude.status = {
   ...claude.status,
   kind: "acp",
   mode: null,
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: false },
 };
 
 // ?claudecode=1: Claude Code as its own kind (every session on this Mac is a thread) instead of an ACP agent.
@@ -155,7 +156,7 @@ claudeCode.status = {
   mode: "local",
   serverVersion: "2.1.296",
   hello: { approvals: true },
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: true },
 };
 
 const codex = gateway("acp-codex", "Codex", "npx -y @agentclientprotocol/codex-acp", "connected", {
@@ -201,7 +202,7 @@ codexSessions.status = {
   kind: "codex",
   mode: "local",
   serverVersion: "0.166.0",
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true, steer: true },
 };
 
 /** The face each bot gave a guy, from before a photo was picked for them. */
@@ -481,8 +482,27 @@ const discovered: DiscoveredGateway[] = [
   { name: "studio", url: "ws://studio.local:18789", via: "bonjour", host: "studio.local", addedAs: null },
 ];
 
+// Messages queued while a guy works (src-tauri/src/outbox.rs): held until its turn ends.
+const working = new Set<string>();
+const queues = new Map<string, Array<{ id: string; text: string; attachments: []; at: number }>>();
+function queueEvent(gateway: string, sessionKey: string, extra: object = {}) {
+  const queued = queues.get(`${gateway}|${sessionKey}`) ?? [];
+  emit("gw:event", { gateway, event: "chat.queue", payload: { sessionKey, queued, ...extra } });
+}
+function sendQueued(gateway: string, sessionKey: string) {
+  const items = queues.get(`${gateway}|${sessionKey}`) ?? [];
+  if (!items.length || working.has(`${gateway}|${sessionKey}`)) return;
+  queues.delete(`${gateway}|${sessionKey}`);
+  const text = items.map((q) => q.text).join("\n\n");
+  const id = crypto.randomUUID();
+  queueEvent(gateway, sessionKey, { sent: { id, text } });
+  const receipt = streamReply(gateway, sessionKey, text, id);
+  queueEvent(gateway, sessionKey, { accepted: { id, receipt } });
+}
+
 function streamReply(gateway: string, sessionKey: string, text: string, clientSendId?: string) {
   const runId = crypto.randomUUID();
+  working.add(`${gateway}|${sessionKey}`);
   const reply = text.startsWith("/")
     ? `⚙️ Ran \`${text.split(/\s/)[0]}\` (mock).`
     : `You said: “${text}”. On it! 🫡\n\nThis is the mock backend — run \`pnpm tauri dev\` to talk to a real gateway.`;
@@ -501,9 +521,11 @@ function streamReply(gateway: string, sessionKey: string, text: string, clientSe
       const message = { role: "assistant", content: [{ type: "text", text: reply }], timestamp: Date.now(), ...oc(crypto.randomUUID(), { runId }) };
       history[`${gateway}|${sessionKey}`].push(message as ChatMessage);
       ev("session.message", { runId, message });
+      working.delete(`${gateway}|${sessionKey}`);
       ev("chat", { runId, state: "final", message });
+      setTimeout(() => sendQueued(gateway, sessionKey), 400);
     }
-  }, 90);
+  }, params.has("slow") ? 700 : 90);
   return { runId, status: "started" };
 }
 
@@ -803,7 +825,7 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
         { role: "user", content: `Let's pick up "${past.title}".`, timestamp: past.updatedAt - 60_000, ...oc(`${past.sessionId}-u`) },
         { role: "assistant", content: [{ type: "text", text: `Back in ${past.cwd}. Where were we?` }], timestamp: past.updatedAt, ...oc(`${past.sessionId}-a`) },
       ];
-      return { sessionKey: p.sessionKey, messages: history[`${gateway}|${p.sessionKey}`] ?? replay ?? [], hasMore: false };
+      return { sessionKey: p.sessionKey, messages: history[`${gateway}|${p.sessionKey}`] ?? replay ?? [], hasMore: false, queued: queues.get(`${gateway}|${p.sessionKey}`) ?? [] };
     }
     case "sessions.past":
       await new Promise((r) => setTimeout(r, 500)); // the agent reads every folder's transcripts
@@ -822,8 +844,32 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
     case "code.diff":
     case "code.pr":
       return coderMock(gateway, method, p);
-    case "chat.send":
+    case "chat.send": {
+      const thread = `${gateway}|${p.sessionKey}`;
+      if (p.delivery === "queue" && working.has(thread)) {
+        const id = crypto.randomUUID();
+        queues.set(thread, [...(queues.get(thread) ?? []), { id, text: String(p.message), attachments: [], at: Date.now() }]);
+        queueEvent(gateway, String(p.sessionKey));
+        return { runId: id, status: "held" };
+      }
       return streamReply(gateway, String(p.sessionKey), String(p.message), typeof p.idempotencyKey === "string" ? p.idempotencyKey : undefined);
+    }
+    case "chat.queue.remove": {
+      const thread = `${gateway}|${p.sessionKey}`;
+      queues.set(thread, (queues.get(thread) ?? []).filter((q) => q.id !== p.id));
+      queueEvent(gateway, String(p.sessionKey));
+      return { ok: true, removed: true };
+    }
+    case "chat.queue.send": {
+      const thread = `${gateway}|${p.sessionKey}`;
+      const item = (queues.get(thread) ?? []).find((q) => q.id === p.id);
+      if (!item) throw new Error("It's already been sent.");
+      queues.set(thread, (queues.get(thread) ?? []).filter((q) => q.id !== p.id));
+      queueEvent(gateway, String(p.sessionKey), { sent: { id: item.id, text: item.text } });
+      const receipt = streamReply(gateway, String(p.sessionKey), item.text, item.id);
+      queueEvent(gateway, String(p.sessionKey), { accepted: { id: item.id, receipt } });
+      return receipt;
+    }
     case "sessions.list": {
       // Like the runtimes: archived threads only when asked for.
       const want = p.archived === "all" ? null : p.archived === true;

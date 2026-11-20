@@ -1,6 +1,6 @@
 // Async orchestration only; event reconciliation is deterministic and tested separately.
 import { create } from "zustand";
-import { chat as chatApi, sessions as sessionsApi } from "../lib/gateway";
+import { chat as chatApi, sessions as sessionsApi, type Delivery } from "../lib/gateway";
 import { decodeChatEvent } from "../lib/chatEvents";
 import { errorMessage, listen } from "../lib/ipc";
 import type { Attachment, ChatMessage } from "../lib/types";
@@ -16,8 +16,15 @@ interface ChatState {
   threads: Record<string, ThreadState>;
   open(id: string): Promise<void>;
   reload(id: string): Promise<void>;
-  /** `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode). */
-  send(id: string, text: string, attachments: Attachment[], cwd?: string, worktree?: boolean): Promise<void>;
+  /**
+   * `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode).
+   * `delivery`: while the guy works, wait for its turn to end (`queue`) or go into it (`steer`).
+   */
+  send(id: string, text: string, attachments: Attachment[], cwd?: string, worktree?: boolean, delivery?: Delivery): Promise<void>;
+  /** A queued message, now (`steer`: into the turn under way). */
+  sendQueued(id: string, queuedId: string, delivery?: Delivery): Promise<void>;
+  /** Takes a queued message back. */
+  unqueue(id: string, queuedId: string): Promise<void>;
   abort(id: string): Promise<void>;
   handleEvent(gateway: string, name: string, payload: Record<string, unknown>): void;
   disconnect(gateway: string): void;
@@ -45,7 +52,7 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
         try { dispatch(key, { type: "history", request: ticket, epoch, history: await api.history(gw, sessionKey), now: Date.now() }); }
         catch (e) { dispatch(key, { type: "loadError", request: ticket, epoch, error: errorMessage(e) }); }
       },
-      async send(key, text, attachments, cwd, worktree) {
+      async send(key, text, attachments, cwd, worktree, delivery) {
         const id = crypto.randomUUID();
         const message: ChatMessage = { role: "user", content: [
           ...(text ? [{ type: "text" as const, text }] : []),
@@ -54,7 +61,7 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
         dispatch(key, { type: "send", pending: { idempotencyKey: id, message, status: "sending" } });
         const [gw, sessionKey] = splitThreadId(key);
         try {
-          const receipt = await api.send(gw, sessionKey, text, attachments, cwd, id, worktree);
+          const receipt = await api.send(gw, sessionKey, text, attachments, cwd, id, worktree, delivery);
           dispatch(key, { type: "receipt", id, receipt });
         } catch (e) {
           const code = e && typeof e === "object" && "code" in e ? String(e.code) : "";
@@ -64,6 +71,17 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
           // Leave uncertain sends visible. Do not restore the composer and invite an accidental resend.
           if (!uncertain) throw e;
         }
+      },
+      async sendQueued(key, queuedId, delivery) {
+        const [gw, sessionKey] = splitThreadId(key);
+        // Its chat.queue events put it in the thread (or back in the queue).
+        try { await api.sendQueued(gw, sessionKey, queuedId, delivery); }
+        catch (e) { dispatch(key, { type: "error", error: errorMessage(e) }); }
+      },
+      async unqueue(key, queuedId) {
+        const [gw, sessionKey] = splitThreadId(key);
+        dispatch(key, { type: "unqueue", id: queuedId });
+        await api.unqueue(gw, sessionKey, queuedId).catch(() => {});
       },
       async abort(key) {
         const [gw, sessionKey] = splitThreadId(key);

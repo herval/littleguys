@@ -100,6 +100,8 @@ pub(super) enum Effect {
     Approval(Value),
     ApprovalResolved(String),
     Routine(Value),
+    /// A turn ended (not stopped): what littleguys held for the thread can go (outbox.rs).
+    TurnOver(String),
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Connection {
@@ -200,6 +202,9 @@ impl GatewayState {
                         "end" | "final" | "error" | "aborted" => {
                             // A completion invalidates in-flight snapshots even if its start was missed.
                             self.revision += 1;
+                            if phase == "final" || phase == "error" {
+                                effects.push(Effect::TurnOver(key.to_string()));
+                            }
                             if self.turns.finish(key, run) {
                                 self.running.remove(key);
                                 self.settled.insert(key.to_string());

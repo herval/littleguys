@@ -26,8 +26,9 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::bridge::NoticeKind;
-use crate::gateway::client::{ConnStatus, Phase};
+use crate::gateway::client::{ConnStatus, Phase, RpcError};
 use crate::gateway::identity::now_ms;
+use crate::outbox;
 use crate::runtime::registry::Registry;
 use crate::runtime::Runtime;
 use crate::tray::{Mood, TrayAnimator};
@@ -83,6 +84,17 @@ pub struct Activity {
 }
 
 const SESSION_LIST_LIMIT: u64 = 400;
+/// How long a turn's end settles before what was queued goes (a runtime may still be
+/// letting go of the turn, or a terminal prompt may start the next one).
+const QUEUE_SETTLE: Duration = Duration::from_millis(400);
+const QUEUE_SEND_TIMEOUT: Duration = Duration::from_secs(120);
+
+async fn forward(client: &Runtime, method: &str, params: Value, timeout: Option<Duration>) -> Result<Value, RpcError> {
+    match timeout {
+        Some(timeout) => client.call_with_timeout(method, params, timeout).await,
+        None => client.call(method, params).await,
+    }
+}
 
 impl Activity {
     pub fn new(app: AppHandle, tray: TrayAnimator) -> Arc<Self> {
@@ -197,6 +209,7 @@ impl Activity {
 
     pub fn detach(&self, id: &str) {
         self.clients.remove(id);
+        outbox::forget(id);
         self.state.lock().unwrap().gateways.retain(|g| g.roster.id != id);
         self.publish();
         let _ = self.bridge.send(crate::bridge::HostEvent::BotsChanged);
@@ -307,8 +320,126 @@ impl Activity {
                 Effect::Approval(payload) => self.notify_approval(gateway, &payload),
                 Effect::ApprovalResolved(id) => self.push_to_phones(NoticeKind::ApprovalResolved, "", "", gateway, None, Some(id)),
                 Effect::Routine(payload) => self.notify_routine(gateway, &payload),
+                // The turn's over: what you wrote meanwhile goes now (a stopped one keeps it).
+                Effect::TurnOver(key) => {
+                    if !outbox::is_empty(gateway, &key) {
+                        self.send_queued_soon(gateway.to_string(), key);
+                    }
+                }
             }
         }
+    }
+
+    // ---- queued messages (outbox.rs) -----------------------------------------------
+
+    /// Whether this thread's turn is under way, as far as its events tell.
+    fn is_running(&self, gateway: &str, key: &str) -> bool {
+        self.state.lock().unwrap().gateway(gateway).is_some_and(|g| g.running.contains(key))
+    }
+
+    /// A webview's `gw_call`. `chat.send` with `delivery: "queue"` waits in littleguys while
+    /// the thread works (and goes at once when it doesn't); `"steer"` asks the guy to take it
+    /// into the turn under way. `chat.queue.send {sessionKey, id, delivery?}` sends one now,
+    /// `chat.queue.remove {sessionKey, id}` takes one back, and `chat.history` lists what's
+    /// waiting (`queued`).
+    pub async fn call(self: &Arc<Self>, client: &Runtime, method: &str, mut params: Value, timeout: Option<Duration>) -> Result<Value, RpcError> {
+        let gateway = client.id().to_string();
+        let Some(key) = params.get("sessionKey").and_then(Value::as_str).map(str::to_string) else {
+            return forward(client, method, params, timeout).await;
+        };
+        match method {
+            "chat.send" => {
+                let delivery = params.as_object_mut().and_then(|p| p.remove("delivery"));
+                let delivery = delivery.as_ref().and_then(Value::as_str);
+                if delivery == Some("queue") && self.is_running(&gateway, &key) {
+                    let text = params.get("message").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+                    let attachments = params.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default();
+                    if text.is_empty() && attachments.is_empty() {
+                        return Err(RpcError { code: "INVALID_REQUEST".into(), message: "Write something first.".into(), details: None });
+                    }
+                    let held = outbox::hold(&gateway, &key, text, attachments);
+                    self.broadcast_event(&gateway, "chat.queue", &outbox::event(&gateway, &key));
+                    return Ok(json!({ "runId": held.id, "status": "held" }));
+                }
+                // OpenClaw's gateway refuses fields it doesn't know, and steers by default.
+                if delivery == Some("steer") && client.as_openclaw().is_none() {
+                    params["delivery"] = json!("steer");
+                }
+                forward(client, method, params, timeout).await
+            }
+            "chat.queue.send" => {
+                // One you queued, now: into the turn under way, if the guy can (`delivery`).
+                let id = params.get("id").and_then(Value::as_str).unwrap_or_default();
+                let held = outbox::remove(&gateway, &key, id)
+                    .ok_or_else(|| RpcError { code: "NOT_FOUND".into(), message: "It's already been sent.".into(), details: None })?;
+                let mut send = json!({ "sessionKey": key, "message": held.text, "idempotencyKey": held.id });
+                if !held.attachments.is_empty() {
+                    send["attachments"] = Value::Array(held.attachments.clone());
+                }
+                if params.get("delivery").and_then(Value::as_str) == Some("steer") && client.as_openclaw().is_none() {
+                    send["delivery"] = json!("steer");
+                }
+                self.broadcast_event(&gateway, "chat.queue", &outbox::sending(&gateway, &key, &held.id, &held.text));
+                let sent = forward(client, "chat.send", send, timeout).await;
+                match &sent {
+                    Ok(receipt) => self.broadcast_event(&gateway, "chat.queue", &outbox::accepted(&gateway, &key, &held.id, receipt)),
+                    Err(_) => {
+                        let id = held.id.clone();
+                        outbox::restore(&gateway, &key, vec![held]);
+                        self.broadcast_event(&gateway, "chat.queue", &outbox::unsent(&gateway, &key, &id, None));
+                    }
+                }
+                sent
+            }
+            "chat.queue.remove" => {
+                let id = params.get("id").and_then(Value::as_str).unwrap_or_default();
+                let removed = outbox::remove(&gateway, &key, id).is_some();
+                self.broadcast_event(&gateway, "chat.queue", &outbox::event(&gateway, &key));
+                Ok(json!({ "ok": true, "removed": removed }))
+            }
+            "chat.history" => {
+                let mut res = forward(client, method, params, timeout).await?;
+                if let Some(obj) = res.as_object_mut() {
+                    obj.insert("queued".into(), outbox::shown(&outbox::list(&gateway, &key)));
+                }
+                Ok(res)
+            }
+            _ => forward(client, method, params, timeout).await,
+        }
+    }
+
+    /// Hands a thread's queued messages over, as one, once its turn has settled. If another
+    /// turn started meanwhile (say a prompt typed in its terminal), they wait for that one.
+    fn send_queued_soon(self: &Arc<Self>, gateway: String, key: String) {
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(QUEUE_SETTLE).await;
+            if this.is_running(&gateway, &key) {
+                return;
+            }
+            let Some(client) = this.client(&gateway) else { return };
+            let items = outbox::take(&gateway, &key);
+            if items.is_empty() {
+                return;
+            }
+            let (text, attachments) = outbox::combine(&items);
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut params = json!({ "sessionKey": key, "message": text, "idempotencyKey": id });
+            if !attachments.is_empty() {
+                params["attachments"] = Value::Array(attachments);
+            }
+            // Shown as sending first: the guy may put it in the thread before chat.send answers.
+            this.broadcast_event(&gateway, "chat.queue", &outbox::sending(&gateway, &key, &id, &text));
+            match client.call_with_timeout("chat.send", params, QUEUE_SEND_TIMEOUT).await {
+                Ok(receipt) => this.broadcast_event(&gateway, "chat.queue", &outbox::accepted(&gateway, &key, &id, &receipt)),
+                Err(e) => {
+                    log::warn!("[{gateway}] couldn't send the queued messages for {key}: {}", e.message);
+                    outbox::restore(&gateway, &key, items);
+                    let error = format!("Couldn't send what was queued: {}", e.message);
+                    this.broadcast_event(&gateway, "chat.queue", &outbox::unsent(&gateway, &key, &id, Some(&error)));
+                }
+            }
+        });
     }
 
     // ---- roster refresh ------------------------------------------------------------

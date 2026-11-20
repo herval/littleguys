@@ -43,6 +43,7 @@ export const FULL_CAPS: Capabilities = {
   browser: false,
   pastSessions: false,
   code: false,
+  steer: true,
 };
 
 /** Is this runtime on this Mac (so its folders can be opened in Finder)? */

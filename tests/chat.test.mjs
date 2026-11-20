@@ -272,3 +272,44 @@ test("delivery raw text reconciles native attachment and hook wrappers",()=>{
  t=event(t,{kind:"message",message:nativeMessage("attachment",text)});
  assert.equal(t.pending.length,0);
 });
+const queued = (id, text = id) => ({id, text, attachments: [], at: 1});
+test("a message littleguys holds leaves the thread and waits over the composer",async()=>{
+ let args;
+ const store=createChatStore({history:async()=>({messages:[],queued:[queued("q0")]}),send:async(...a)=>{args=a;return {runId:"q1",status:"held"}},abort:async()=>{},unqueue:async()=>{}},async()=>{});
+ await store.getState().open("g|s");
+ assert.deepEqual(store.getState().threads["g|s"].queued.map(q=>q.id),["q0"]);
+ await store.getState().send("g|s","later",[],undefined,false,"queue");
+ assert.equal(args[7],"queue");
+ assert.equal(store.getState().threads["g|s"].pending.length,0);
+ store.getState().handleEvent("g","chat.queue",{sessionKey:"s",queued:[queued("q0"),queued("q1","later")]});
+ assert.deepEqual(store.getState().threads["g|s"].queued.map(q=>q.text),["q0","later"]);
+ await store.getState().unqueue("g|s","q0");
+ assert.deepEqual(store.getState().threads["g|s"].queued.map(q=>q.id),["q1"]);
+});
+test("what littleguys hands over shows as sending until the thread has it",()=>{
+ let t=event(blank("g|s"),{kind:"queue",queued:[queued("a"),queued("b")]});
+ t=event(t,{kind:"queue",queued:[],sent:{id:"batch",text:"a\n\nb"}});
+ assert.equal(t.queued.length,0);
+ assert.equal(t.pending.length,1);
+ assert.equal(t.pending[0].idempotencyKey,"batch");
+ t=event(t,{kind:"queue",queued:[],accepted:{id:"batch",receipt:{runId:"r",status:"started"}}});
+ assert.equal(t.pending[0].runId,"r");
+ t=event(t,{kind:"message",message:m("a\n\nb","user","r","batch")});
+ assert.equal(t.pending.length,0);
+ // The same hand-over seen twice still shows once.
+ t=event(t,{kind:"queue",queued:[],sent:{id:"again",text:"c"}});
+ t=event(t,{kind:"queue",queued:[],sent:{id:"again",text:"c"}});
+ assert.equal(t.pending.length,1);
+ // Couldn't send: it's back in the queue, with why.
+ t=event(t,{kind:"queue",queued:[queued("c")],unsent:"again",error:"offline"});
+ assert.equal(t.pending.length,0);
+ assert.equal(t.queued.length,1);
+ assert.equal(t.sendError,"offline");
+});
+test("queue events decode, and malformed ones are dropped",()=>{
+ const e=decodeChatEvent("chat.queue",{sessionKey:"s",queued:[queued("a")],sent:{id:"x",text:"a"},accepted:{id:"x",receipt:{runId:"r",status:"started"}},unsent:"y",error:"e"});
+ assert.equal(e.kind,"queue");
+ assert.deepEqual([e.sent.id,e.accepted.receipt.runId,e.unsent,e.error],["x","r","y","e"]);
+ assert.equal(decodeChatEvent("chat.queue",{sessionKey:"s"}),null);
+ assert.equal(decodeChatEvent("chat.queue",{sessionKey:"s",queued:[],accepted:{id:"x",receipt:{}}}).accepted,undefined);
+});

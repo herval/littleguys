@@ -26,6 +26,7 @@ fn credential(kind: Option<String>, value: Option<String>) -> Option<Credential>
 #[tauri::command]
 pub async fn gw_call(
     hub: State<'_, Arc<Hub>>,
+    activity: State<'_, Arc<Activity>>,
     gateway: String,
     method: String,
     params: Option<Value>,
@@ -35,10 +36,8 @@ pub async fn gw_call(
         .client(&gateway)
         .ok_or_else(|| RpcError { code: "UNKNOWN_GATEWAY".into(), message: format!("no gateway {gateway}"), details: None })?;
     let params = params.unwrap_or_else(|| Value::Object(Default::default()));
-    match timeout_ms {
-        Some(ms) => client.call_with_timeout(&method, params, std::time::Duration::from_millis(ms)).await,
-        None => client.call(&method, params).await,
-    }
+    // Through Activity: it holds messages queued while a guy works (outbox.rs).
+    activity.call(&client, &method, params, timeout_ms.map(std::time::Duration::from_millis)).await
 }
 
 #[tauri::command]

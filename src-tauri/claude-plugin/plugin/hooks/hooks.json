@@ -12,6 +12,9 @@
     "Notification": [
       { "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" Notification 4", "timeout": 5 }] }
     ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" PostToolUse 2", "timeout": 3 }] }
+    ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" Stop 4", "timeout": 5 }] }
     ],

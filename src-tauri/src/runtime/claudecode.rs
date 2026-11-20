@@ -146,6 +146,9 @@ fn capabilities(config: &ClaudeCodeConfig) -> Capabilities {
         browser: false,
         past_sessions: true,
         code: true,
+        // At the next tool call (PostToolUse), in sessions with the plugin's hooks. Not on
+        // Windows, where that hook would start PowerShell after every tool call.
+        steer: cfg!(unix),
     }
 }
 
@@ -362,6 +365,9 @@ struct Session {
     helpers: HashMap<String, Helper>,
     /// Your messages waiting for the session.
     outbox: Vec<PendingMessage>,
+    /// Your messages for the turn under way, handed over after its next tool call
+    /// (PostToolUse); whatever's left when the turn ends joins the outbox.
+    steer: Vec<PendingMessage>,
     delivering: bool,
     /// How many times the outbox was handed over (a routine waits for its message's turn).
     handed: u64,
@@ -380,6 +386,16 @@ impl Session {
     fn take_outbox(&mut self) -> Vec<PendingMessage> {
         self.handed += 1;
         std::mem::take(&mut self.outbox)
+    }
+
+    /// The turn ended before a tool call took what you sent for it: it waits with the rest,
+    /// ahead of what you queued.
+    fn settle_steer(&mut self) {
+        if !self.steer.is_empty() {
+            let mut first = std::mem::take(&mut self.steer);
+            first.append(&mut self.outbox);
+            self.outbox = first;
+        }
     }
 
     fn run_id(&self) -> String {
@@ -452,6 +468,7 @@ impl Session {
             emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": self.run_id(), "phase": "start" })));
             emits.push(("chat", json!({ "sessionKey": key, "runId": self.run_id(), "state": "status", "phase": "thinking" })));
         } else {
+            self.settle_steer();
             self.steps.clear();
             self.helpers.clear();
             // A reply you haven't read (in littleguys).
@@ -1022,6 +1039,9 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
     let Some(sid) = input.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string) else {
         return String::new();
     };
+    if event == "PostToolUse" {
+        return after_tool(inner, &sid, handoffs);
+    }
     let background = request.headers.get("x-claude-background").is_some_and(|v| v == "1");
     let mut emits: Emits = Vec::new();
     let mut expire: Vec<oneshot::Sender<String>> = Vec::new();
@@ -1083,6 +1103,17 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
             },
             "Stop" => {
                 s.waiting_for = None;
+                s.settle_steer();
+                if !s.delivering {
+                    // What you queued in littleguys while it worked keeps this turn going too.
+                    let key = s.key();
+                    let queued = crate::outbox::take_text(&inner.id, &key).join("\n\n");
+                    if !queued.is_empty() {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        emits.push(("chat.queue", crate::outbox::sending(&inner.id, &key, &id, &queued)));
+                        s.outbox.push(PendingMessage { text: queued, client_send_id: Some(id) });
+                    }
+                }
                 if !s.outbox.is_empty() && !s.delivering {
                     // Your message keeps the turn going.
                     let batch = s.take_outbox();
@@ -1121,6 +1152,17 @@ async fn on_hook(inner: &Arc<Inner>, event: &str, request: &Request, stream: &mu
 /// The text a session gets for your queued messages.
 fn handover(outbox: &[PendingMessage]) -> String {
     format!("{MARK}\n\n{}", delivery::text(outbox))
+}
+
+/// A tool call finished: what you sent for the turn under way goes in with its result
+/// (shown in the transcript as context a hook added, like a Stop hook's).
+fn after_tool(inner: &Inner, sid: &str, handoffs: &mut Vec<(String, Vec<PendingMessage>)>) -> String {
+    let mut st = inner.st.lock().unwrap();
+    let Some(s) = st.sessions.get_mut(sid).filter(|s| !s.steer.is_empty() && !s.delivering) else { return String::new() };
+    let batch = std::mem::take(&mut s.steer);
+    let text = handover(&batch);
+    handoffs.push((s.key(), batch));
+    json!({ "hookSpecificOutput": { "hookEventName": "PostToolUse", "additionalContext": text } }).to_string()
 }
 
 /// Whether an approval card can stand in for this prompt. Questions need their answers
@@ -2416,6 +2458,7 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
             return Ok(delivery::receipt(&run_id, params));
         }
     };
+    let steer = params.get("delivery").and_then(Value::as_str) == Some("steer");
     let mut deliver_now = false;
     let mut settled = false;
     {
@@ -2427,7 +2470,13 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
                 "This session is open in a terminal that started before the littleguys plugin was installed. Write to it there.",
             ));
         }
-        s.outbox.push(PendingMessage::new(text, params));
+        let message = PendingMessage::new(text, params);
+        if steer && s.busy && s.hooked && !s.delivering {
+            // Its next tool call takes it (or its Stop hook, if none comes).
+            s.steer.push(message);
+        } else {
+            s.outbox.push(message);
+        }
         if s.delivering || (s.busy && (s.hooked || s.background)) {
             // The Stop hook (or the delivery under way) takes it from here.
         } else if s.running && !s.background {
@@ -3255,9 +3304,13 @@ pub fn write_plugin_files(data_dir: &Path) -> std::io::Result<PathBuf> {
 /// hooks in PowerShell, where `sh` doesn't exist, and a PermissionRequest hook that
 /// fails there blocks the request; so the Windows hooks never go through `sh`.
 /// hook.ps1 is read in as a script block, which the execution policy allows.
+///
+/// PostToolUse is left out: PowerShell takes a moment to start, and that hook runs
+/// after every tool call. What you send for the turn under way waits for its Stop hook.
 #[cfg(any(windows, test))]
 fn powershell_hooks(hooks_json: &str) -> String {
     let mut hooks: Value = serde_json::from_str(hooks_json).expect("hooks.json is valid");
+    hooks["hooks"].as_object_mut().expect("hooks by event").remove("PostToolUse");
     for matchers in hooks["hooks"].as_object_mut().expect("hooks by event").values_mut() {
         for hook in matchers.as_array_mut().into_iter().flatten().flat_map(|m| m["hooks"].as_array_mut()).flatten() {
             let command = hook["command"].as_str().expect("a command hook");
@@ -4174,6 +4227,60 @@ mod tests {
         assert!(cards(&client).await.is_empty());
     }
 
+    /// A session of `client`'s that's mid-turn with the plugin's hooks; returns its thread key.
+    fn mid_turn(client: &ClaudeCodeClient, sid: &str) -> String {
+        let mut st = client.inner.st.lock().unwrap();
+        let s = st.session(sid);
+        s.running = true;
+        s.busy = true;
+        s.hooked = true;
+        s.cwd = "/work/shop".into();
+        s.key()
+    }
+
+    async fn hook(client: &ClaudeCodeClient, event: &str, sid: &str) -> String {
+        let (mut ours, _theirs) = hook_pair().await;
+        let request = hook_request(event, json!({ "session_id": sid, "tool_name": "Bash" }));
+        on_hook(&client.inner, event, &request, &mut ours, &mut Vec::new()).await
+    }
+
+    #[tokio::test]
+    async fn what_you_send_now_goes_in_after_the_next_tool_call() {
+        let (client, _) = following(false, false);
+        let key = mid_turn(&client, "s1");
+        let sent = client.call("chat.send", json!({ "sessionKey": key, "message": "use the smaller patch", "delivery": "steer" })).await.unwrap();
+        assert_eq!(sent["status"], "started");
+        let printed: Value = serde_json::from_str(&hook(&client, "PostToolUse", "s1").await).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        let context = printed["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert_eq!(handed_over(context).as_deref(), Some("use the smaller patch"));
+        assert_eq!(hook(&client, "PostToolUse", "s1").await, "", "handed over once");
+
+        // Without "steer" it waits for the turn to end, as before.
+        client.call("chat.send", json!({ "sessionKey": key, "message": "then the docs" })).await.unwrap();
+        assert_eq!(hook(&client, "PostToolUse", "s1").await, "");
+        let stop: Value = serde_json::from_str(&hook(&client, "Stop", "s1").await).unwrap();
+        assert_eq!(handed_over(stop["reason"].as_str().unwrap()).as_deref(), Some("then the docs"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_ends_first_takes_what_you_sent_now_and_queued() {
+        // Its own session: other tests' Stop hooks would take what's queued for s1.
+        let (client, events) = following(false, false);
+        let key = mid_turn(&client, "s-queued");
+        client.call("chat.send", json!({ "sessionKey": key, "message": "one", "delivery": "steer" })).await.unwrap();
+        crate::outbox::hold("t", &key, "two".into(), vec![]);
+        let stop: Value = serde_json::from_str(&hook(&client, "Stop", "s-queued").await).unwrap();
+        assert_eq!(stop["decision"], "block");
+        assert_eq!(handed_over(stop["reason"].as_str().unwrap()).as_deref(), Some("one\n\ntwo"));
+        assert!(crate::outbox::is_empty("t", &key));
+        let queue = emitted(&events, "chat.queue");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["sent"]["text"], "two");
+        assert!(queue[0]["sent"]["id"].is_string());
+        assert_eq!(queue[0]["queued"], json!([]));
+    }
+
     #[tokio::test]
     async fn background_prompts_show_at_once_and_ignore_the_listing() {
         let (client, events) = following(true, true);
@@ -4279,8 +4386,9 @@ mod tests {
         let windows: Value = serde_json::from_str(&powershell_hooks(HOOKS_JSON)).unwrap();
         let unix: Value = serde_json::from_str(HOOKS_JSON).unwrap();
         let events = unix["hooks"].as_object().unwrap();
-        assert_eq!(windows["hooks"].as_object().unwrap().len(), events.len());
-        for (event, matchers) in events {
+        assert!(windows["hooks"].get("PostToolUse").is_none(), "it'd start PowerShell after every tool call");
+        assert_eq!(windows["hooks"].as_object().unwrap().len(), events.len() - 1);
+        for (event, matchers) in events.iter().filter(|(e, _)| *e != "PostToolUse") {
             let hook = &matchers[0]["hooks"][0];
             let seconds = hook["command"].as_str().unwrap().split_whitespace().last().unwrap();
             let ours = &windows["hooks"][event][0]["hooks"][0];

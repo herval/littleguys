@@ -13,6 +13,7 @@ import type {
   ModelChoice,
   PastSession,
   PluginEntry,
+  QueuedMessage,
   SessionRow,
   SkillEntry,
   ToolGroup,
@@ -88,13 +89,24 @@ export interface ChatHistory {
   totalMessages?: number;
   sessionInfo?: SessionRow;
   inFlightRun?: { runId: string; message?: ChatMessage } | null;
+  /** What littleguys holds for the thread until its turn ends. */
+  queued?: QueuedMessage[];
 }
+
+/**
+ * While a guy works: `queue` waits for its turn to end (held by littleguys), `steer` goes
+ * into the turn under way (if its runtime can). Either goes at once when it's idle.
+ */
+export type Delivery = "queue" | "steer";
 
 export const chat = {
   history: (gw: string, sessionKey: string, limit = 200) =>
     gwCall<ChatHistory>(gw, "chat.history", { sessionKey, limit, maxChars: 40_000 }, 60_000),
-  /** `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode). */
-  send: (gw: string, sessionKey: string, message: string, attachments: Attachment[] = [], cwd?: string, clientSendId = newIdempotencyKey(), worktree?: boolean) =>
+  /**
+   * `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode).
+   * `delivery`: while the guy works. `status: "held"` means littleguys keeps it until the turn ends.
+   */
+  send: (gw: string, sessionKey: string, message: string, attachments: Attachment[] = [], cwd?: string, clientSendId = newIdempotencyKey(), worktree?: boolean, delivery?: Delivery) =>
     gwCall<SendReceipt>(
       gw,
       "chat.send",
@@ -104,6 +116,7 @@ export const chat = {
         idempotencyKey: clientSendId,
         ...(cwd ? { cwd } : {}),
         ...(worktree ? { worktree: true } : {}),
+        ...(delivery ? { delivery } : {}),
         ...(attachments.length
           ? {
               attachments: attachments.map(({ type, mimeType, fileName, content, sizeBytes }) => ({
@@ -120,6 +133,10 @@ export const chat = {
     ),
   abort: (gw: string, sessionKey: string, runId?: string) =>
     gwCall(gw, "chat.abort", { sessionKey, ...(runId ? { runId } : {}) }),
+  /** A queued message, now (`steer`: into the turn under way). Its `chat.queue` events put it in the thread. */
+  sendQueued: (gw: string, sessionKey: string, id: string, delivery?: Delivery) =>
+    gwCall<SendReceipt>(gw, "chat.queue.send", { sessionKey, id, ...(delivery ? { delivery } : {}) }, 120_000),
+  unqueue: (gw: string, sessionKey: string, id: string) => gwCall(gw, "chat.queue.remove", { sessionKey, id }),
 };
 
 export const artifacts = {
