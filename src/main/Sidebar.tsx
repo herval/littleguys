@@ -15,7 +15,6 @@ import {
   Pencil,
   Pin,
   PinOff,
-  Plus,
   Search,
   Settings as SettingsIcon,
   Sparkles,
@@ -83,13 +82,11 @@ export function Sidebar() {
   );
 }
 
-/** Beside the traffic lights: back to the guys, new guy, settings. */
+/** Beside the traffic lights: back to the guys, search, settings. New guys are made in Settings › Agents. */
 function SidebarTop({ back }: { back: boolean }) {
   const browse = useApp((s) => s.browse);
-  const startNewGuy = useApp((s) => s.startNewGuy);
   const setSettingsOpen = useApp((s) => s.setSettingsOpen);
   const setSearchOpen = useApp((s) => s.setSearchOpen);
-  const canAdd = useApp((s) => s.roster.gateways.some((g) => g.loaded) || s.roster.gateways.length > 1);
   return (
     <div data-tauri-drag-region className={`flex h-14 shrink-0 items-center gap-0.5 ${IS_MAC ? "pl-[84px]" : "pl-2"} pr-2`}>
       {back && (
@@ -105,11 +102,6 @@ function SidebarTop({ back }: { back: boolean }) {
       <IconButton label={`Search (${shortcut("K")})`} onClick={() => setSearchOpen(true)}>
         <Search size={15} />
       </IconButton>
-      {canAdd && (
-        <IconButton label="New little guy" onClick={startNewGuy}>
-          <Plus size={16} />
-        </IconButton>
-      )}
       <IconButton label={`Settings (${shortcut(",")})`} onClick={() => setSettingsOpen(true)}>
         <SettingsIcon size={15} />
       </IconButton>

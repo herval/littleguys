@@ -1,4 +1,4 @@
-import { CornerDownLeft, MessageCircleReply, Plus, Power, Settings } from "lucide-react";
+import { CornerDownLeft, MessageCircleReply, Power, Settings } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { COMPUTER, shortcut } from "../lib/platform";
 import { chat as chatApi } from "../lib/gateway";
@@ -482,7 +482,6 @@ function Disconnected({ gateway }: { gateway?: GatewayRoster }) {
 function Footer() {
   return (
     <div className="mt-1 border-t border-[var(--color-line)] px-1.5 py-1.5">
-      <MenuItem icon={<Plus size={14} />} label="New little guy" onClick={() => core.openMain({ view: "new-guy" })} />
       <MenuItem
         icon={<span className="flex w-3.5 justify-center text-[13px] leading-none">◐</span>}
         label="Open littleguys"

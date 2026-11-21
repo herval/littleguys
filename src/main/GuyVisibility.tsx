@@ -1,4 +1,4 @@
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { TRAY } from "../lib/platform";
 import { allGuys, guyName, isMultiGateway } from "../lib/guys";
@@ -6,6 +6,7 @@ import { core, errorMessage } from "../lib/ipc";
 import type { Guy } from "../lib/types";
 import { useApp } from "../stores/app";
 import { Avatar } from "../ui/Avatar";
+import { Button } from "../ui/kit";
 
 /** Settings section: choose which little guys show up in littleguys. */
 export function GuyVisibility() {
@@ -14,8 +15,19 @@ export function GuyVisibility() {
   const hidden = useMemo(() => new Set(roster.hidden ?? []), [roster.hidden]);
   const multi = isMultiGateway(roster);
   const [error, setError] = useState<string | null>(null);
+  // A gateway that makes guys (OpenClaw); without one, Connections has "Add a bot".
+  const canMake = useApp((s) => s.roster.gateways.some((g) => g.loaded && g.status.capabilities?.manageGuys));
+  const newGuy = () => {
+    useApp.getState().setSettingsOpen(false);
+    useApp.getState().startNewGuy();
+  };
+  const newButton = canMake && (
+    <Button size="sm" onClick={newGuy}>
+      <Plus size={12} /> New little guy
+    </Button>
+  );
 
-  if (guys.length === 0) return null;
+  if (guys.length === 0) return newButton ? <section className="mt-5 flex justify-end">{newButton}</section> : null;
   const hiddenCount = guys.filter((g) => hidden.has(g.uid)).length;
 
   const toggle = async (guy: Guy) => {
@@ -29,11 +41,14 @@ export function GuyVisibility() {
 
   return (
     <section className="mt-5">
-      <div className="mb-1.5 flex items-baseline justify-between">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">littleguys</h3>
-        <span className="text-[11px] text-[var(--color-ink-3)]">
-          {guys.length - hiddenCount} shown{hiddenCount ? ` · ${hiddenCount} hidden` : ""}
-        </span>
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">
+          littleguys
+          <span className="ml-2 font-normal normal-case tracking-normal">
+            {guys.length - hiddenCount} shown{hiddenCount ? ` · ${hiddenCount} hidden` : ""}
+          </span>
+        </h3>
+        {newButton}
       </div>
       <div className="overflow-hidden rounded-xl border border-[var(--color-line)]">
         {guys.map((guy, i) => {
