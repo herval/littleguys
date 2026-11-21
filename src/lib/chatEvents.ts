@@ -9,7 +9,9 @@ export interface SendReceipt {
 }
 export type ChatEvent =
   | { kind: "message"; message: ChatMessage; runId?: string; clientSendId?: string }
-  | { kind: "run"; runId: string; state: "status" | "delta" | "final" | "aborted" | "error"; seq?: number; phase?: string; message?: ChatMessage; deltaText?: string; error?: string }
+  /** `untrustedFolder`: a new thread didn't start because Claude Code hasn't been told to trust that folder. */
+  | { kind: "run"; runId: string; state: "status" | "delta" | "final" | "aborted" | "error"; seq?: number; phase?: string; message?: ChatMessage; deltaText?: string; error?: string;
+      untrustedFolder?: string }
   | { kind: "delivery"; ids: string[]; status: "delivered" | "unknown"; text?: string; error?: string }
   | { kind: "tool"; id: string; status: "running" | "completed" | "error" }
   /** What littleguys holds for the thread changed (src-tauri/src/outbox.rs). `sent`: it's handing
@@ -31,7 +33,8 @@ export function decodeChatEvent(name: string, p: Record<string, unknown>): ChatE
   }
   if (name === "chat" && str(p.runId) && ["status", "delta", "final", "aborted", "error"].includes(String(p.state))) {
     return { kind: "run", runId: p.runId as string, state: p.state as "status" | "delta" | "final" | "aborted" | "error",
-      seq: typeof p.seq === "number" ? p.seq : undefined, phase: str(p.phase), message: message(p.message), deltaText: str(p.deltaText), error: str(p.errorMessage) };
+      seq: typeof p.seq === "number" ? p.seq : undefined, phase: str(p.phase), message: message(p.message), deltaText: str(p.deltaText), error: str(p.errorMessage),
+      ...(str(p.untrustedFolder) ? { untrustedFolder: str(p.untrustedFolder) } : {}) };
   }
   if (name === "chat.delivery" && Array.isArray(p.clientSendIds) && ["delivered", "unknown"].includes(String(p.status))) {
     return { kind: "delivery", ids: p.clientSendIds.filter((id): id is string => typeof id === "string"), status: p.status as "delivered" | "unknown", text: str(p.text), error: str(p.errorMessage) };

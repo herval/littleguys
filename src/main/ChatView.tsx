@@ -1,5 +1,5 @@
 import { reportError } from "../ui/reportError";
-import { Archive, ArrowDown, Globe, RotateCw } from "lucide-react";
+import { Archive, ArrowDown, Globe, RotateCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { sessions as sessionsApi } from "../lib/gateway";
 import { channelName, followsSessions, gatewayOf, guyName, hasMainChat, isOnThisMac, isRunning, phaseLabel, sessionRow, threadKind, threadTitle } from "../lib/guys";
@@ -37,7 +37,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   }, [inRoster, archiveLoaded, guy.uid, gw, guy.id]);
   const rosterRunning = useApp((s) => isRunning(s.roster, gw, sessionKey));
   const thread = useChat((s) => s.threads[tid]);
-  const { open, send, sendQueued, unqueue, abort, reload } = useChat.getState();
+  const { open, send, sendQueued, unqueue, abort, reload, trustFolder } = useChat.getState();
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   // Follow mode: keep the newest message in view while anything grows (streaming
@@ -230,7 +230,9 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             showSteps={showSteps}
             editsIn={edits}
           />
-          {thread?.pending.some((p) => p.status === "unknown") && (
+          {thread?.untrustedFolder ? (
+            <TrustFolder folder={thread.untrustedFolder} onTrust={() => trustFolder(tid)} />
+          ) : thread?.pending.some((p) => p.status === "unknown") && (
             <p className="mt-3 text-center text-[12px] text-[var(--color-ink-3)]">
               A message's delivery is unconfirmed. Check the conversation before sending it again.
             </p>
@@ -290,6 +292,31 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
           onStop={() => abort(tid)}
         />
       </div>
+    </div>
+  );
+}
+
+/** A new thread's first message, waiting because Claude Code hasn't been told it can trust the folder. */
+function TrustFolder({ folder, onTrust }: { folder: string; onTrust: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="mx-auto mt-3 max-w-md text-center text-[12.5px] text-[var(--color-ink-2)]">
+      <p>
+        Your message is waiting: Claude Code hasn't been told it can trust{" "}
+        <span className="font-medium text-[var(--color-ink)]">{tildify(folder)}</span>. Trusting it here is the same as
+        accepting Claude Code's own trust prompt there.
+      </p>
+      <Button
+        className="mt-2.5"
+        variant="primary"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try { await onTrust(); } finally { setBusy(false); }
+        }}
+      >
+        {busy ? <Spinner size={13} /> : <ShieldCheck size={13} />} Trust this folder
+      </Button>
     </div>
   );
 }

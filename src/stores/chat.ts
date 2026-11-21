@@ -26,6 +26,8 @@ interface ChatState {
   /** Takes a queued message back. */
   unqueue(id: string, queuedId: string): Promise<void>;
   abort(id: string): Promise<void>;
+  /** Trusts the folder a new thread's first message waits on (Claude Code), and sends it. */
+  trustFolder(id: string): Promise<void>;
   handleEvent(gateway: string, name: string, payload: Record<string, unknown>): void;
   disconnect(gateway: string): void;
   resubscribe(gateway: string): void;
@@ -87,6 +89,13 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
         const [gw, sessionKey] = splitThreadId(key);
         try { await api.abort(gw, sessionKey, get().threads[key]?.live?.runId); }
         catch (e) { dispatch(key, { type: "error", error: `Couldn't stop the run: ${errorMessage(e)}` }); }
+      },
+      async trustFolder(key) {
+        const [gw, sessionKey] = splitThreadId(key);
+        try {
+          await api.trustFolder(gw, sessionKey);
+          dispatch(key, { type: "trusted" });
+        } catch (e) { dispatch(key, { type: "error", error: errorMessage(e) }); }
       },
       handleEvent(gateway, name, payload) {
         if (typeof payload.sessionKey !== "string") return;

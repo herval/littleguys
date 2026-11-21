@@ -642,6 +642,7 @@ impl ClaudeCodeClient {
             "chat.history" => chat_history(inner, &params).await,
             "chat.send" => chat_send(inner, &params),
             "chat.abort" => chat_abort(inner, &params).await,
+            "folders.trust" => folders_trust(inner, &params).await,
             "sessions.past" => sessions_past(inner).await,
             "sessions.open" => sessions_open(inner, &params),
             "sessions.search" => sessions_search(inner, &params).await,
@@ -2621,13 +2622,24 @@ async fn start_draft(inner: Arc<Inner>, key: String) {
             }
             Err(e) => {
                 log::warn!("[claude] couldn't start a session in {cwd}: {e}");
+                // Claude Code turned it away before it started: what you wrote waits for you to
+                // trust the folder (folders.trust), or goes along with your next message.
+                let untrusted = untrusted_workspace(&e).then(|| trust_folder_for(Path::new(&cwd), &home())).flatten();
                 if let Some(d) = st.drafts.get_mut(&key) {
                     d.launching = false;
                     emits.push(delivery::event(&key, &d.outbox, Some(&e)));
-                    d.outbox.clear();
+                    if untrusted.is_some() {
+                        d.outbox.splice(0..0, batch);
+                    } else {
+                        d.outbox.clear();
+                    }
                 }
                 let run_id = uuid::Uuid::new_v4().to_string();
-                emits.push(("chat", json!({ "sessionKey": key, "runId": run_id, "state": "error", "errorMessage": format!("Couldn't start a session: {e}") })));
+                let mut error = json!({ "sessionKey": key, "runId": run_id, "state": "error", "errorMessage": format!("Couldn't start a session: {e}") });
+                if let Some(folder) = untrusted {
+                    error["untrustedFolder"] = json!(folder.display().to_string());
+                }
+                emits.push(("chat", error));
             }
         }
     }
@@ -3083,6 +3095,103 @@ fn rule_path(dir: &Path) -> String {
         [drive, b':', ..] if drive.is_ascii_alphabetic() => format!("/{}{}", drive.to_ascii_lowercase() as char, &path[2..]),
         _ => path,
     }
+}
+
+// ---- trusting a folder ---------------------------------------------------------------------
+
+/// Claude Code's answer to `claude --bg` in a folder you haven't trusted.
+fn untrusted_workspace(error: &str) -> bool {
+    error.contains("Workspace not trusted")
+}
+
+/// The folder whose trust Claude Code looks up for `cwd`: its repo, else itself. None for
+/// your home folder, which Claude Code trusts one session at a time and never remembers.
+fn trust_folder_for(cwd: &Path, home: &Path) -> Option<PathBuf> {
+    let folder = crate::code::repo_root(cwd).filter(|root| root != home).unwrap_or_else(|| cwd.to_path_buf());
+    (folder != home).then_some(folder)
+}
+
+/// Where Claude Code keeps what you've trusted (with its other settings); tests get their own.
+fn claude_config(inner: &Inner) -> PathBuf {
+    if cfg!(test) {
+        return inner.data_dir.join(".claude.json");
+    }
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(".claude.json"),
+        _ => home().join(".claude.json"),
+    }
+}
+
+/// Records that you trust `folder`, as accepting Claude Code's trust prompt there does:
+/// `projects[folder].hasTrustDialogAccepted`. Every running Claude Code rewrites the file,
+/// so it's read right before, and swapped in whole.
+fn trust(config: &Path, folder: &Path) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let unreadable = || Error::new(ErrorKind::InvalidData, format!("{} isn't the JSON Claude Code writes", config.display()));
+    let mut all: Value = match std::fs::read_to_string(config) {
+        Ok(text) => serde_json::from_str(&text).map_err(|_| unreadable())?,
+        Err(e) if e.kind() == ErrorKind::NotFound => json!({}),
+        Err(e) => return Err(e),
+    };
+    // Its keys: the folder with `/`s, even on Windows; and where a symlink in it leads, which
+    // is the folder Claude Code finds itself in when started there.
+    let key = |path: &Path| if cfg!(windows) { path.display().to_string().replace('\\', "/") } else { path.display().to_string() };
+    let mut keys = vec![key(folder)];
+    #[cfg(unix)]
+    if let Ok(real) = std::fs::canonicalize(folder) {
+        keys.push(key(&real));
+        keys.dedup();
+    }
+    let projects = all.as_object_mut().ok_or_else(unreadable)?.entry("projects").or_insert_with(|| json!({}));
+    let projects = projects.as_object_mut().ok_or_else(unreadable)?;
+    let mut changed = false;
+    for key in keys {
+        // A folder it has never seen gets the record Claude Code starts one with.
+        let project = projects.entry(key).or_insert_with(|| {
+            json!({
+                "allowedTools": [], "mcpContextUris": [], "mcpServers": {}, "enabledMcpjsonServers": [], "disabledMcpjsonServers": [],
+                "hasClaudeMdExternalIncludesApproved": false, "hasClaudeMdExternalIncludesWarningShown": false,
+            })
+        });
+        if project.get("hasTrustDialogAccepted") != Some(&Value::Bool(true)) {
+            project.as_object_mut().ok_or_else(unreadable)?.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let text = serde_json::to_string_pretty(&all).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+    let temp = config.with_file_name(format!(".claude.json.littleguys-{}", std::process::id()));
+    std::fs::write(&temp, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&temp, config).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })
+}
+
+/// Trusts a new thread's folder for Claude Code, then starts the thread with what you wrote.
+async fn folders_trust(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    let key = params.get("sessionKey").and_then(Value::as_str).ok_or_else(|| RpcError::new("INVALID_REQUEST", "Which thread?"))?.to_string();
+    let cwd = inner.st.lock().unwrap().drafts.get(&key).map(|d| d.cwd.clone()).ok_or_else(|| RpcError::new("NOT_FOUND", "This thread has already started."))?;
+    let folder = trust_folder_for(Path::new(&cwd), &home())
+        .ok_or_else(|| RpcError::new("INVALID_REQUEST", "Claude Code only trusts your home folder one session at a time. Pick a project folder instead."))?;
+    let (config, trusted) = (claude_config(inner), folder.clone());
+    blocking(move || trust(&config, &trusted).map_err(|e| RpcError::new("UNAVAILABLE", format!("Couldn't record that you trust {}: {e}", trusted.display())))).await?;
+    log::info!("[claude] trusted {} for {cwd}", folder.display());
+    let start = {
+        let mut st = inner.st.lock().unwrap();
+        st.drafts.get_mut(&key).is_some_and(|d| !d.outbox.is_empty() && !std::mem::replace(&mut d.launching, true))
+    };
+    if start {
+        let inner = inner.clone();
+        tauri::async_runtime::spawn(async move { start_draft(inner, key).await });
+    }
+    Ok(json!({ "folder": folder.display().to_string(), "started": start }))
 }
 
 /// A file name without folders, control characters or a leading dot.
@@ -4105,6 +4214,175 @@ mod tests {
             json!(["Read(//Users/sam/Library/Application Support/ai.littleguys.app/claude-attachments/**)"])
         );
         assert_eq!(rule_path(Path::new(r"C:\Users\sam\AppData\Roaming\ai.littleguys.app\claude-attachments")), "/c/Users/sam/AppData/Roaming/ai.littleguys.app/claude-attachments");
+    }
+
+    #[test]
+    fn trusting_a_folder_marks_it_the_way_claude_code_does() {
+        let dir = temp_dir("trust");
+        let config = dir.join(".claude.json");
+        write(&config, r#"{"numStartups": 3, "projects": {"/w/shop": {"allowedTools": ["Bash"], "hasTrustDialogAccepted": false}}}"#);
+        trust(&config, Path::new("/w/shop")).unwrap();
+        trust(&config, Path::new("/w/blog")).unwrap();
+        trust(&config, Path::new("/w/blog")).unwrap();
+        let all: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(all["numStartups"], 3, "the rest is kept");
+        assert_eq!(all["projects"]["/w/shop"], json!({ "allowedTools": ["Bash"], "hasTrustDialogAccepted": true }));
+        assert_eq!(all["projects"]["/w/blog"]["hasTrustDialogAccepted"], true);
+        assert_eq!(all["projects"]["/w/blog"]["mcpServers"], json!({}), "a new folder gets Claude Code's starting record");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&config).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // A file it can't read is left alone.
+        write(&config, "{ half written");
+        assert!(trust(&config, Path::new("/w/shop")).is_err());
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "{ half written");
+        // No file yet: one with just that.
+        let fresh = dir.join("fresh.json");
+        trust(&fresh, Path::new("/w/shop")).unwrap();
+        let all: Value = serde_json::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
+        assert_eq!(all["projects"]["/w/shop"]["hasTrustDialogAccepted"], true);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "no temporary file left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_folder_to_trust_is_its_repo_but_never_your_home() {
+        let home = temp_dir("trust-home");
+        let (repo, loose) = (home.join("dev/shop"), home.join("notes"));
+        for d in [repo.join(".git"), repo.join("src"), loose.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        assert_eq!(trust_folder_for(&repo.join("src"), &home), Some(repo.clone()), "a repo is trusted whole");
+        assert_eq!(trust_folder_for(&loose, &home), Some(loose.clone()));
+        assert_eq!(trust_folder_for(&home, &home), None, "Claude Code never remembers trusting your home folder");
+        // A home folder that's a repo (dotfiles) doesn't make the folders in it that repo.
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        assert_eq!(trust_folder_for(&loose, &home), Some(loose));
+        assert!(untrusted_workspace("Workspace not trusted. Run `claude` in /w/shop once and accept the trust prompt, then retry."));
+        assert!(!untrusted_workspace("Claude Code didn't say which session it started"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The real Claude Code, and your real `~/.claude.json` (its records for a new repo in the
+    /// temp folder are removed after): `LG_E2E_TRUST=1 cargo test --lib real_trust -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn real_trust_lets_claude_code_start_in_a_new_repo() {
+        assert!(std::env::var_os("LG_E2E_TRUST").is_some(), "LG_E2E_TRUST=1: this writes to your ~/.claude.json");
+        let claude = find_claude().expect("Claude Code is installed");
+        let repo = std::env::temp_dir().join(format!("lg-trust-{}", &uuid::Uuid::new_v4().to_string()[..8])).join("shop");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let start = || {
+            let mut cmd = cli::command(&claude);
+            cmd.args(["Reply with just the word ok. Don't use any tools.", "--bg"]).current_dir(repo.join("src"));
+            output(cmd, Duration::from_secs(60))
+        };
+        let refused = start().await.unwrap_err();
+        assert!(untrusted_workspace(&refused), "{refused}");
+        let folder = trust_folder_for(&repo.join("src"), &home()).unwrap();
+        assert_eq!(folder, repo);
+        let config = match std::env::var_os("CLAUDE_CONFIG_DIR") {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(".claude.json"),
+            _ => home().join(".claude.json"),
+        };
+        trust(&config, &folder).unwrap();
+        let started = start().await;
+        // Its records go, whatever happened.
+        let mut all: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        let projects = all["projects"].as_object_mut().unwrap();
+        let ours: Vec<String> = projects.keys().filter(|k| k.contains(&repo.parent().unwrap().file_name().unwrap().to_string_lossy().to_string())).cloned().collect();
+        println!("trusted as {ours:?}");
+        for key in &ours {
+            projects.remove(key);
+        }
+        let temp = config.with_file_name(".claude.json.littleguys-test");
+        std::fs::write(&temp, serde_json::to_string_pretty(&all).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::rename(&temp, &config).unwrap();
+        let out = started.expect("starts once trusted");
+        let short = backgrounded_id(&out).expect("a background session");
+        println!("started {short}");
+        let _ = run_cli(&claude, &["stop", &short], CLI_TIMEOUT).await;
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    /// `claude` that turns `--bg` away until `<dir>/.claude.json` trusts something, and logs each call.
+    #[cfg(unix)]
+    fn fake_untrusting_claude(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let claude = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{calls}'\nif grep -q hasTrustDialogAccepted '{config}' 2>/dev/null; then echo 'backgrounded · 0badf00d'; exit 0; fi\necho \"Workspace not trusted. Run \\`claude\\` in $PWD once and accept the trust prompt, then retry.\" >&2\nexit 1\n",
+            calls = dir.join("calls.log").display(),
+            config = dir.join(".claude.json").display(),
+        );
+        write(&claude, &script);
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_claude_code_doesnt_trust_keeps_your_message_until_you_trust_it() {
+        let dir = temp_dir("untrusted");
+        let folder = dir.join("shop");
+        std::fs::create_dir_all(&folder).unwrap();
+        let events: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
+        let seen = events.clone();
+        let hooks = Hooks {
+            status: Box::new(|_| {}),
+            event: Box::new(move |name, payload, _| seen.lock().unwrap().push((name.to_string(), payload.clone()))),
+            connected: Box::new(|| {}),
+        };
+        let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks);
+        let key = keys::thread(AGENT_ID, "new");
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            st.drafts.insert(key.clone(), Draft { cwd: folder.display().to_string(), created_at: 1, launching: false, outbox: Vec::new(), worktree: None });
+        }
+        *client.inner.claude.lock().unwrap() = Some(fake_untrusting_claude(&dir));
+        let calls = || std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default().lines().filter(|l| l.contains("--bg")).count();
+
+        client.call("chat.send", json!({ "sessionKey": key, "message": "add a cart", "idempotencyKey": "send-1" })).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let error = loop {
+            let found = events.lock().unwrap().iter().find(|(n, p)| n == "chat" && p["state"] == "error").map(|(_, p)| p.clone());
+            if let Some(error) = found {
+                break error;
+            }
+            assert!(Instant::now() < deadline, "no error: {:?}", events.lock().unwrap());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(error["untrustedFolder"], folder.display().to_string());
+        assert!(error["errorMessage"].as_str().unwrap().contains("Workspace not trusted"), "{error}");
+        {
+            let st = client.inner.st.lock().unwrap();
+            let d = &st.drafts[&key];
+            assert!(!d.launching);
+            assert_eq!(delivery::text(&d.outbox), "add a cart", "what you wrote waits");
+        }
+
+        let trusted = client.call("folders.trust", json!({ "sessionKey": key })).await.unwrap();
+        assert_eq!(trusted, json!({ "folder": folder.display().to_string(), "started": true }));
+        let config: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(".claude.json")).unwrap()).unwrap();
+        assert_eq!(config["projects"][folder.display().to_string()]["hasTrustDialogAccepted"], true);
+        // It starts again, with what you wrote.
+        while calls() < 2 {
+            assert!(Instant::now() < deadline, "not started again");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(client.inner.st.lock().unwrap().drafts.get(&key).is_none_or(|d| d.outbox.is_empty()));
+        let unknown = client.call("folders.trust", json!({ "sessionKey": keys::thread(AGENT_ID, "nope") })).await.unwrap_err();
+        assert_eq!(unknown.code, "NOT_FOUND");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

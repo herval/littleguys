@@ -350,3 +350,21 @@ test("an OpenClaw row without a key matches its accepted send by text, despite t
  t=event(t,{kind:"message",message:openclawRow("behind",undefined,"hello",29_000)});
  assert.equal(t.pending.length,0);
 });
+test("a new thread in a folder Claude Code doesn't trust waits for Trust this folder, then sends what you wrote",()=>{
+ // What chat.send answers for a new Claude Code thread: queued until its session starts.
+ let t=reduceThread(send(blank("g|s"),"a"),{type:"receipt",id:"a",receipt:{runId:"r0",status:"started",delivery:"queued",clientSendId:"a"}});
+ t=event(t,{kind:"delivery",ids:["a"],status:"unknown",error:"Workspace not trusted. Run `claude` in /w/shop once and accept the trust prompt, then retry."});
+ t=event(t,decodeChatEvent("chat",{sessionKey:"s",runId:"r1",state:"error",errorMessage:"Couldn't start a session: Workspace not trusted.",untrustedFolder:"/w/shop"}));
+ assert.equal(t.untrustedFolder,"/w/shop");
+ assert.equal(t.sendError,null,"the button explains it, not Claude Code's words");
+ assert.equal(t.pending[0].status,"unknown");
+ t=reduceThread(t,{type:"trusted"});
+ assert.equal(t.untrustedFolder,null);
+ assert.equal(t.pending[0].status,"sending");
+ t=event(t,{kind:"delivery",ids:["a"],status:"delivered"});
+ assert.deepEqual(t.pending[0].delivery.ids,["a"]);
+ // Any other failed start is just an error.
+ t=event(send(blank("g|s"),"b"),{kind:"run",runId:"r2",state:"error",error:"Claude Code isn't installed"});
+ assert.equal(t.untrustedFolder,null);
+ assert.equal(t.sendError,"Claude Code isn't installed");
+});

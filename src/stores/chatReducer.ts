@@ -28,6 +28,8 @@ export interface ThreadState {
   /** Written while the guy worked: littleguys sends them when its turn ends (outbox.rs). */
   queued: QueuedMessage[];
   sendError: string | null;
+  /** Its first message is waiting for you to trust this folder for Claude Code. */
+  untrustedFolder: string | null;
   epoch: number;
   request: number;
   /** Events not yet seen in a history snapshot. */
@@ -45,6 +47,8 @@ export type Action =
   | { type: "receipt"; id: string; receipt: SendReceipt }
   | { type: "sendError"; id: string; error: string; uncertain: boolean }
   | { type: "error"; error: string }
+  /** You trusted the folder; its waiting message is starting the thread. */
+  | { type: "trusted" }
   /** You took a queued message back (littleguys confirms with a `queue` event). */
   | { type: "unqueue"; id: string }
   | { type: "event"; event: ChatEvent; now: number }
@@ -52,7 +56,7 @@ export type Action =
 
 export const blank = (key: string): ThreadState => ({
   key, loading: false, loaded: false, error: null, messages: [], hasMore: false, live: null,
-  toolStatus: {}, pending: [], queued: [], sendError: null, epoch: 0, request: 0, observed: [], historyObserved: [], retired: [],
+  toolStatus: {}, pending: [], queued: [], sendError: null, untrustedFolder: null, epoch: 0, request: 0, observed: [], historyObserved: [], retired: [],
 });
 export function textOf(message: ChatMessage | undefined): string {
   if (!message) return "";
@@ -147,7 +151,7 @@ export function reduceThread(t: ThreadState, a: Action): ThreadState {
         pending: reconcilePending(t.pending, messages), queued: a.history.queued ?? t.queued };
     }
     case "loadError": return a.request === t.request && a.epoch === t.epoch ? { ...t, loading: false, error: a.error } : t;
-    case "send": return { ...t, pending: [...t.pending, { ...a.pending, seen: t.messages.map(identity) }], sendError: null };
+    case "send": return { ...t, pending: [...t.pending, { ...a.pending, seen: t.messages.map(identity) }], sendError: null, untrustedFolder: null };
     case "receipt": {
       // A send response is an acknowledgement, never evidence of a live run.
       const pending = t.pending.map((p) => p.idempotencyKey === a.id ? {
@@ -162,6 +166,9 @@ export function reduceThread(t: ThreadState, a: Action): ThreadState {
       t.pending.map((p) => p.idempotencyKey === a.id ? { ...p, status: "unknown" } : p) :
       t.pending.filter((p) => p.idempotencyKey !== a.id) };
     case "error": return { ...t, sendError: a.error };
+    // What waited was never handed over; it's being sent now.
+    case "trusted": return { ...t, untrustedFolder: null, sendError: null,
+      pending: t.pending.map((p) => p.status === "unknown" && !p.delivery ? { ...p, status: "sending" as const } : p) };
     case "unqueue": return { ...t, queued: t.queued.filter((q) => q.id !== a.id) };
     case "disconnect": return { ...t, epoch: t.epoch + 1, loading: false, live: null, toolStatus: {},
       pending: t.pending.map((p) => p.delivery ? p : { ...p, status: "unknown" }) };
@@ -204,8 +211,11 @@ export function reduceThread(t: ThreadState, a: Action): ThreadState {
       }
       if (["final", "error", "aborted"].includes(e.state)) {
         return { ...t, retired: retire(t.retired, e.runId), live: t.live?.runId === e.runId ? null : t.live,
-          sendError: e.state === "error" && (!t.live || t.live.runId === e.runId) && !t.retired.includes(e.runId) ?
-            e.error ?? "The run failed." : t.sendError };
+          // A folder to trust says it all (with a button); Claude Code's own words about it would only confuse.
+          sendError: e.state === "error" && e.untrustedFolder ? null :
+            e.state === "error" && (!t.live || t.live.runId === e.runId) && !t.retired.includes(e.runId) ?
+            e.error ?? "The run failed." : t.sendError,
+          untrustedFolder: e.state === "error" && e.untrustedFolder ? e.untrustedFolder : t.untrustedFolder };
       }
       if (t.retired.includes(e.runId)) return t;
       if (t.live && t.live.runId !== e.runId && e.state === "delta") return t;

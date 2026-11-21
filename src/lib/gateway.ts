@@ -145,6 +145,9 @@ export const chat = {
   sendQueued: (gw: string, sessionKey: string, id: string, delivery?: Delivery) =>
     gwCall<SendReceipt>(gw, "chat.queue.send", { sessionKey, id, ...(delivery ? { delivery } : {}) }, 120_000),
   unqueue: (gw: string, sessionKey: string, id: string) => gwCall(gw, "chat.queue.remove", { sessionKey, id }),
+  /** Tells Claude Code to trust a new thread's folder (its repo, if it's in one), then starts the thread with what waited. */
+  trustFolder: (gw: string, sessionKey: string) =>
+    gwCall<{ folder: string; started: boolean }>(gw, "folders.trust", { sessionKey }, 30_000),
 };
 
 export const artifacts = {
