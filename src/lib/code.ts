@@ -9,9 +9,19 @@ import { useApp } from "../stores/app";
 import { threadId } from "../stores/chat";
 import { capsOf } from "./guys";
 import { core, gwCall, listen } from "./ipc";
+import { COMPUTER } from "./platform";
 import type { CoderPrefs } from "./types";
 
-export const CODER_OFF: CoderPrefs = { on: false, folders: [], panel: true, worktrees: false, prs: false, offered: false };
+export const CODER_OFF: CoderPrefs = {
+  on: false,
+  folders: [],
+  panel: true,
+  worktrees: false,
+  prs: false,
+  offered: false,
+  terminal: true,
+  terminalApp: null,
+};
 
 export function useCoderPrefs(): CoderPrefs {
   return useApp((s) => s.roster.coder ?? CODER_OFF);
@@ -24,6 +34,19 @@ export function saveCoderPrefs(patch: Partial<CoderPrefs>): Promise<void> {
 /** Whether coder mode reads this gateway's threads. */
 export function useCoderOn(gatewayId: string | null | undefined): boolean {
   return useApp((s) => Boolean(gatewayId) && (s.roster.coder?.on ?? false) && capsOf(s.roster, gatewayId).code);
+}
+
+/** Whether this gateway's threads get the terminal button: coder mode and its terminal switch on, and folders on this computer. */
+export function useTerminalOn(gatewayId: string | null | undefined): boolean {
+  return useApp(
+    (s) => Boolean(gatewayId) && (s.roster.coder?.on ?? false) && (s.roster.coder?.terminal ?? true) && capsOf(s.roster, gatewayId).code,
+  );
+}
+
+/** Open the chosen terminal in a thread's folder. Resolves to a note worth showing when the chosen one is gone. */
+export async function openTerminal(gatewayId: string, sessionKey: string): Promise<string | null> {
+  const { opened, missing } = await core.openTerminal(gatewayId, sessionKey);
+  return missing ? `${missing} isn't on this ${COMPUTER} anymore, so ${opened} opened. Pick another in Settings → Coder mode.` : null;
 }
 
 export interface RepoStatus {

@@ -14,7 +14,7 @@ import { threadId, useChat, waitingCount } from "../stores/chat";
 import { Avatar, GuyMark } from "../ui/Avatar";
 import { Button, IconButton, Spinner } from "../ui/kit";
 import { Approvals } from "./Approvals";
-import { CoderOffer, NextSteps, RepoButtons, RepoPlace } from "./ChangesPanel";
+import { CoderOffer, NextSteps, RepoButtons, RepoPlace, TerminalButton } from "./ChangesPanel";
 import { Composer } from "./Composer";
 import { FolderPicker, threadFolder, tildify, useCanWorktree, usePendingFolder } from "./FolderPicker";
 import { phaseLabel as livePhaseLabel, toItems, Transcript } from "./Transcript";
@@ -395,6 +395,7 @@ function ChatHeader({
         </p>
       </div>
       {showFolder && <RepoButtons guy={guy} sessionKey={sessionKey} />}
+      {showFolder && <TerminalButton guy={guy} sessionKey={sessionKey} folder={showFolder} />}
       {hasBrowser && (
         <IconButton
           label={browserOpen ? "Hide browser" : `Show ${name}'s browser`}

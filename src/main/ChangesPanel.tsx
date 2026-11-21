@@ -2,8 +2,8 @@
 // the branch and change count in the header, the branch line on thread rows, the next-step
 // chips, and the one-time offer to turn coder mode on. All of them read; changes are the
 // agent's to make, when a chip or you ask.
-import { CircleCheck, CircleDot, CircleX, Code2, GitBranch, GitPullRequest, RotateCw, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { CircleCheck, CircleDot, CircleX, Code2, GitBranch, GitPullRequest, RotateCw, SquareTerminal, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   baseName,
   type ChangedFile,
@@ -11,6 +11,7 @@ import {
   matchesEdited,
   nextSteps,
   type NextStep,
+  openTerminal,
   type PullRequest,
   readDiff,
   refreshCode,
@@ -22,11 +23,13 @@ import {
   useCoderPrefs,
   usePullRequest,
   useRepoStatus,
+  useTerminalOn,
 } from "../lib/code";
 import { loadCommands } from "../lib/commands";
 import { type FileDiff, fileDiffs, fromPatch } from "../lib/diff";
 import { capsOf, gatewayOf, followsSessions } from "../lib/guys";
 import { errorMessage, invoke } from "../lib/ipc";
+import { shortcut } from "../lib/platform";
 import { toItems } from "../lib/transcript";
 import type { Guy } from "../lib/types";
 import { useApp } from "../stores/app";
@@ -403,6 +406,52 @@ export function RepoButtons({ guy, sessionKey }: { guy: Guy; sessionKey: string 
         {files ? <DiffStat added={added} removed={removed} /> : <span className="text-[var(--color-ink-3)]">no changes</span>}
       </button>
     </div>
+  );
+}
+
+/** The header's terminal button: the chosen terminal, in this thread's folder (also ⇧⌘T, sent as
+ * `lg:open-terminal`). Any folder on this computer, repo or not. */
+export function TerminalButton({ guy, sessionKey, folder }: { guy: Guy; sessionKey: string; folder: string }) {
+  const on = useTerminalOn(guy.gatewayId);
+  const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const run = useCallback(() => {
+    const flash = (text: string | null, bad: boolean) => {
+      if (!text) return;
+      clearTimeout(timer.current);
+      setNote({ text, bad });
+      timer.current = setTimeout(() => setNote(null), 5000);
+    };
+    openTerminal(guy.gatewayId, sessionKey).then(
+      (text) => flash(text, false),
+      (e) => flash(errorMessage(e), true),
+    );
+  }, [guy.gatewayId, sessionKey]);
+  useEffect(() => {
+    if (!on) return;
+    document.addEventListener("lg:open-terminal", run);
+    return () => document.removeEventListener("lg:open-terminal", run);
+  }, [on, run]);
+  if (!on) return null;
+  const name = folder.split(/[\\/]/).filter(Boolean).pop() ?? folder;
+  return (
+    <span className="relative flex">
+      <IconButton label={`Open a terminal in ${name} (${shortcut("T", true)})`} onClick={run}>
+        <SquareTerminal size={13} />
+      </IconButton>
+      {note && (
+        <span
+          role="status"
+          onClick={() => setNote(null)}
+          className={`animate-pop absolute right-0 top-full z-30 mt-1.5 w-max max-w-[300px] rounded-lg border border-[var(--color-line)] bg-[var(--color-pane-solid)] px-2.5 py-1.5 text-[11.5px] leading-snug shadow-lg ${
+            note.bad ? "text-[var(--color-bad)]" : "text-[var(--color-ink-2)]"
+          }`}
+        >
+          {note.text}
+        </span>
+      )}
+    </span>
   );
 }
 

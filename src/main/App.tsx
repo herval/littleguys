@@ -61,6 +61,11 @@ export function App() {
         e.preventDefault();
         useApp.getState().setSettingsOpen(true);
       }
+      // The open thread's terminal button listens (ChangesPanel.tsx, TerminalButton).
+      if (isModKey(e) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        document.dispatchEvent(new CustomEvent("lg:open-terminal"));
+      }
       if (isModKey(e) && e.key === "n") {
         e.preventDefault();
         document.dispatchEvent(new CustomEvent("lg:new-thread"));

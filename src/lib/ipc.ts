@@ -20,6 +20,7 @@ import type {
   RegistryAgent,
   NotifyPrefs,
   Roster,
+  TerminalApp,
   UpdateState,
 } from "./types";
 
@@ -109,6 +110,11 @@ export const core = {
   setCoderPrefs: (prefs: CoderPrefs) => invoke<void>("set_coder_prefs", { prefs }),
   /** Whether git and the GitHub CLI are on this computer. */
   coderTools: () => invoke<{ git: boolean; gh: boolean }>("coder_tools"),
+  /** The terminals on this computer, the system's first. */
+  coderTerminals: () => invoke<TerminalApp[]>("coder_terminals"),
+  /** Open the chosen terminal in a coding thread's folder. `missing` names the chosen one when it's gone and the system's opened. */
+  openTerminal: (gateway: string, sessionKey: string) =>
+    invoke<{ opened: string; missing: string | null }>("open_terminal", { gateway, sessionKey }),
   /** A photo for a guy's face (a `data:image/…` URL), or `null` for the bot's own; kept on this Mac only. */
   setGuyFace: (uid: string, face: string | null) => invoke<void>("set_guy_face", { uid, face }),
   /** Save an OpenClaw guy's picture into their workspace (gateway on this Mac); resolves to the path for `avatar`. */

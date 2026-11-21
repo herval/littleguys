@@ -2,8 +2,9 @@ import { Folder, FolderPlus, X } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { saveCoderPrefs, useCoderPrefs } from "../lib/code";
 import { core, errorMessage, isTauri } from "../lib/ipc";
-import type { CoderPrefs } from "../lib/types";
-import { IconButton, Switch } from "../ui/kit";
+import { COMPUTER, IS_MAC } from "../lib/platform";
+import type { CoderPrefs, TerminalApp } from "../lib/types";
+import { IconButton, inputBase, Switch } from "../ui/kit";
 import { tildify } from "./FolderPicker";
 
 /** Settings section: coder mode's switch, the folders chats start in, and its parts. */
@@ -98,11 +99,81 @@ export function CoderMode() {
               border
             />
           )}
+          <SwitchRow
+            title="Open a terminal from coding threads"
+            hint="Adds a terminal button that opens the thread's folder."
+            on={prefs.terminal}
+            onChange={(terminal) => save({ terminal })}
+            border
+          />
+          {prefs.terminal && <TerminalPicker app={prefs.terminalApp} save={save} />}
         </div>
+        {prefs.terminal && <TerminalNote app={prefs.terminalApp} />}
       </div>
       {error && <p className="mt-1.5 text-[11.5px] text-[var(--color-bad)]">{error}</p>}
     </section>
   );
+}
+
+const CHOOSE = "\u0000choose";
+
+function useTerminals(app: string | null): TerminalApp[] | null {
+  const [list, setList] = useState<TerminalApp[] | null>(null);
+  // Asked again after a change, so an app picked by hand joins the list.
+  useEffect(() => {
+    core.coderTerminals().then(setList).catch(() => setList([]));
+  }, [app]);
+  return list;
+}
+
+/** "Open it in ▾": the terminals here, the system's first, and any other app on a Mac. */
+function TerminalPicker({ app, save }: { app: string | null; save: (patch: Partial<CoderPrefs>) => void }) {
+  const list = useTerminals(app);
+  if (!list?.length) return null;
+  const system = list.find((t) => t.system) ?? list[0];
+  const current = (app && list.find((t) => t.app === app)) || system;
+
+  const choose = async (value: string) => {
+    if (value !== CHOOSE) return save({ terminalApp: value === system.app ? null : value });
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ multiple: false, directory: false, defaultPath: "/Applications", filters: [{ name: "Apps", extensions: ["app"] }], title: "Open terminals in…" });
+    if (typeof picked === "string") save({ terminalApp: picked });
+  };
+
+  return (
+    <label className="flex items-center gap-3 border-t border-[var(--color-line)] px-3.5 py-2">
+      <span className="min-w-0 flex-1 text-[12px] text-[var(--color-ink-2)]">Open it in</span>
+      <select className={`${inputBase} w-auto`} value={current.app} onChange={(e) => choose(e.target.value)}>
+        {list.map((t) => (
+          <option key={t.app} value={t.app}>
+            {t.name}
+            {t.system ? " (default)" : ""}
+          </option>
+        ))}
+        {IS_MAC && isTauri && <option value={CHOOSE}>Choose another app…</option>}
+      </select>
+    </label>
+  );
+}
+
+/** Under the picker: when the chosen terminal may not start in the folder, or is gone. */
+function TerminalNote({ app }: { app: string | null }) {
+  const list = useTerminals(app);
+  if (!list?.length || !app) {
+    const system = list?.find((t) => t.system);
+    return system && !system.folders ? <Warn>{system.name} doesn't say it opens folders, so it may start in your home folder.</Warn> : null;
+  }
+  const current = list.find((t) => t.app === app);
+  const system = list.find((t) => t.system) ?? list[0];
+  if (!current) {
+    const name = app.split(/[\\/]/).pop()?.replace(/\.app$/, "") ?? app;
+    return <Warn>{name} isn't on this {COMPUTER} anymore, so {system.name} opens instead.</Warn>;
+  }
+  return current.folders ? null : <Warn>{current.name} doesn't say it opens folders, so it may start in your home folder.</Warn>;
+}
+
+function Warn({ children }: { children: ReactNode }) {
+  return <p className="mt-1.5 text-[11.5px] text-[var(--color-warn)]">{children}</p>;
 }
 
 function SwitchRow({

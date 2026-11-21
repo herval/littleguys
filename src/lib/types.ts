@@ -204,6 +204,21 @@ export interface CoderPrefs {
   prs: boolean;
   /** The one-time "Turn on Coder mode" line was answered. */
   offered: boolean;
+  /** Coding threads get a button that opens a terminal in their folder. */
+  terminal: boolean;
+  /** The terminal it opens (a `.app` on a Mac; `wt`, `pwsh`, `powershell` or `cmd` on a PC), or null for the system's. */
+  terminalApp: string | null;
+}
+
+/** A terminal app on this computer (Settings → Coder mode → "Open it in"). */
+export interface TerminalApp {
+  /** What `terminalApp` saves. */
+  app: string;
+  name: string;
+  /** The system's own, opened when none is picked. */
+  system: boolean;
+  /** It says it opens folders, so it starts in the thread's folder. */
+  folders: boolean;
 }
 
 /** A little guy = an OpenClaw agent on a particular gateway. */

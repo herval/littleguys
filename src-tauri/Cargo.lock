@@ -2680,6 +2680,7 @@ dependencies = [
  "memchr",
  "objc2",
  "objc2-app-kit",
+ "plist",
  "rand 0.8.8",
  "reqwest 0.12.28",
  "rusqlite",

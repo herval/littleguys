@@ -107,7 +107,7 @@ interface AppState {
   startNewGuy(): void;
 }
 
-const emptyRoster: Roster = { gateways: [], hidden: [], notifications: { everyone: { replies: true, routines: "all" }, guys: {} }, faces: [], coder: { on: false, folders: [], panel: true, worktrees: false, prs: false, offered: false }, updatedAt: 0 };
+const emptyRoster: Roster = { gateways: [], hidden: [], notifications: { everyone: { replies: true, routines: "all" }, guys: {} }, faces: [], coder: { on: false, folders: [], panel: true, worktrees: false, prs: false, offered: false, terminal: true, terminalApp: null }, updatedAt: 0 };
 
 export const useApp = create<AppState>((set, get) => ({
   roster: emptyRoster,

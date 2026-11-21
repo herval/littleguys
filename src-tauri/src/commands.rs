@@ -189,7 +189,23 @@ pub fn set_notifications(activity: State<'_, Arc<Activity>>, uid: Option<String>
 /// Settings → Coder mode (see code.rs); the roster carries them back to every window.
 #[tauri::command]
 pub fn set_coder_prefs(activity: State<'_, Arc<Activity>>, prefs: crate::code::CoderPrefs) -> Result<(), String> {
+    crate::terminal::check_app(prefs.terminal_app.as_deref())?;
     activity.set_coder_prefs(prefs).map_err(|e| e.to_string())
+}
+
+/// The terminals on this computer, for Settings → Coder mode's "Open it in".
+#[tauri::command]
+pub async fn coder_terminals() -> Vec<crate::terminal::Terminal> {
+    let saved = crate::code::prefs().terminal_app;
+    tauri::async_runtime::spawn_blocking(move || crate::terminal::list(saved.as_deref())).await.unwrap_or_default()
+}
+
+/// Open the chosen terminal in the folder a coding thread works in (see terminal.rs). Takes
+/// the thread, never a path: the folder is the one its runtime says.
+#[tauri::command]
+pub async fn open_terminal(hub: State<'_, Arc<Hub>>, gateway: String, session_key: String) -> Result<Value, String> {
+    let runtime = hub.client(&gateway).ok_or_else(|| format!("no gateway {gateway}"))?;
+    crate::terminal::open_for_thread(&runtime, &session_key).await
 }
 
 /// Whether a folder is in a git repo: a `.git` in it or above it, no git run (coder mode's

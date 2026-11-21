@@ -15,6 +15,7 @@ pub mod openclaw;
 mod outbox;
 pub mod platform;
 pub mod runtime;
+pub mod terminal;
 mod tray;
 mod updater;
 mod windows;
@@ -84,6 +85,8 @@ pub fn run() {
             commands::set_notifications,
             commands::set_coder_prefs,
             commands::coder_tools,
+            commands::coder_terminals,
+            commands::open_terminal,
             commands::in_git_repo,
             commands::set_guy_face,
             commands::set_workspace_avatar,

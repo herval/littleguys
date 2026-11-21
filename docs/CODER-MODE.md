@@ -1,6 +1,6 @@
 # Coder mode
 
-Spec of November 19, 2026. Phases 1 to 4 are built on the Mac (see "Shipping it in pieces" for what's left); the phone is phase 5.
+Spec of November 19, 2026. Phases 1 to 4 and 6 are built on the Mac (see "Shipping it in pieces" for what's left); the phone is phase 5.
 
 ## In one line
 
@@ -60,6 +60,9 @@ Settings gains a sixth tab, **Coder mode**, between Phones and General. It's bui
  │ Adds "In a new worktree" when you start a thread.        │
  │ Show pull requests and checks                       [○ ] │
  │ Reads this branch's pull request with your gh login.     │
+ │ Open a terminal from coding threads                 [ ●] │
+ │ Adds a terminal button that opens the thread's folder.   │
+ │   Open it in                                [ iTerm  ▾ ] │
  └──────────────────────────────────────────────────────────┘
 ```
 
@@ -93,6 +96,12 @@ It's off by default. With it on, the folder picker above a new thread's composer
 ### Show pull requests and checks
 
 It's off by default, and only shows when `gh` is installed. With it on, littleguys asks `gh` for the pull request of each coding thread's branch, as described in "Pull requests and checks" below. That's the only part of coder mode that reaches the network, which is why it's a separate switch: the FAQ line saying littleguys fetches only its own updates gets "and, if you turn it on, your pull requests through gh".
+
+### Open a terminal from coding threads
+
+It's on by default, like the Changes panel: it adds one button and runs nothing until you click it. With it on, coding threads get the terminal button described in "A terminal in the thread's folder" below. With it off, the button, its shortcut and its menu item go away.
+
+Under the switch, **Open it in ▾** picks the terminal app. It lists the terminals found on this computer, with the system one first and marked as the default (Terminal on a Mac; Windows Terminal on a PC, else PowerShell), and ends with **Choose another app…**, which opens the system picker in Applications. An app that doesn't say it opens folders gets a line under the picker: "Plainterm doesn't say it opens folders, so it may start in your home folder." The choice is kept even while the switch is off.
 
 ## What you see
 
@@ -181,13 +190,28 @@ The popover and the menu bar guy don't change in v1. A popover row is one guy's 
 
 With the worktree switch on, the folder picker above a new thread's composer gains one item when the folder is a repo: **In a new worktree**. The first message then starts the session with `claude -w <name> --bg` or `codex --worktree`, with a name made from the first words of the message. The thread is grouped under its repo like any other worktree. Removing the worktree stays with the engine: archiving a Claude Code worktree thread offers "Also delete its worktree", which runs `claude rm <id>` and refuses if anything isn't committed. Codex has no equivalent yet, so its worktrees stay where Codex put them.
 
-### 9. The phone
+### 9. A terminal in the thread's folder
 
-The phone gets the branch line on rows, the Changes panel as a sheet, and the chips, all following the Mac's settings. Reviewing a diff and tapping "Open a PR" from the couch is the use case no worktree workspace covers. The settings page itself stays on the Mac in v1.
+Sooner or later you want a shell where the agent is working: to run the app, try the tests yourself, or poke at a branch. With the terminal switch on, that's one click.
+
+```
+ (🤖) Claude Code  Fix the cart total rounding
+      ● online · in shop (worktree)      ⑂ fix-rounding  PR #31 ✓  +42 −7  ⌨  ⟳
+```
+
+- **Where:** a terminal button (`SquareTerminal`) in the chat header, after the `+42 −7` count, so it sits in the same place whether or not the folder is a repo. It's also **Open a terminal here** in a thread row's menu, and ⇧⌘T (Ctrl+Shift+T on a PC) in the open thread. Its tooltip names the folder: "Open a terminal in shop (⇧⌘T)".
+- **Which threads:** every thread whose folder is on this computer: Claude Code, Codex and local ACP, the same ones that get a folder line in the header. The folder doesn't have to be a repo. Remote ACP, OpenClaw and Hermes threads don't get it, since their folder is on another machine or isn't theirs to open.
+- **Which folder:** the thread's own, the one its agent works in, not the repo's root. A worktree thread opens the worktree, and a session started in `shop/web` opens `shop/web`.
+- **What opens:** a new window or tab of the chosen terminal, as the app does for a folder, with your shell in it. littleguys doesn't type anything into it. It doesn't run `claude --resume` there either: the session is already running in littleguys or in the background, and two clients on one session fight.
+- **When it can't:** a folder that's gone (an archived worktree, say) shows "/Users/me/dev/shop-wt doesn't exist on this Mac" under the button for a few seconds, the same message as Show in Finder; from the row menu it's a dialog. A terminal app that was uninstalled falls back to the system one, with a note saying so and to pick another in Settings.
+
+### 10. The phone
+
+The phone gets the branch line on rows, the Changes panel as a sheet, and the chips, all following the Mac's settings. Reviewing a diff and tapping "Open a PR" from the couch is the use case no worktree workspace covers. The settings page itself stays on the Mac in v1. The phone gets no terminal button: it would open a window on a Mac you're not sitting at.
 
 ## What it doesn't do
 
-- No editor, no file writes, and no terminal.
+- No IDE. A file opened in the Files tab can be edited and saved (only over the version you opened, so it never lands on the agent's newer edit), but littleguys doesn't create, rename or delete files. No built-in terminal either: the terminal button opens the one you already use.
 - No git writes: littleguys has no commit, push, merge, rebase or branch button. Every change goes through the agent.
 - No merge button. Merging is a judgment call, and GitHub does it well.
 - No worktree manager: it doesn't list, create or clean worktrees except through the engine's own flag and `claude rm`.
@@ -208,11 +232,13 @@ The settings live in the app's prefs file next to `hiddenGuys` and `notification
   "panel": true,
   "worktrees": false,
   "prs": false,
-  "offered": false
+  "offered": false,
+  "terminal": true,
+  "terminalApp": "/Applications/iTerm.app"
 }
 ```
 
-`folders` is the "Start chats in" list, and `offered` records that the one-time "Turn on Coder mode" line was answered. `set_coder_prefs` in `commands.rs` (`core.setCoderPrefs` in `src/lib/ipc.ts`) saves them, and they travel on the roster as `roster.coder`, so the main window, the popover and paired phones get every change the way they get the notification settings. `code.rs` keeps the current value in a process-wide `RwLock`, and the adapters check it there. Two more commands serve the UI: `coder_tools` says whether `git` and `gh` are installed (the settings tab hides the pull request switch without `gh`), and `in_git_repo` answers the one-time offer with a file check.
+`terminalApp` is null for the system terminal. `folders` is the "Start chats in" list, and `offered` records that the one-time "Turn on Coder mode" line was answered. `set_coder_prefs` in `commands.rs` (`core.setCoderPrefs` in `src/lib/ipc.ts`) saves them, and they travel on the roster as `roster.coder`, so the main window, the popover and paired phones get every change the way they get the notification settings. `code.rs` keeps the current value in a process-wide `RwLock`, and the adapters check it there. Two more commands serve the UI: `coder_tools` says whether `git` and `gh` are installed (the settings tab hides the pull request switch without `gh`), and `in_git_repo` answers the one-time offer with a file check.
 
 ### A `code` capability and three calls
 
@@ -253,6 +279,30 @@ It shells out to the `git` the user already has, not libgit2 or gix: that keeps 
 
 `chat.send` on a new thread already takes `cwd`; it gains `worktree: true`, which the adapter honors only with the worktree switch on and a repo at that folder. The Claude Code adapter's `launch` then adds `-w <name>` next to `--bg`, and the session's cwd comes from `claude agents` and the hooks, as it already does. Codex's app server has no worktree option (its `thread/start` takes none), so a Codex worktree thread starts with `codex exec --worktree` instead of on the shared server. Its approvals then can't be answered in littleguys, the same as any `codex exec` session. The ACP adapter gets nothing, since ACP has no worktree concept.
 
+### Opening a terminal
+
+It's a Tauri command, not a runtime call, so the bridge never carries it and a paired phone can't open windows on the Mac. It lives in a new `src-tauri/src/terminal.rs` with two commands, both in `commands.rs`' handler list:
+
+- `coder_terminals()` → `[{app, name, system, folders}]`: the terminals on this computer. On a Mac it looks in `/Applications`, `~/Applications` and `/System/Applications/Utilities` for known bundle ids (Terminal, iTerm2, Ghostty, Warp, WezTerm, kitty, Alacritty, Hyper, Tabby, Rex), plus the saved `terminalApp` if it's none of those. `folders` comes from the app's `Info.plist`: a `CFBundleDocumentTypes` entry for `public.folder`, `public.directory` or `public.item` means it opens folders handed to it. Terminal, iTerm and Rex say so; some newer terminals don't. On a PC it's Windows Terminal when `wt.exe` is on the path, PowerShell 7 (`pwsh`), Windows PowerShell, and Command Prompt.
+- `open_terminal(gateway, sessionKey)`: finds the runtime with `hub.client`, checks it has `code`, that coder mode and the terminal switch are on, and resolves the folder with `Runtime::local_folder`, the same one `code.*` reads. It never takes a path or a command line from the webview. A folder that's gone gets the `reveal_path` message.
+
+`terminal.rs` reads each app's `Info.plist` with the `plist` crate (already in the build through Tauri). Listing every app in `/Applications` that way takes about 60 ms; opening a terminal reads only the chosen app's.
+
+How each terminal is started, as argv and never through a shell, so a folder named `it's "new"` is safe:
+
+| Terminal | Started with |
+|---|---|
+| Opens folders (Terminal, iTerm2, Rex, Warp, and any app whose `Info.plist` says so) | `open -a <app> <folder>` |
+| Ghostty, if its `Info.plist` doesn't list folders | `open -na <app> --args --working-directory=<folder>` |
+| WezTerm | `open -na <app> --args start --cwd <folder>` |
+| kitty | `open -na <app> --args --directory <folder>` |
+| Alacritty | `open -na <app> --args --working-directory <folder>` |
+| Anything else picked by hand | `open -a <app> <folder>`, with the Settings warning |
+| Windows Terminal | `wt.exe -d <folder>` |
+| PowerShell, Command Prompt | the program with `current_dir(<folder>)` and `CREATE_NEW_CONSOLE` |
+
+The rule for each is a pure function from (terminal, folder) to a program and arguments, so the tests check the argv without starting anything. On a Mac it waits for `open`, which fails when the app can't start, and reports its error. On Windows it can't use `platform::std_command`, which adds `CREATE_NO_WINDOW`: a terminal's whole point is its window. Nor does it redirect a console's stdio, so the shell gets the new console's own. `terminalApp` must be a `.app` folder on a Mac or one of the four names on a PC; anything else is refused when it's saved.
+
 ### UI pieces
 
 - `src/main/CoderMode.tsx`: the settings tab, mounted in `Settings.tsx` beside `Notifications` and `Phones`.
@@ -262,11 +312,13 @@ It shells out to the `git` the user already has, not libgit2 or gix: that keeps 
 - `ChatView.tsx`: the branch chip and the stat button in the header, the chips above the composer, and the one-time "Turn on Coder mode" line.
 - `Sidebar.tsx` `ThreadList`: grouping by repo for guys with `code`, and the branch line on rows.
 - `FolderPicker.tsx`: the "Start chats in" folders at the top (in threads and in the routine editor, which share it), the pin on recent folders, and "In a new worktree".
+- The terminal: a `TerminalButton` in `ChangesPanel.tsx`, after `RepoButtons`, shown where the header shows a folder; **Open a terminal here** in `Sidebar.tsx`' `ThreadMenu`; ⇧⌘T in `App.tsx`' key handler, sent to the open thread as `lg:open-terminal`; the switch and **Open it in ▾** in `CoderMode.tsx`; `useTerminalOn(gatewayId)` in `code.ts` so each of those checks one hook; `core.openTerminal` and `core.coderTerminals` in `ipc.ts`.
 
 ### Tests
 
 - Rust: temporary repos made in tests, with fictional names (`shop`, `blog`), covering a clean repo, uncommitted and untracked changes, a branch ahead of its base, a worktree inside the repo and one outside it, a detached HEAD, a repo with no remote, no `git` on the path, and a conflicted merge. The settings checks get their own tests: coder mode off, and a folder with no `.git` above it, each answered without starting a process. `gh` gets a fake on the path that prints canned JSON.
 - UI: the mock gateway (`src/lib/mock.ts`) gains `code.*` answers and coder prefs, so the settings tab, the Changes panel and the grouped list can be seen in the browser build.
+- Terminal: the argv for each kind of terminal and for a folder with spaces and quotes; reading folder support from fixture `Info.plist` files (one with `public.directory`, one with `public.item`, one with none); `open_terminal` refusing with coder mode off, the switch off, a runtime without `code`, and a folder that's gone; an older prefs file without the two new fields loading with the switch on and the system terminal. The mock lists a few fictional terminals and logs instead of opening one. By hand before it ships: every terminal installed here, a worktree thread, a session started in a subfolder, and Windows Terminal and PowerShell from the `windows.yml` installer.
 
 ## Shipping it in pieces
 
@@ -277,8 +329,9 @@ Each phase ships alone and is useful by itself. The settings tab grows a switch 
 3. **Pull requests and checks.** The pull request switch, `code.pr` through `gh`, the PR chip, and Fix the checks. About two days.
 4. **Worktree threads.** The worktree switch, "In a new worktree" in the folder picker, and `claude rm` on archive. Two or three days, more if Codex's server needs work.
 5. **Phone.** The same pieces in littleguys for iPhone, in the iOS repo.
+6. **A terminal here.** The terminal switch and picker, the header button, the row menu item and ⇧⌘T, `coder_terminals` and `open_terminal`. About a day and a half, half of it trying each terminal app. It doesn't depend on phase 5.
 
-Built so far: phases 1 to 4, except `claude rm` on archive, which deletes files and waits for a try on real sessions. Not tried yet on real sessions: `claude -w` with `--bg`, and `codex exec --worktree`; both flags are in the CLIs' help. The mock (`make mock`, then `?claudecode=1&coder=1`) shows every piece with fictional repos.
+Built so far: phases 1 to 4 and 6, except `claude rm` on archive, which deletes files and waits for a try on real sessions. Not tried yet on real sessions: `claude -w` with `--bg`, and `codex exec --worktree`; both flags are in the CLIs' help. The terminal button hasn't opened a real terminal yet: Terminal, iTerm and Rex (the ones on this Mac) need a try in the app, and Windows Terminal and PowerShell one from the `windows.yml` installer. The mock (`make mock`, then `?claudecode=1&coder=1`) shows every piece with fictional repos.
 
 ## Decisions for herval
 

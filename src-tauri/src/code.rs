@@ -46,6 +46,11 @@ pub struct CoderPrefs {
     pub prs: bool,
     /// The one-time "Turn on Coder mode" line was answered.
     pub offered: bool,
+    /// Coding threads get a button that opens a terminal in their folder (terminal.rs).
+    pub terminal: bool,
+    /// The terminal it opens: a `.app` on a Mac, `wt`, `pwsh`, `powershell` or `cmd` on a PC.
+    /// None for the system's own.
+    pub terminal_app: Option<String>,
 }
 
 impl Default for CoderPrefs {
@@ -54,7 +59,16 @@ impl Default for CoderPrefs {
     }
 }
 
-const OFF: CoderPrefs = CoderPrefs { on: false, folders: Vec::new(), panel: true, worktrees: false, prs: false, offered: false };
+const OFF: CoderPrefs = CoderPrefs {
+    on: false,
+    folders: Vec::new(),
+    panel: true,
+    worktrees: false,
+    prs: false,
+    offered: false,
+    terminal: true,
+    terminal_app: None,
+};
 
 static PREFS: RwLock<CoderPrefs> = RwLock::new(OFF);
 
@@ -974,6 +988,8 @@ u UU N... 100644 100644 100644 100644 aaa bbb ccc README.md\0\
     fn prefs_default_and_read_partially() {
         let p: CoderPrefs = serde_json::from_value(json!({ "on": true })).unwrap();
         assert!(p.on && p.panel && !p.worktrees && !p.prs);
+        // A prefs file from before the terminal button: the button is on, in the system terminal.
+        assert!(p.terminal && p.terminal_app.is_none());
         assert_eq!(serde_json::to_value(CoderPrefs::default()).unwrap()["panel"], true);
     }
 }

@@ -8,7 +8,7 @@
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { bridgeMockInvoke } from "./bridge";
 import type { Backend } from "./ipc";
-import type { ChatMessage, CoderPrefs, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster } from "./types";
+import type { ChatMessage, CoderPrefs, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster, TerminalApp } from "./types";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -218,7 +218,16 @@ const roster: Roster = {
   notifications: { everyone: { replies: true, routines: "all" }, guys: {} },
   faces: [],
   // ?coder=1: coder mode on, with pull requests (see coderMock below).
-  coder: { on: params.has("coder"), folders: params.has("coder") ? ["/Users/you/dev/shop-api"] : [], panel: true, worktrees: true, prs: true, offered: params.has("coder") },
+  coder: {
+    on: params.has("coder"),
+    folders: params.has("coder") ? ["/Users/you/dev/shop-api"] : [],
+    panel: true,
+    worktrees: true,
+    prs: true,
+    offered: params.has("coder"),
+    terminal: true,
+    terminalApp: null,
+  },
   updatedAt: now,
 };
 
@@ -616,6 +625,14 @@ function mockHash(content: string): string {
   for (let i = 0; i < content.length; i++) h = ((h << 5) + h + content.charCodeAt(i)) | 0;
   return (h >>> 0).toString(16);
 }
+
+/** A few terminals for Settings → Coder mode; Plainterm doesn't say it opens folders. */
+const MOCK_TERMINALS: TerminalApp[] = [
+  { app: "/System/Applications/Utilities/Terminal.app", name: "Terminal", system: true, folders: true },
+  { app: "/Applications/Ghostty.app", name: "Ghostty", system: false, folders: true },
+  { app: "/Applications/iTerm.app", name: "iTerm", system: false, folders: true },
+  { app: "/Applications/Plainterm.app", name: "Plainterm", system: false, folders: false },
+];
 
 const savedAt: Record<string, number> = {};
 
@@ -1158,6 +1175,19 @@ export const mockBackend: Backend = {
         return String(args?.folder).startsWith("/Users/you/dev/") as T;
       case "coder_tools":
         return { git: true, gh: true } as T;
+      case "coder_terminals":
+        return MOCK_TERMINALS as T;
+      case "open_terminal": {
+        // Logs instead of opening anything.
+        const { on, terminal, terminalApp } = roster.coder;
+        if (!on) throw new Error("Coder mode is off.");
+        if (!terminal) throw new Error("The terminal button is off in Settings → Coder mode.");
+        const chosen = MOCK_TERMINALS.find((t) => t.app === terminalApp);
+        const opened = chosen ?? MOCK_TERMINALS[0];
+        console.log(`[mock] open ${opened.name} for ${String(args?.gateway)} ${String(args?.sessionKey)}`);
+        const missing = terminalApp && !chosen ? terminalApp.split("/").pop()!.replace(/\.app$/, "") : null;
+        return { opened: opened.name, missing } as T;
+      }
       case "set_notifications": {
         const prefs = args?.prefs as NotifyPrefs;
         const { everyone, guys } = roster.notifications;

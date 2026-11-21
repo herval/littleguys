@@ -19,11 +19,12 @@ import {
   Settings as SettingsIcon,
   Sparkles,
   SquarePen,
+  SquareTerminal,
   Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { repoKey, useCoderOn, useRepoStatus, useRepoStatuses } from "../lib/code";
+import { openTerminal, repoKey, useCoderOn, useRepoStatus, useRepoStatuses, useTerminalOn } from "../lib/code";
 import { COMPUTER, IS_MAC, shortcut } from "../lib/platform";
 import { photoToAvatar } from "../lib/avatarImage";
 import { sessions as sessionsApi } from "../lib/gateway";
@@ -739,6 +740,16 @@ function ThreadMenu({
     else if (selected === row.key) selectSession(mainSessionKey(agentId));
   };
   const kind = threadKind(row.key);
+  const terminalOn = useTerminalOn(gatewayId);
+  const openTerminalHere = async () => {
+    onClose();
+    try {
+      const note = await openTerminal(gatewayId, row.key);
+      if (note) await reportError(note, "Opened another terminal", "info");
+    } catch (error) {
+      await reportError(error, "Couldn't open a terminal");
+    }
+  };
   const setUnread = (unread: boolean) =>
     act(async () => {
       const s = useApp.getState();
@@ -754,13 +765,14 @@ function ThreadMenu({
     <div
       ref={ref}
       onClick={(e) => e.stopPropagation()}
-      className="animate-pop absolute right-1 top-8 z-20 w-44 rounded-lg border border-[var(--color-line)] bg-[var(--color-pane-solid)] p-1 text-[12.5px] text-[var(--color-ink)] shadow-xl"
+      className="animate-pop absolute right-1 top-8 z-20 w-48 rounded-lg border border-[var(--color-line)] bg-[var(--color-pane-solid)] p-1 text-[12.5px] text-[var(--color-ink)] shadow-xl"
     >
       <MenuButton
         icon={row.unread ? <MessageSquareCheck size={13} /> : <MessageSquareDot size={13} />}
         label={row.unread ? "Mark as read" : "Mark as unread"}
         onClick={() => setUnread(!row.unread)}
       />
+      {terminalOn && <MenuButton icon={<SquareTerminal size={13} />} label="Open a terminal here" onClick={openTerminalHere} />}
       {!isMain && (
         <>
           <MenuButton icon={<Pencil size={13} />} label="Rename" onClick={() => (onClose(), onRename())} />
