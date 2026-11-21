@@ -9,6 +9,7 @@ impl Activity {
         }
         let prefs = self.preferences.snapshot();
         let hidden = prefs.hidden_guys;
+        let steps = prefs.shown_steps;
         let notifications = prefs.notifications;
         let faces = self.avatars.snapshot();
         let gateways = state
@@ -23,7 +24,7 @@ impl Activity {
             .collect();
         let mut with_faces: Vec<String> = faces.keys().cloned().collect();
         with_faces.sort();
-        Roster { gateways, hidden, notifications, faces: with_faces, coder: crate::code::prefs(), updated_at: now_ms() }
+        Roster { gateways, hidden, steps, notifications, faces: with_faces, coder: crate::code::prefs(), updated_at: now_ms() }
     }
 
     /// Streamed text arrives in bursts across every running thread; one roster

@@ -9,6 +9,9 @@ use std::{
 pub(super) struct Prefs {
     #[serde(default)]
     pub hidden_guys: Vec<String>,
+    /// Guys whose threads show their steps ("Ran 3 commands…"); everyone else's show only messages.
+    #[serde(default)]
+    pub shown_steps: Vec<String>,
     #[serde(default)]
     pub notifications: Notifications,
     /// Settings → Coder mode (code.rs).
@@ -129,6 +132,15 @@ impl Preferences {
             }
         })
     }
+    pub fn set_steps(&self, uid: &str, shown: bool) -> anyhow::Result<()> {
+        self.store.edit(|prefs| {
+            prefs.shown_steps.retain(|id| id != uid);
+            if shown {
+                prefs.shown_steps.push(uid.to_string());
+                prefs.shown_steps.sort();
+            }
+        })
+    }
     pub fn set_notifications(&self, uid: Option<&str>, prefs: NotifyPrefs) -> anyhow::Result<()> {
         self.store.edit(|saved| saved.notifications.set(uid, prefs))
     }
@@ -150,9 +162,13 @@ mod tests {
         assert!(store.snapshot().hidden_guys.is_empty());
         std::fs::remove_dir(root.join("prefs.json")).unwrap();
         store.set_hidden("g/a", true).unwrap();
+        store.set_steps("g/a", true).unwrap();
+        store.set_steps("g/b", true).unwrap();
+        store.set_steps("g/b", false).unwrap();
         store.set_notifications(None, NotifyPrefs { replies: false, routines: RoutineNotifications::Off }).unwrap();
         let saved = Preferences::new(Some(&root)).snapshot();
         assert_eq!(saved.hidden_guys, vec!["g/a"]);
+        assert_eq!(saved.shown_steps, vec!["g/a"]);
         assert!(!saved.notifications.everyone.replies);
         std::fs::remove_dir_all(root).unwrap();
     }

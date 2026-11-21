@@ -215,6 +215,7 @@ const roster: Roster = {
       ? [attic]
       : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude, params.get("codex") ? codexSessions : codex],
   hidden: ["hermes-1/research"],
+  steps: [],
   notifications: { everyone: { replies: true, routines: "all" }, guys: {} },
   faces: [],
   // ?coder=1: coder mode on, with pull requests (see coderMock below).
@@ -224,12 +225,15 @@ const roster: Roster = {
     panel: true,
     worktrees: true,
     prs: true,
+    edits: params.get("edits") !== "0",
     offered: params.has("coder"),
     terminal: true,
     terminalApp: null,
   },
   updatedAt: now,
 };
+// ?steps=1: every guy's threads show their steps ("Ran 3 commands…"), off by default as in the app.
+if (params.has("steps")) roster.steps = roster.gateways.flatMap((g) => g.agents.map((a) => `${g.id}/${a.id}`));
 
 const oc = (id: string, extra: object = {}) => ({ __openclaw: { id, ...extra } });
 
@@ -1165,6 +1169,12 @@ export const mockBackend: Backend = {
         const uid = String(args?.uid);
         roster.hidden = args?.hidden ? [...new Set([...roster.hidden, uid])] : roster.hidden.filter((u) => u !== uid);
         emit("lg:roster", { ...roster, hidden: [...roster.hidden] });
+        return undefined as T;
+      }
+      case "set_guy_steps": {
+        const uid = String(args?.uid);
+        roster.steps = args?.shown ? [...new Set([...roster.steps, uid])] : roster.steps.filter((u) => u !== uid);
+        emit("lg:roster", { ...roster, steps: [...roster.steps] });
         return undefined as T;
       }
       case "set_coder_prefs":

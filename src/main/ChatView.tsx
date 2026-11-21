@@ -7,7 +7,7 @@ import { core } from "../lib/ipc";
 import { doingNow, presentTense, rowActivity, toolKind } from "../lib/toolPhrases";
 import { firstUnread } from "../lib/transcript";
 import type { Guy, SessionRow } from "../lib/types";
-import { useChangesOpen, usePullRequest, useRepoStatus } from "../lib/code";
+import { useChangesOpen, useCoderPrefs, usePullRequest, useRepoStatus } from "../lib/code";
 import { useApp } from "../stores/app";
 import { useArchive, useArchivedRow } from "../stores/archive";
 import { threadId, useChat, waitingCount } from "../stores/chat";
@@ -17,7 +17,7 @@ import { Approvals } from "./Approvals";
 import { CoderOffer, NextSteps, RepoButtons, RepoPlace, TerminalButton } from "./ChangesPanel";
 import { Composer } from "./Composer";
 import { FolderPicker, threadFolder, tildify, useCanWorktree, usePendingFolder } from "./FolderPicker";
-import { phaseLabel as livePhaseLabel, toItems, Transcript } from "./Transcript";
+import { phaseLabel as livePhaseLabel, runningTool, toItems, Transcript } from "./Transcript";
 
 /** How far down the pane an unread thread opens its "New" divider: under the day chip, with a bit of what you'd read. */
 const NEW_DIVIDER_TOP = 64;
@@ -93,6 +93,12 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   const pendingMessages = useMemo(() => thread?.pending.map((p) => p.message) ?? [], [thread?.pending]);
   const items = useMemo(() => toItems(thread?.messages ?? [], pendingMessages), [thread?.messages, pendingMessages]);
   const live = thread?.live ?? null;
+  // Settings → Agents: this guy's steps ("Ran 3 commands…"), off unless turned on.
+  const showSteps = useApp((s) => s.roster.steps?.includes(guy.uid) ?? false);
+  // Coder mode: a coding thread's edits show as diffs between its messages.
+  const coder = useCoderPrefs();
+  const repo = useRepoStatus(gw, sessionKey);
+  const edits = coder.edits && repo ? repo.repo.root : null;
   const running = Boolean(live) || rosterRunning;
   const newFrom = useMemo(() => (readTo == null ? -1 : firstUnread(items, readTo || undefined)), [items, readTo]);
 
@@ -119,14 +125,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   const isMain = kind === "main" && mainChat;
   const title = row ? threadTitle(row, mainChat) : isMain ? "Main chat" : kind === "main" ? "New chat" : "Chat";
   // The tool call in flight, if any: drives the header's status line and the browser button.
-  const activeTool = useMemo(() => {
-    if (!running) return null;
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i];
-      if (it.kind === "tool" && !it.result && thread?.toolStatus[it.call.id] === "running") return it.call;
-    }
-    return null;
-  }, [items, running, thread?.toolStatus]);
+  const activeTool = useMemo(() => (running ? runningTool(items, thread?.toolStatus ?? {}) : null), [items, running, thread?.toolStatus]);
   const browsing = Boolean(activeTool && toolKind(activeTool.name) === "browse");
   // ACP and Claude Code threads can start in any folder on this Mac; it's fixed once they have messages.
   const [pendingFolder, setPendingFolder] = usePendingFolder(tid);
@@ -228,6 +227,8 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             waiting={waitingCount(thread)}
             toolStatus={thread?.toolStatus ?? {}}
             newFrom={newFrom}
+            showSteps={showSteps}
+            editsIn={edits}
           />
           {thread?.pending.some((p) => p.status === "unknown") && (
             <p className="mt-3 text-center text-[12px] text-[var(--color-ink-3)]">

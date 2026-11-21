@@ -82,6 +82,7 @@ pub fn run() {
             commands::refresh_roster,
             commands::set_focused_session,
             commands::set_guy_hidden,
+            commands::set_guy_steps,
             commands::set_notifications,
             commands::set_coder_prefs,
             commands::coder_tools,

@@ -181,6 +181,8 @@ export interface Roster {
   gateways: GatewayRoster[];
   /** Guys hidden in Settings, as `gatewayId/agentId`. */
   hidden: string[];
+  /** Guys whose threads show their steps ("Ran 3 commands…"), as `gatewayId/agentId` (Settings → Agents). Off by default. */
+  steps: string[];
   /** What notifies you, for everyone and per guy (Settings → Notifications). */
   notifications: Notifications;
   /** Guys with a photo picked in littleguys (`gatewayId/agentId`); it's already their `identity.avatarUrl`. */
@@ -202,6 +204,8 @@ export interface CoderPrefs {
   worktrees: boolean;
   /** Pull requests and checks, through gh. */
   prs: boolean;
+  /** A coding thread's edits show as diffs between its messages, not only in its steps. */
+  edits: boolean;
   /** The one-time "Turn on Coder mode" line was answered. */
   offered: boolean;
   /** Coding threads get a button that opens a terminal in their folder. */

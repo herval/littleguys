@@ -104,6 +104,8 @@ export const core = {
   roster: () => invoke<Roster>("get_roster"),
   refreshRoster: (gateway?: string) => invoke<Roster>("refresh_roster", { gateway: gateway ?? null }),
   setGuyHidden: (uid: string, hidden: boolean) => invoke<void>("set_guy_hidden", { uid, hidden }),
+  /** Whether a guy's threads show their steps ("Ran 3 commands…"). */
+  setGuySteps: (uid: string, shown: boolean) => invoke<void>("set_guy_steps", { uid, shown }),
   /** What notifies you about a guy, or (`null`) everyone: that resets every guy to it. */
   setNotifications: (uid: string | null, prefs: NotifyPrefs) => invoke<void>("set_notifications", { uid, prefs }),
   /** Settings → Coder mode; the roster brings them back. */

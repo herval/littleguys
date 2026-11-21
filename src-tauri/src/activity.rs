@@ -61,6 +61,9 @@ pub struct Roster {
     /// Guys the user hid (`gatewayId/agentId`): left out of lists, the tray
     /// mood and reply/routine notifications (approvals still notify).
     pub hidden: Vec<String>,
+    /// Guys whose threads show their steps ("Ran 3 commands…"), as `gatewayId/agentId`
+    /// (Settings → Agents). Off by default: a thread shows its messages.
+    pub steps: Vec<String>,
     /// What notifies you, for everyone and per guy (Settings → Notifications).
     pub notifications: Notifications,
     /// Guys with a photo picked in littleguys (`gatewayId/agentId`). It's kept on
@@ -122,6 +125,13 @@ impl Activity {
     /// Show or hide a guy (`gatewayId/agentId`); persisted in the app's prefs.
     pub fn set_guy_hidden(&self, uid: &str, hidden: bool) -> anyhow::Result<()> {
         self.preferences.set_hidden(uid, hidden)?;
+        self.publish();
+        Ok(())
+    }
+
+    /// Show or hide a guy's steps in their threads; persisted in the app's prefs.
+    pub fn set_guy_steps(&self, uid: &str, shown: bool) -> anyhow::Result<()> {
+        self.preferences.set_steps(uid, shown)?;
         self.publish();
         Ok(())
     }

@@ -18,6 +18,7 @@ export const CODER_OFF: CoderPrefs = {
   panel: true,
   worktrees: false,
   prs: false,
+  edits: true,
   offered: false,
   terminal: true,
   terminalApp: null,

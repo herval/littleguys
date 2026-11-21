@@ -56,6 +56,8 @@ Settings gains a sixth tab, **Coder mode**, between Phones and General. It's bui
  ┌──────────────────────────────────────────────────────────┐
  │ Show the Changes panel                              [ ●] │
  │ Opens beside a coding thread when it has changes.        │
+ │ Show edits in the chat                              [ ●] │
+ │ Each edit shows as a diff between the messages.          │
  │ New threads can use their own worktree              [○ ] │
  │ Adds "In a new worktree" when you start a thread.        │
  │ Show pull requests and checks                       [○ ] │
@@ -88,6 +90,10 @@ With coder mode off, the picker goes back to today's list and the saved folders 
 ### Show the Changes panel
 
 It's on by default. With it on, the Changes panel opens beside a coding thread on its own whenever the thread has changes, and closing it keeps it closed for that thread. With it off, the panel only opens when you click the `+42 −7` count in the chat header. The count, the branch and the rest still show either way.
+
+### Show edits in the chat
+
+It's on by default. With it on, a coding thread's edits show as cards between its messages: each file's name, relative to the repo, its `+12 −3`, and the diff's first dozen lines, with the rest a click away. Edits with nothing else shown between them share one card, and a file edited twice shows both edits under its name. A failed edit changed nothing, so it stays a step. It works whether or not the guy's steps show (Settings → Agents, off by default), so a thread with its steps hidden reads as messages and the code they wrote. With it off, edits are only in the steps, as before.
 
 ### New threads can use their own worktree
 
@@ -232,6 +238,7 @@ The settings live in the app's prefs file next to `hiddenGuys` and `notification
   "panel": true,
   "worktrees": false,
   "prs": false,
+  "edits": true,
   "offered": false,
   "terminal": true,
   "terminalApp": "/Applications/iTerm.app"

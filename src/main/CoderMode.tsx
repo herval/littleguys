@@ -84,6 +84,13 @@ export function CoderMode() {
             onChange={(panel) => save({ panel })}
           />
           <SwitchRow
+            title="Show edits in the chat"
+            hint="Each edit shows as a diff between the messages, even for a guy whose steps are hidden. Off, edits are only in the steps."
+            on={prefs.edits}
+            onChange={(edits) => save({ edits })}
+            border
+          />
+          <SwitchRow
             title="New threads can use their own worktree"
             hint="Adds “In a new worktree” when a Claude Code or Codex thread starts in a repo."
             on={prefs.worktrees}

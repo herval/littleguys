@@ -137,6 +137,7 @@ function NewDivider() {
 }
 
 type Step = Extract<Item, { kind: "tool" | "thinking" }>;
+type ToolItem = Extract<Item, { kind: "tool" }>;
 type Section = { day: string; label: string; nodes: React.ReactNode[] };
 
 export function Transcript({
@@ -148,6 +149,8 @@ export function Transcript({
   waiting = 0,
   toolStatus,
   newFrom = -1,
+  showSteps = true,
+  editsIn = null,
 }: {
   gatewayId: string;
   sessionKey: string;
@@ -159,10 +162,25 @@ export function Transcript({
   toolStatus: Record<string, ToolState>;
   /** Index of the first item you haven't seen: a "New" divider goes above it. */
   newFrom?: number;
+  /** The guy's steps ("Ran 3 commands…") show between messages (Settings → Agents). */
+  showSteps?: boolean;
+  /** Coder mode: the repo of a thread whose edits show as diffs between messages, step rows or not. */
+  editsIn?: string | null;
 }) {
   const sections: Section[] = [];
   let prevKind: string | null = null;
   const where = { gatewayId, sessionKey };
+  // Working out a step's diffs can be slow (a whole file written), so each is kept until it changes.
+  const diffCache = useRef(new Map<string, { args: unknown; result?: ToolResult; diffs: FileDiff[] }>()).current;
+  const diffsOf = (step: ToolItem): FileDiff[] => {
+    const hit = diffCache.get(step.id);
+    const r = step.result;
+    if (hit && hit.args === step.call.arguments && hit.result?.text === r?.text && hit.result?.diffs === r?.diffs) return hit.diffs;
+    const diffs = fileDiffs(step.call.name, step.call.arguments, r?.diffs, r?.text);
+    diffCache.set(step.id, { args: step.call.arguments, result: r, diffs });
+    return diffs;
+  };
+  const stateOf = (step: ToolItem) => stepState(step, toolStatus, Boolean(live));
   // A path in the text opens what it names: media in the viewer, any other file in a peek at it.
   const linkPath = useMemo<PathLinker>(
     () => (path, children) => {
@@ -212,6 +230,7 @@ export function Transcript({
     }
     const side = item.kind === "user" ? `user:${item.sender ?? ""}:${item.via ?? ""}` : item.kind === "note" ? null : "guy";
     const startsGroup = side !== prevKind;
+    const before: string | null = prevKind;
     prevKind = side;
 
     if (item.kind === "user") {
@@ -233,10 +252,18 @@ export function Transcript({
       while (i + 1 < items.length && i + 1 !== newFrom && (items[i + 1].kind === "tool" || items[i + 1].kind === "thinking")) {
         steps.push(items[++i] as Step);
       }
-      section.nodes.push(
-        <GuyLine key={item.id} agent={agent} showAvatar={startsGroup}>
-          <WorkLog steps={steps} toolStatus={toolStatus} live={Boolean(live)} where={where} />
-        </GuyLine>,
+      const parts = stepParts(steps, { steps: showSteps, edits: editsIn != null }, diffsOf, stateOf);
+      if (!parts.length) prevKind = before; // nothing of it shows
+      parts.forEach((part, k) =>
+        section.nodes.push(
+          <GuyLine key={part.steps[0].id} agent={agent} showAvatar={startsGroup && k === 0}>
+            {part.kind === "log" ? (
+              <WorkLog steps={part.steps} toolStatus={toolStatus} live={Boolean(live)} where={where} />
+            ) : (
+              <EditCard diffs={part.diffs} running={part.steps.some((s) => stateOf(s) === "running")} root={editsIn ?? ""} where={where} />
+            )}
+          </GuyLine>,
+        ),
       );
     } else {
       section.nodes.push(
@@ -254,6 +281,9 @@ export function Transcript({
   if (live) {
     const section = sectionFor(Date.now());
     const startsGroup = prevKind !== "guy";
+    // With the steps out of sight, the typing bubble says what the guy is doing.
+    const doing = !showSteps && !live.text ? runningTool(items, toolStatus) : null;
+    const status = doing ? `${presentTense(doing)}…` : live.phase ? phaseLabel(live.phase) : null;
     section.nodes.push(
       <GuyLine key="live" agent={agent} showAvatar={startsGroup}>
         {live.text ? (
@@ -264,7 +294,7 @@ export function Transcript({
         ) : (
           <div className="flex items-center gap-2 rounded-2xl rounded-tl-md bg-[var(--color-bubble-them)] px-3.5 py-2.5 text-[var(--color-ink-3)]">
             <TypingDots />
-            {live.phase && <span className="text-[11.5px]">{phaseLabel(live.phase)}</span>}
+            {status && <span className="text-[11.5px]">{status}</span>}
           </div>
         )}
       </GuyLine>,
@@ -409,6 +439,98 @@ function stepState(step: Extract<Item, { kind: "tool" }>, toolStatus: Record<str
   if (step.result) return step.result.isError ? "error" : "completed";
   // No result and nothing running: the transcript just didn't keep it.
   return toolStatus[step.call.id] ?? (live ? "running" : "completed");
+}
+
+/** The tool call in flight, if any. */
+export function runningTool(items: Item[], toolStatus: Record<string, ToolState>): ToolCallBlock | null {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.kind === "tool" && !it.result && toolStatus[it.call.id] === "running") return it.call;
+  }
+  return null;
+}
+
+type StepPart = { kind: "log"; steps: Step[] } | { kind: "edits"; steps: ToolItem[]; diffs: FileDiff[] };
+
+/**
+ * A run of steps as it shows: rows of steps, if the guy's are shown, and in coder mode the
+ * edits among them as diffs. Edits with nothing shown between them share one card.
+ */
+function stepParts(
+  steps: Step[],
+  show: { steps: boolean; edits: boolean },
+  diffsOf: (step: ToolItem) => FileDiff[],
+  stateOf: (step: ToolItem) => ToolState,
+): StepPart[] {
+  const parts: StepPart[] = [];
+  for (const step of steps) {
+    // A failed edit changed nothing; it stays a step.
+    const diffs = show.edits && step.kind === "tool" && stateOf(step) !== "error" ? diffsOf(step) : [];
+    const last = parts[parts.length - 1];
+    if (diffs.length && step.kind === "tool") {
+      if (last?.kind === "edits") {
+        last.steps.push(step);
+        last.diffs.push(...diffs);
+      } else parts.push({ kind: "edits", steps: [step], diffs: [...diffs] });
+    } else if (show.steps) {
+      if (last?.kind === "log") last.steps.push(step);
+      else parts.push({ kind: "log", steps: [step] });
+    }
+  }
+  return parts;
+}
+
+/** One file's diff per file, a file edited twice showing both edits. */
+function byFile(diffs: FileDiff[]): FileDiff[] {
+  const files = new Map<string, FileDiff>();
+  for (const d of diffs) {
+    const had = files.get(d.path);
+    files.set(
+      d.path,
+      had
+        ? { ...had, numbered: had.numbered && d.numbered, hunks: [...had.hunks, ...d.hunks], added: had.added + d.added, removed: had.removed + d.removed }
+        : d,
+    );
+  }
+  return [...files.values()];
+}
+
+const EDIT_LINES = 12;
+
+/** A path inside the repo, relative to it (`/` or Windows' `\`), else null. */
+function inRepo(path: string, root: string): string | null {
+  const r = root.replace(/[\\/]+$/, "");
+  return r && (path.startsWith(`${r}/`) || path.startsWith(`${r}\\`)) ? path.slice(r.length + 1) : null;
+}
+
+/** Coder mode: edits between the messages, each file's diff under its name. */
+function EditCard({ diffs, running, root, where }: { diffs: FileDiff[]; running: boolean; root: string; where: Where }) {
+  const files = byFile(diffs);
+  return (
+    <div className="selectable w-[720px] max-w-full overflow-hidden rounded-xl border border-[var(--color-line)] bg-[var(--color-pane-solid)]">
+      {files.map((d, i) => {
+        const shown = inRepo(d.path, root) ?? d.path.replace(/^\/Users\/[^/]+/, "~");
+        const slash = Math.max(shown.lastIndexOf("/"), shown.lastIndexOf("\\"));
+        return (
+          <div key={d.path} className={i ? "border-t border-[var(--color-line)]" : ""}>
+            <div className="flex items-center gap-2 border-b border-[var(--color-line)] bg-[var(--color-chip)] px-3 py-1.5 text-[12px]">
+              <FilePen size={12} className="shrink-0 text-[var(--color-ink-3)]" />
+              <span className="min-w-0 flex-1 truncate" title={d.path}>
+                <FileLink path={d.path} where={where}>
+                  {slash >= 0 && <span className="text-[var(--color-ink-3)]">{shown.slice(0, slash + 1)}</span>}
+                  <span className="font-medium text-[var(--color-ink)]">{shown.slice(slash + 1)}</span>
+                </FileLink>
+                {d.created && <span className="text-[var(--color-ink-3)]"> · new</span>}
+              </span>
+              <DiffStat added={d.added} removed={d.removed} />
+              {running && i === files.length - 1 && <TypingDots className="text-[var(--color-accent)]" />}
+            </div>
+            <DiffView diff={d} header={false} lines={EDIT_LINES} />
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 /** A run of tool calls (and thinking) as one quiet line: "Searched the web and browsed a.com". */

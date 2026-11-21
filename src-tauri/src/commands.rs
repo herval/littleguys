@@ -180,6 +180,12 @@ pub fn set_guy_hidden(activity: State<'_, Arc<Activity>>, uid: String, hidden: b
     activity.set_guy_hidden(&uid, hidden).map_err(|e| e.to_string())
 }
 
+/// Show or hide a guy's steps ("Ran 3 commands…") in their threads.
+#[tauri::command]
+pub fn set_guy_steps(activity: State<'_, Arc<Activity>>, uid: String, shown: bool) -> Result<(), String> {
+    activity.set_guy_steps(&uid, shown).map_err(|e| e.to_string())
+}
+
 /// What notifies you about a guy (`gatewayId/agentId`), or with no `uid` about everyone.
 #[tauri::command]
 pub fn set_notifications(activity: State<'_, Arc<Activity>>, uid: Option<String>, prefs: NotifyPrefs) -> Result<(), String> {

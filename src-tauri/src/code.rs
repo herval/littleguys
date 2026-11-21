@@ -44,6 +44,8 @@ pub struct CoderPrefs {
     pub worktrees: bool,
     /// Pull requests and checks, through `gh`.
     pub prs: bool,
+    /// A coding thread's edits show as diffs between its messages, not only in its steps.
+    pub edits: bool,
     /// The one-time "Turn on Coder mode" line was answered.
     pub offered: bool,
     /// Coding threads get a button that opens a terminal in their folder (terminal.rs).
@@ -65,6 +67,7 @@ const OFF: CoderPrefs = CoderPrefs {
     panel: true,
     worktrees: false,
     prs: false,
+    edits: true,
     offered: false,
     terminal: true,
     terminal_app: None,
@@ -987,7 +990,7 @@ u UU N... 100644 100644 100644 100644 aaa bbb ccc README.md\0\
     #[test]
     fn prefs_default_and_read_partially() {
         let p: CoderPrefs = serde_json::from_value(json!({ "on": true })).unwrap();
-        assert!(p.on && p.panel && !p.worktrees && !p.prs);
+        assert!(p.on && p.panel && p.edits && !p.worktrees && !p.prs);
         // A prefs file from before the terminal button: the button is on, in the system terminal.
         assert!(p.terminal && p.terminal_app.is_none());
         assert_eq!(serde_json::to_value(CoderPrefs::default()).unwrap()["panel"], true);
