@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { activityFor, allGuys, defaultThread, findGuy, guyName, guyUid, liveGateways, threadKind } from "../lib/guys";
 import { core, listen } from "../lib/ipc";
 import type { ConnStatus, Guy, Navigate, Roster } from "../lib/types";
+import { readGroupBy } from "./sidebar";
 
 const ORDER_KEY = "littleguys.order";
 const LAST_THREAD_KEY = "littleguys.lastThread";
@@ -78,6 +79,8 @@ interface AppState {
   setStatus(status: ConnStatus): void;
   setRoster(roster: Roster): void;
   selectGuy(uid: string, sessionKey?: string | null): void;
+  /** Open a guy's thread from the grouped sidebar, which stays as it is (no drilling into the guy). */
+  openThread(uid: string, sessionKey: string): void;
   selectSession(key: string | null): void;
   setView(view: MainView): void;
   browse(uid: string | null): void;
@@ -117,8 +120,9 @@ export const useApp = create<AppState>((set, get) => ({
   lastThreadByGuy: readJson<Record<string, string>>(LAST_THREAD_KEY, {}),
   restoreUid: readJson<string | null>(LAST_GUY_KEY, null),
   view: "chat",
-  // At launch, the sidebar opens on the guy you were last on (if they show up).
-  browseUid: readJson<string | null>(LAST_GUY_KEY, null),
+  // At launch, the sidebar opens on the guy you were last on (if they show up), unless it
+  // lists everyone's threads: then it opens on that list.
+  browseUid: readGroupBy() === "agent" ? readJson<string | null>(LAST_GUY_KEY, null) : null,
   sidebarTab: "chat",
   fileByGuy: {},
   fileBack: null,
@@ -159,6 +163,10 @@ export const useApp = create<AppState>((set, get) => ({
   selectGuy: (uid, sessionKey) => {
     activate(uid);
     set({ browseUid: uid, sidebarTab: "chat" });
+    showGuy(uid, sessionKey);
+  },
+  openThread: (uid, sessionKey) => {
+    activate(uid);
     showGuy(uid, sessionKey);
   },
   selectSession: (key) => {

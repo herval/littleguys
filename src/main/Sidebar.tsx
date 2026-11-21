@@ -1,30 +1,23 @@
-import { reportError } from "../ui/reportError";
 import {
   AlarmClock,
   Archive,
   Camera,
-  ArchiveRestore,
   ChevronLeft,
   ChevronRight,
   Folder,
   History,
   MessageCircle,
-  MessageSquareCheck,
-  MessageSquareDot,
   MoreHorizontal,
   Pencil,
   Pin,
-  PinOff,
   Search,
   Settings as SettingsIcon,
   Sparkles,
   SquarePen,
-  SquareTerminal,
-  Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { openTerminal, repoKey, useCoderOn, useRepoStatus, useRepoStatuses, useTerminalOn } from "../lib/code";
+import { repoKey, useCoderOn, useRepoStatus, useRepoStatuses } from "../lib/code";
 import { COMPUTER, IS_MAC, shortcut } from "../lib/platform";
 import { photoToAvatar } from "../lib/avatarImage";
 import { sessions as sessionsApi } from "../lib/gateway";
@@ -38,7 +31,6 @@ import {
   gatewayOf,
   followsSessions,
   guyName,
-  guyUid,
   isMultiGateway,
   isRunning,
   RUNTIME_LABEL,
@@ -55,26 +47,32 @@ import { type MainView, mainSessionKey, useApp } from "../stores/app";
 import { useArchive } from "../stores/archive";
 import { threadId } from "../stores/chat";
 import { Avatar } from "../ui/Avatar";
-import { IconButton, inputClass, TypingDots } from "../ui/kit";
+import { IconButton, TypingDots } from "../ui/kit";
 import { RepoLine } from "./ChangesPanel";
 import { FileTree } from "./Files";
 import { GatewayBanner } from "./GatewayBanner";
 import { GuyList } from "./GuyList";
 import { AbilityList } from "./Skills";
+import { GroupByMenu, ThreadGroups, useGroupBy } from "./ThreadGroups";
+import { RenameInput, ThreadMenu, useCanFile } from "./ThreadMenu";
 
 /** Every guy as a card; clicking one drills into their threads (like WhatsApp communities). */
 export function Sidebar() {
   const roster = useApp((s) => s.roster);
   const browseUid = useApp((s) => s.browseUid);
   const guy = useMemo(() => findGuy(roster, browseUid), [roster, browseUid]);
+  const groupBy = useGroupBy();
   return (
     <aside className="flex w-[300px] shrink-0 flex-col">
       <SidebarTop back={Boolean(guy)} />
       <GatewayBanner />
       {!guy ? (
         <div key="guys" className="animate-push-back flex min-h-0 flex-1 flex-col">
-          <h1 className="px-4 pb-2 font-display text-[22px] font-bold tracking-tight">littleguys</h1>
-          <GuyList />
+          <div className="flex items-center justify-between gap-2 pb-2 pl-4 pr-2.5">
+            <h1 className="font-display text-[22px] font-bold tracking-tight">littleguys</h1>
+            <GroupByMenu groupBy={groupBy} />
+          </div>
+          {groupBy === "agent" ? <GuyList /> : <ThreadGroups key={groupBy} groupBy={groupBy} />}
         </div>
       ) : (
         <GuyPane key="guy" guy={guy} />
@@ -583,6 +581,7 @@ function ThreadRow({
   const isDraft = kind === "main" && !mainChat && !row.updatedAt;
   const [menu, setMenu] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const canFile = useCanFile();
   const preview = cleanPreview(row.lastMessagePreview);
   // Coder mode: a thread working in a repo says its branch where the preview sits (read again when a turn ends).
   const repo = useRepoStatus(gatewayId, row.key, running);
@@ -591,8 +590,8 @@ function ThreadRow({
   // The open thread reads itself, unless you marked it unread from here.
   const kept = useApp((s) => s.keptUnread === threadId(gatewayId, row.key));
   const unread = Boolean(row.unread) && (!selected || kept);
-  // The main chat can only be marked read or unread.
-  const hasMenu = !isDraft && actions;
+  // The main chat can only be marked read or unread (or go in a folder).
+  const hasMenu = !isDraft && (actions || (canFile && !row.archived));
 
   return (
     <div
@@ -662,6 +661,7 @@ function ThreadRow({
       {menu && (
         <ThreadMenu
           isMain={isMain}
+          actions={actions}
           gatewayId={gatewayId}
           agentId={agentId}
           row={row}
@@ -670,167 +670,5 @@ function ThreadRow({
         />
       )}
     </div>
-  );
-}
-
-function RenameInput({ gatewayId, row, onDone }: { gatewayId: string; row: SessionRow; onDone: () => void }) {
-  const [value, setValue] = useState(threadTitle(row));
-  const commit = async () => {
-    const label = value.trim();
-    onDone();
-    if (label && label !== threadTitle(row)) {
-      await sessionsApi.patch(gatewayId, row.key, { label }).catch(reportError);
-      core.refreshRoster(gatewayId).catch(() => {});
-    }
-  };
-  return (
-    <input
-      autoFocus
-      value={value}
-      onClick={(e) => e.stopPropagation()}
-      onChange={(e) => setValue(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if (e.key === "Enter") commit();
-        if (e.key === "Escape") onDone();
-      }}
-      className={`${inputClass} h-6 py-0 text-[12.5px] text-[var(--color-ink)]`}
-    />
-  );
-}
-
-function ThreadMenu({
-  isMain,
-  gatewayId,
-  agentId,
-  row,
-  onClose,
-  onRename,
-}: {
-  isMain: boolean;
-  gatewayId: string;
-  agentId: string;
-  row: SessionRow;
-  onClose: () => void;
-  onRename: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const selectSession = useApp((s) => s.selectSession);
-  const selected = useApp((s) => s.selectedSessionKey);
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [onClose]);
-
-  const act = async (fn: () => Promise<unknown>) => {
-    onClose();
-    try { await fn(); } catch (error) { await reportError(error); return; }
-    const refreshed = core.refreshRoster(gatewayId).catch(() => {});
-    // Archived threads aren't in the roster: look at the archive again too.
-    if (row.archived) refreshed.then(() => useArchive.getState().load({ uid: guyUid(gatewayId, agentId), gatewayId, id: agentId }));
-  };
-  const leaveIfOpen = () => {
-    const s = useApp.getState();
-    if (s.selectedUid !== guyUid(gatewayId, agentId)) return;
-    if (s.routineRunByGuy[s.selectedUid] === row.key) s.selectRoutineRun(null);
-    else if (selected === row.key) selectSession(mainSessionKey(agentId));
-  };
-  const kind = threadKind(row.key);
-  const terminalOn = useTerminalOn(gatewayId);
-  const openTerminalHere = async () => {
-    onClose();
-    try {
-      const note = await openTerminal(gatewayId, row.key);
-      if (note) await reportError(note, "Opened another terminal", "info");
-    } catch (error) {
-      await reportError(error, "Couldn't open a terminal");
-    }
-  };
-  const setUnread = (unread: boolean) =>
-    act(async () => {
-      const s = useApp.getState();
-      // The open thread reads itself: marked unread, it waits until you open it again.
-      const open =
-        s.selectedUid === guyUid(gatewayId, agentId) &&
-        (s.view === "routines" ? s.routineRunByGuy[s.selectedUid] : s.selectedSessionKey) === row.key;
-      if (open) s.keepUnread(unread ? threadId(gatewayId, row.key) : null);
-      await sessionsApi.patch(gatewayId, row.key, { unread }).catch((error) => { if (open) s.keepUnread(null); throw error; });
-    });
-
-  return (
-    <div
-      ref={ref}
-      onClick={(e) => e.stopPropagation()}
-      className="animate-pop absolute right-1 top-8 z-20 w-48 rounded-lg border border-[var(--color-line)] bg-[var(--color-pane-solid)] p-1 text-[12.5px] text-[var(--color-ink)] shadow-xl"
-    >
-      <MenuButton
-        icon={row.unread ? <MessageSquareCheck size={13} /> : <MessageSquareDot size={13} />}
-        label={row.unread ? "Mark as read" : "Mark as unread"}
-        onClick={() => setUnread(!row.unread)}
-      />
-      {terminalOn && <MenuButton icon={<SquareTerminal size={13} />} label="Open a terminal here" onClick={openTerminalHere} />}
-      {!isMain && (
-        <>
-          <MenuButton icon={<Pencil size={13} />} label="Rename" onClick={() => (onClose(), onRename())} />
-          {row.archived ? (
-            <MenuButton
-              icon={<ArchiveRestore size={13} />}
-              label="Unarchive"
-              onClick={() => act(() => sessionsApi.patch(gatewayId, row.key, { archived: false }, row.sessionId ?? undefined))}
-            />
-          ) : (
-            <>
-              <MenuButton
-                icon={row.pinned ? <PinOff size={13} /> : <Pin size={13} />}
-                label={row.pinned ? "Unpin" : "Pin"}
-                onClick={() => act(() => sessionsApi.patch(gatewayId, row.key, { pinned: !row.pinned }))}
-              />
-              <MenuButton
-                icon={<Archive size={13} />}
-                label="Archive"
-                onClick={() =>
-                  act(async () => {
-                    await sessionsApi.patch(gatewayId, row.key, { archived: true }, row.sessionId ?? undefined);
-                    leaveIfOpen();
-                  })
-                }
-              />
-            </>
-          )}
-        </>
-      )}
-      {(kind === "chat" || kind === "routine" || (kind === "main" && !isMain)) && (
-        <MenuButton
-          icon={<Trash2 size={13} />}
-          label="Delete"
-          danger
-          onClick={() =>
-            act(async () => {
-              await sessionsApi.patch(gatewayId, row.key, { archived: true }, row.sessionId ?? undefined);
-              await sessionsApi.remove(gatewayId, row.key);
-              leaveIfOpen();
-            })
-          }
-        />
-      )}
-    </div>
-  );
-}
-
-function MenuButton({ icon, label, onClick, danger }: { icon: React.ReactNode; label: string; onClick: () => void; danger?: boolean }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition ${
-        danger ? "text-[var(--color-bad)] hover:bg-[var(--color-bad)]/10" : "hover:bg-[var(--color-chip)]"
-      }`}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }
