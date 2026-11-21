@@ -9,8 +9,9 @@ export interface PendingSend {
   runId?: string;
   status: "sending" | "queued" | "unknown";
   message: ChatMessage;
-  /** Native handoff accepted; keep the bubble until its transcript arrives. */
-  delivery?: { ids: string[]; texts: string[] };
+  /** Native handoff accepted; keep the bubble until its transcript arrives.
+   * `since`: the earliest transcript time that can be it (a remote gateway's clock may run behind this Mac's). */
+  delivery?: { ids: string[]; texts: string[]; since?: number };
   /** Transcript rows that predate this send or already confirmed another batch. */
   seen?: string[];
 }
@@ -72,10 +73,34 @@ function merge(base: ChatMessage[], extra: ChatMessage[]): ChatMessage[] {
   }
   return result;
 }
+/** OpenClaw keeps a message from chat.send as `<idempotencyKey>:user` and puts that on its
+ * transcript row (`session.message` and history alike); it never echoes `clientSendId`, and
+ * gives a user row no `runId`.
+ */
+function openclawSendId(m: ChatMessage): string | undefined {
+  const key = m.__openclaw?.idempotencyKey;
+  return key?.endsWith(":user") ? key.slice(0, -":user".length) : undefined;
+}
+/** The send this row says it came from, if it says (it may be another client's). */
+function sendIdOf(m: ChatMessage): string | undefined {
+  return m.__openclaw?.clientSendId ?? openclawSendId(m);
+}
 function acknowledged(p: PendingSend, m: ChatMessage): boolean {
   if (m.role !== "user") return false;
-  if (m.__openclaw?.clientSendId) return m.__openclaw.clientSendId === p.idempotencyKey;
+  const sent = sendIdOf(m);
+  if (sent) return sent === p.idempotencyKey;
   return Boolean(p.runId && m.__openclaw?.runId === p.runId);
+}
+const GATEWAY_CLOCK_SKEW_MS = 60_000;
+/** What a send's receipt says was handed over, for matching its transcript row by text. A native
+ * runtime says `delivery`; a gateway that names no send ID (OpenClaw) took it once it answers,
+ * in case its row doesn't name it either (gateways older than `:user` keys).
+ */
+function handoff(p: PendingSend, id: string, receipt: SendReceipt): PendingSend["delivery"] {
+  const texts = [textOf(p.message).trim()];
+  if (receipt.delivery === "delivered") return { ids: [id], texts };
+  if (receipt.delivery || receipt.clientSendId || p.message.timestamp === undefined) return undefined;
+  return { ids: [id], texts, since: p.message.timestamp - GATEWAY_CLOCK_SKEW_MS };
 }
 /** Native CLIs cannot echo client IDs. Match only an accepted handoff, once,
  * against a new transcript row at or after the send (timestamps may round to seconds).
@@ -86,10 +111,10 @@ function reconcilePending(pending: PendingSend[], messages: ChatMessage[]): Pend
   for (const m of messages) {
     if (m.role !== "user") continue;
     const matched = remaining.filter((p) => acknowledged(p, m));
-    if (!matched.length && !m.__openclaw?.clientSendId) {
+    if (!matched.length && !sendIdOf(m)) {
       const p = remaining.find((p) => p.delivery && !p.seen?.includes(identity(m)) &&
         m.timestamp !== undefined && p.message.timestamp !== undefined &&
-        m.timestamp >= Math.floor(p.message.timestamp / 1000) * 1000 &&
+        m.timestamp >= (p.delivery.since ?? Math.floor(p.message.timestamp / 1000) * 1000) &&
         p.delivery.texts.includes(textOf(m).trim()));
       if (p) matched.push(...remaining.filter((other) => p.delivery!.ids.includes(other.idempotencyKey)));
     }
@@ -127,7 +152,7 @@ export function reduceThread(t: ThreadState, a: Action): ThreadState {
       // A send response is an acknowledgement, never evidence of a live run.
       const pending = t.pending.map((p) => p.idempotencyKey === a.id ? {
         ...p, runId: a.receipt.runId, status: "queued" as const,
-        delivery: p.delivery ?? (a.receipt.delivery === "delivered" ? { ids: [a.id], texts: [textOf(p.message).trim()] } : undefined),
+        delivery: p.delivery ?? handoff(p, a.id, a.receipt),
       } : p).filter((p) => !(p.idempotencyKey === a.id && (a.receipt.status === "ok" || a.receipt.status === "held")));
       return { ...t, pending: reconcilePending(pending, t.messages) };
     }

@@ -500,16 +500,17 @@ function sendQueued(gateway: string, sessionKey: string) {
   queueEvent(gateway, sessionKey, { accepted: { id, receipt } });
 }
 
+/** Like OpenClaw: the run is the send's idempotencyKey, and the user row names it only as `<id>:user`. */
 function streamReply(gateway: string, sessionKey: string, text: string, clientSendId?: string) {
-  const runId = crypto.randomUUID();
+  const runId = clientSendId ?? crypto.randomUUID();
   working.add(`${gateway}|${sessionKey}`);
   const reply = text.startsWith("/")
     ? `⚙️ Ran \`${text.split(/\s/)[0]}\` (mock).`
     : `You said: “${text}”. On it! 🫡\n\nThis is the mock backend — run \`pnpm tauri dev\` to talk to a real gateway.`;
   const ev = (event: string, payload: object) => emit("gw:event", { gateway, event, payload: { sessionKey, ...payload } });
-  const user: ChatMessage = { role: "user", content: text, timestamp: Date.now(), ...oc(crypto.randomUUID(), { runId, clientSendId }) };
+  const user: ChatMessage = { role: "user", content: text, timestamp: Date.now(), ...oc(crypto.randomUUID(), { idempotencyKey: `${runId}:user` }) };
   (history[`${gateway}|${sessionKey}`] ??= []).push(user);
-  ev("session.message", { runId, clientSendId, message: user });
+  ev("session.message", { message: user });
   ev("chat", { runId, state: "status", phase: "starting_model" });
   let i = 0;
   const words = reply.split(" ");

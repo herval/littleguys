@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { blank, reduceThread, waitingCount } from "../src/stores/chatReducer.ts";
 import { createChatStore } from "../src/stores/chat.ts";
 import { decodeChatEvent } from "../src/lib/chatEvents.ts";
+import { toItems } from "../src/lib/transcript.ts";
 const m = (id, role = "assistant", runId, clientSendId) => ({role, content:id, timestamp:1, __openclaw:{id, runId, clientSendId}});
 const event = (t, e) => reduceThread(t, {type:"event",event:e,now:2});
 const run = (t, runId, state) => event(t,{kind:"run", runId,state});
@@ -312,4 +313,40 @@ test("queue events decode, and malformed ones are dropped",()=>{
  assert.deepEqual([e.sent.id,e.accepted.receipt.runId,e.unsent,e.error],["x","r","y","e"]);
  assert.equal(decodeChatEvent("chat.queue",{sessionKey:"s"}),null);
  assert.equal(decodeChatEvent("chat.queue",{sessionKey:"s",queued:[],accepted:{id:"x",receipt:{}}}).accepted,undefined);
+});
+
+// OpenClaw: runId = the send's idempotencyKey; the user row names neither, only `<id>:user`.
+const openclawRow=(id,sendId,text="hello",timestamp=2002)=>({role:"user",content:[{type:"text",text}],timestamp,
+ __openclaw:{id,...(sendId?{idempotencyKey:`${sendId}:user`}:{})}});
+const openclawReceipt=(t,id)=>reduceThread(t,{type:"receipt",id,receipt:{runId:id,status:"started"}});
+
+test("OpenClaw's user row confirms its send by key, before or after the receipt, live or in history",()=>{
+ let t=nativeSend(blank("g|s"),"send");
+ t=event(t,{kind:"message",message:openclawRow("row","send")});
+ assert.equal(t.pending.length,0);
+ t=openclawReceipt(nativeSend(blank("g|s"),"send"),"send");
+ assert.equal(t.pending.length,1);
+ t=history(t,[openclawRow("row","send")]);
+ assert.equal(t.pending.length,0);
+ assert.equal(toItems(t.messages,t.pending.map(p=>p.message)).length,1);
+});
+
+test("another client's OpenClaw row never confirms ours, even with the same text",()=>{
+ let t=openclawReceipt(nativeSend(blank("g|s"),"send"),"send");
+ t=event(t,{kind:"message",message:openclawRow("phone","phone-send")});
+ assert.equal(t.pending.length,1);
+ t=event(t,{kind:"message",message:openclawRow("ours","send")});
+ assert.equal(t.pending.length,0);
+});
+
+test("an OpenClaw row without a key matches its accepted send by text, despite the gateway's clock",()=>{
+ let t=history(blank("g|s"),[openclawRow("before",undefined,"hello",500)]);
+ t=nativeSend(t,"send","hello",30_000);
+ t=event(t,{kind:"message",message:openclawRow("too-old",undefined,"hello",-40_000)});
+ t=event(t,{kind:"message",message:openclawRow("other",undefined,"something else",29_000)});
+ assert.equal(t.pending.length,1);
+ t=openclawReceipt(t,"send");
+ assert.equal(t.pending.length,1);
+ t=event(t,{kind:"message",message:openclawRow("behind",undefined,"hello",29_000)});
+ assert.equal(t.pending.length,0);
 });

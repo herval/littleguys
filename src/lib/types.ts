@@ -340,7 +340,8 @@ export interface ChatMessage {
   diffs?: ToolDiff[];
   /** On a question tool's result: each question → the answer given. */
   answers?: Record<string, string>;
-  __openclaw?: { clientSendId?: string; id?: string; seq?: number; runId?: string; kind?: string };
+  /** `idempotencyKey`: OpenClaw's for the row; `<chat.send idempotencyKey>:user` for a message it took from chat.send. */
+  __openclaw?: { clientSendId?: string; id?: string; seq?: number; runId?: string; kind?: string; idempotencyKey?: string };
 }
 
 /**
