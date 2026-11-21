@@ -35,6 +35,8 @@ export interface Capabilities {
   attachments: boolean;
   models: boolean;
   files: boolean;
+  /** Text files in the workspace can be saved (`agents.workspace.set`). */
+  editFiles: boolean;
   skills: boolean;
   /** Slash commands can be listed for the composer (`commands.list`). */
   commands: boolean;
@@ -437,6 +439,8 @@ export interface WorkspaceFile {
   encoding: "utf8" | "base64";
   content: string;
   truncated?: boolean;
+  /** Of a text file's bytes; a save names it (`agents.workspace.set`), so it never lands on a newer version. */
+  hash?: string;
 }
 
 export interface SkillEntry {

@@ -36,7 +36,7 @@ function status(id: string, name: string, url: string, phase: ConnStatus["phase"
     credentialIssue: null,
     hello: { policy: { attachments: { maxBytes: 20 << 20, maxImageBytes: 6 << 20 } } },
     kind: "openclaw",
-    capabilities: { manageGuys: true, routines: true, routinesLocal: false, approvals: true, threadActions: true, newThreads: true, attachments: true, models: true, files: true, skills: true, commands: true, tools: true, plugins: true, browser: true, pastSessions: false, code: false, steer: true },
+    capabilities: { manageGuys: true, routines: true, routinesLocal: false, approvals: true, threadActions: true, newThreads: true, attachments: true, models: true, files: true, editFiles: false, skills: true, commands: true, tools: true, plugins: true, browser: true, pastSessions: false, code: false, steer: true },
     ...extra,
   };
 }
@@ -124,7 +124,7 @@ claude.status = {
   ...claude.status,
   kind: "acp",
   mode: null,
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: false },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, editFiles: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: false },
 };
 
 // ?claudecode=1: Claude Code as its own kind (every session on this Mac is a thread) instead of an ACP agent.
@@ -156,7 +156,7 @@ claudeCode.status = {
   mode: "local",
   serverVersion: "2.1.296",
   hello: { approvals: true },
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, editFiles: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: true },
 };
 
 const codex = gateway("acp-codex", "Codex", "npx -y @agentclientprotocol/codex-acp", "connected", {
@@ -202,7 +202,7 @@ codexSessions.status = {
   kind: "codex",
   mode: "local",
   serverVersion: "0.166.0",
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true, steer: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, editFiles: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true, steer: true },
 };
 
 /** The face each bot gave a guy, from before a photo was picked for them. */
@@ -610,12 +610,41 @@ function workspaceList(path: string) {
   return { agentId: "main", path, ...(path ? { parentPath: path.split("/").slice(0, -1).join("/") } : {}), entries, totalEntries: entries.length, offset: 0 };
 }
 
+/** Stands in for the runtime's SHA-256 of a file's bytes. */
+function mockHash(content: string): string {
+  let h = 5381;
+  for (let i = 0; i < content.length; i++) h = ((h << 5) + h + content.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(16);
+}
+
+const savedAt: Record<string, number> = {};
+
 function workspaceGet(path: string) {
   const name = path.split("/").pop() ?? path;
   if (name.endsWith(".png")) return { agentId: "main", file: { path, name, size: 5120, updatedAtMs: now, mimeType: "image/png", encoding: "base64", content: GUY_PNG } };
   const content = workspaceFiles[path];
-  if (content == null) throw { code: "INVALID_REQUEST", message: "workspace file not found" };
-  return { agentId: "main", file: { path, name, size: content.length, updatedAtMs: now - 3 * 60 * min, mimeType: "text/plain", encoding: "utf8", content } };
+  if (content == null) throw { code: "INVALID_REQUEST", message: "workspace file not found", details: { type: "workspace_file_not_found", path } };
+  const updatedAtMs = savedAt[path] ?? now - 3 * 60 * min;
+  return { agentId: "main", file: { path, name, size: content.length, updatedAtMs, mimeType: "text/plain", encoding: "utf8", content, hash: mockHash(content) } };
+}
+
+/** `?conflict=1`: the guy edits a file while you do, so a save meets their newer version. */
+function workspaceSet(path: string, content: string, expectedHash: string) {
+  const current = workspaceFiles[path];
+  if (current == null) throw { code: "INVALID_REQUEST", message: "workspace file not found", details: { type: "workspace_file_not_found", path } };
+  const theirs = new URLSearchParams(location.search).has("conflict") && !path.startsWith("theirs:") && !savedAt[`theirs:${path}`];
+  if (theirs) {
+    savedAt[`theirs:${path}`] = Date.now();
+    workspaceFiles[path] = `${current.replace(/\n?$/, "\n")}\n<!-- the guy added this line while you were editing -->\n`;
+  }
+  const latest = workspaceFiles[path];
+  if (mockHash(latest) !== expectedHash) {
+    throw { code: "INVALID_REQUEST", message: "the file changed since it was opened", details: { type: "workspace_file_changed", path, hash: mockHash(latest) } };
+  }
+  workspaceFiles[path] = content;
+  savedAt[path] = Date.now();
+  const name = path.split("/").pop() ?? path;
+  return { agentId: "main", file: { path, name, size: content.length, updatedAtMs: savedAt[path], hash: mockHash(content) } };
 }
 
 const mockSkills = [
@@ -945,8 +974,18 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
       return { entries: [{ ts: now - 9 * 60 * min, runAtMs: now - 9 * 60 * min, jobId: p.jobId, status: "ok", summary: "Sunny, 24°. 3 meetings today.", sessionKey: "agent:main:cron:job1:run:r1" }], total: 1 };
     case "models.list":
       return { models: [{ id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" }, { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic" }, { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "openai" }] };
-    case "agents.files.get":
-      return { agentId: p.agentId, workspace: "", file: { name: p.name, content: "# SOUL.md\n", hash: "x" } };
+    case "agents.files.get": {
+      const content = workspaceFiles[String(p.name)] ?? "# SOUL.md\n";
+      return { agentId: p.agentId, workspace: "", file: { name: p.name, content, hash: mockHash(content) } };
+    }
+    case "agents.files.set": {
+      const name = String(p.name);
+      const current = workspaceFiles[name] ?? "# SOUL.md\n";
+      if (p.expectedHash && p.expectedHash !== mockHash(current)) throw { code: "INVALID_REQUEST", message: `${name} changed since it was opened` };
+      workspaceFiles[name] = String(p.content);
+      savedAt[name] = Date.now();
+      return { ok: true, agentId: p.agentId, workspace: "", file: { name, content: p.content } };
+    }
     case "agents.workspace.list": {
       const listing = workspaceList(String(p.path ?? ""));
       // Claude Code and ACP threads each work in their own folder.
@@ -956,6 +995,9 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
     }
     case "agents.workspace.get":
       return workspaceGet(String(p.path));
+    case "agents.workspace.set":
+      if (gateway !== claudeCode.id && gateway !== codex.id && gateway !== claude.id) throw { code: "UNSUPPORTED", message: "agents.workspace.set isn't supported by this bot" };
+      return workspaceSet(String(p.path), String(p.content), String(p.expectedHash));
     case "skills.status":
       return gateway === "acp-claude"
         ? { skills: [

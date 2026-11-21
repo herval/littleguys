@@ -140,6 +140,7 @@ fn capabilities(config: &ClaudeCodeConfig) -> Capabilities {
         attachments: true,
         models: false,
         files: true,
+        edit_files: true,
         skills: true,
         commands: true,
         tools: false,
@@ -645,7 +646,7 @@ impl ClaudeCodeClient {
             "sessions.open" => sessions_open(inner, &params),
             "sessions.search" => sessions_search(inner, &params).await,
             // The folder of the thread you're on (`sessionKey`), else the one you last worked in.
-            "agents.workspace.list" | "agents.workspace.get" => {
+            "agents.workspace.list" | "agents.workspace.get" | "agents.workspace.set" => {
                 check_agent(&params)?;
                 let root = folder_of(inner, &params);
                 let method = method.to_string();
@@ -4118,6 +4119,16 @@ mod tests {
             .unwrap();
         assert_eq!(file["file"]["content"], "fn main() {}");
         assert!(file.get("workspaceDir").is_none());
+        // Saved in the thread's folder, not the latest one.
+        let saved = client
+            .call(
+                "agents.workspace.set",
+                json!({ "path": "cart.rs", "content": "fn main() { checkout() }", "expectedHash": file["file"]["hash"], "sessionKey": keys::thread(AGENT_ID, "s-shop") }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(shop.join("cart.rs")).unwrap(), "fn main() { checkout() }");
+        assert!(saved["file"]["hash"].is_string());
         for d in [&shop, &blog, &dir] {
             let _ = std::fs::remove_dir_all(d);
         }

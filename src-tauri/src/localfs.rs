@@ -1,12 +1,17 @@
-//! Read-only, root-confined browsing of a folder on this Mac, in the same
-//! shapes as OpenClaw's `agents.workspace.list|get` (see runtime/mod.rs).
+//! Root-confined browsing of a folder on this Mac, in the same shapes as
+//! OpenClaw's `agents.workspace.list|get` (see runtime/mod.rs), and saving the
+//! text files you edit in littleguys (`agents.workspace.set`).
 //!
 //! - Paths are workspace-relative with forward slashes; the root is `""`.
 //! - Absolute paths and `..` are refused up front; everything is then resolved
 //!   against the canonical root, so symlinks can't lead outside it.
 //! - Listings skip symlinks and anything that isn't a plain file or folder.
-//! - Previews: UTF-8 text up to 256 KB, images up to 5 MB (base64). Nothing is
-//!   ever written.
+//! - Previews: UTF-8 text up to 256 KB, images up to 5 MB (base64). Text comes
+//!   with a `hash` of its bytes.
+//! - Saves: only an existing UTF-8 text file (up to 256 KB, before and after),
+//!   only over the version that was read (`expectedHash`), so an edit never lands
+//!   on one the agent made in between. Written to a temporary file beside it and
+//!   renamed over it, keeping its permissions. Nothing is created or deleted.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -14,6 +19,7 @@ use std::time::UNIX_EPOCH;
 
 use base64::Engine;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::gateway::client::RpcError;
 
@@ -53,6 +59,14 @@ pub fn handle(root: &Path, agent_id: &str, method: &str, params: &Value) -> Resu
             list(root, agent_id, rel, offset, limit)
         }
         "agents.workspace.get" => get(root, agent_id, rel),
+        "agents.workspace.set" => {
+            let content = params.get("content").and_then(Value::as_str).ok_or_else(|| RpcError::new("INVALID_REQUEST", "content is required"))?;
+            let expected = params
+                .get("expectedHash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| RpcError::new("INVALID_REQUEST", "expectedHash is required"))?;
+            set(root, agent_id, rel, content, expected)
+        }
         other => Err(crate::runtime::unsupported(other)),
     }
 }
@@ -139,19 +153,81 @@ pub fn get(root: &Path, agent_id: &str, rel: &str) -> Result<Value, RpcError> {
     }
     let unsupported =
         || error("workspace_file_unsupported", "workspace file is not UTF-8 text or a supported image", json!({ "path": path }));
-    let (mime, encoding, content) = match ext_mime {
+    let (mime, encoding, content, hash) = match ext_mime {
         Some(by_ext) => {
             let mime = sniff_image(&bytes).unwrap_or(by_ext);
-            (mime, "base64", base64::engine::general_purpose::STANDARD.encode(&bytes))
+            (mime, "base64", base64::engine::general_purpose::STANDARD.encode(&bytes), None)
         }
         None => {
-            if bytes.contains(&0) {
-                return Err(unsupported());
-            }
-            let text = String::from_utf8(bytes).map_err(|_| unsupported())?;
-            ("text/plain", "utf8", text)
+            let hash = hash_of(&bytes);
+            let text = text_of(bytes).ok_or_else(unsupported)?;
+            ("text/plain", "utf8", text, Some(hash))
         }
     };
+    let mut file = json!({
+        "path": path,
+        "name": name,
+        "size": meta.len(),
+        "updatedAtMs": updated_at_ms(&meta),
+        "mimeType": mime,
+        "encoding": encoding,
+        "content": content,
+    });
+    if let Some(hash) = hash {
+        file["hash"] = json!(hash);
+    }
+    Ok(json!({ "agentId": agent_id, "file": file }))
+}
+
+/// Save an edited text file over the version that was read (`expected` is that read's `hash`).
+pub fn set(root: &Path, agent_id: &str, rel: &str, content: &str, expected: &str) -> Result<Value, RpcError> {
+    let path = normalize(rel)?;
+    let not_found = || error("workspace_file_not_found", "workspace file not found", json!({ "path": path }));
+    if path.is_empty() {
+        return Err(not_found());
+    }
+    let (target, meta) = match resolve(root, &path)? {
+        Some((target, meta)) if meta.is_file() => (target, meta),
+        _ => return Err(not_found()),
+    };
+    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+    let unsupported = || error("workspace_file_unsupported", "only UTF-8 text files can be saved", json!({ "path": path }));
+    if image_mime_for(&name).is_some() || content.contains('\0') {
+        return Err(unsupported());
+    }
+    let too_large = |size: u64| {
+        error(
+            "workspace_file_too_large",
+            "workspace file is too large to save",
+            json!({ "maxBytes": MAX_TEXT_BYTES, "path": path, "size": size }),
+        )
+    };
+    if content.len() as u64 > MAX_TEXT_BYTES {
+        return Err(too_large(content.len() as u64));
+    }
+    // What's there now must be the text that was opened: no other version, and nothing that
+    // was never editable here (too big, or not text).
+    let mut current = Vec::with_capacity(meta.len() as usize);
+    let file = std::fs::File::open(&target).map_err(|_| not_found())?;
+    file.take(MAX_TEXT_BYTES + 1).read_to_end(&mut current).map_err(|_| not_found())?;
+    if current.len() as u64 > MAX_TEXT_BYTES {
+        return Err(too_large(current.len() as u64));
+    }
+    let hash = hash_of(&current);
+    if text_of(current).is_none() {
+        return Err(unsupported());
+    }
+    if hash != expected {
+        return Err(error(
+            "workspace_file_changed",
+            "the file changed since it was opened",
+            json!({ "path": path, "hash": hash }),
+        ));
+    }
+    write_replacing(&target, &meta, content.as_bytes()).map_err(|e| {
+        error("workspace_file_unwritable", &format!("couldn't save {name}: {e}"), json!({ "path": path }))
+    })?;
+    let meta = std::fs::metadata(&target).map_err(|_| not_found())?;
     Ok(json!({
         "agentId": agent_id,
         "file": {
@@ -159,14 +235,47 @@ pub fn get(root: &Path, agent_id: &str, rel: &str) -> Result<Value, RpcError> {
             "name": name,
             "size": meta.len(),
             "updatedAtMs": updated_at_ms(&meta),
-            "mimeType": mime,
-            "encoding": encoding,
-            "content": content,
+            "hash": hash_of(content.as_bytes()),
         },
     }))
 }
 
 // ---- helpers --------------------------------------------------------------------
+
+/// What a save checks it's replacing: the SHA-256 of the file's bytes, in hex.
+fn hash_of(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// The bytes as text, unless they're not UTF-8 or look binary (a NUL).
+fn text_of(bytes: Vec<u8>) -> Option<String> {
+    if bytes.contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Replace `target` with `bytes` in one step: a temporary file beside it, with its
+/// permissions, renamed over it. A failed write leaves the old file as it was.
+fn write_replacing(target: &Path, meta: &std::fs::Metadata, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = target.parent().ok_or_else(|| std::io::Error::other("no parent folder"))?;
+    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let nanos = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let tmp = dir.join(format!(".{name}.littleguys-{}-{nanos}.tmp", std::process::id()));
+    let result = (|| {
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        out.write_all(bytes)?;
+        out.sync_all()?;
+        drop(out);
+        std::fs::set_permissions(&tmp, meta.permissions())?;
+        std::fs::rename(&tmp, target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
 
 fn error(kind: &str, message: &str, details: Value) -> RpcError {
     let mut e = RpcError::new("INVALID_REQUEST", message);
@@ -433,6 +542,99 @@ mod tests {
         assert_eq!(detail_type(&get(&ws.0, "bot", "notes").unwrap_err()), "workspace_file_not_found");
         assert_eq!(detail_type(&get(&ws.0, "bot", "").unwrap_err()), "workspace_file_not_found");
         assert_eq!(detail_type(&get(&ws.0, "bot", "missing.txt").unwrap_err()), "workspace_file_not_found");
+    }
+
+    #[test]
+    fn saves_over_the_version_that_was_read() {
+        let ws = Scratch::new();
+        ws.write("shop/cart.rs", b"let total = 1;\n");
+        let read = get(&ws.0, "bot", "shop/cart.rs").unwrap();
+        let hash = read["file"]["hash"].as_str().unwrap().to_string();
+        assert_eq!(hash.len(), 64);
+
+        let saved = set(&ws.0, "bot", "shop/cart.rs", "let total = 2;\n", &hash).unwrap();
+        assert_eq!(saved["agentId"], "bot");
+        assert_eq!(saved["file"]["path"], "shop/cart.rs");
+        assert_eq!(saved["file"]["size"], 15);
+        assert_eq!(std::fs::read_to_string(ws.0.join("shop/cart.rs")).unwrap(), "let total = 2;\n");
+        // The next save goes over what was just saved.
+        let again = get(&ws.0, "bot", "shop/cart.rs").unwrap();
+        assert_eq!(again["file"]["hash"], saved["file"]["hash"]);
+        // Nothing left beside it.
+        assert_eq!(std::fs::read_dir(ws.0.join("shop")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn refuses_a_save_over_a_newer_version() {
+        let ws = Scratch::new();
+        ws.write("notes.md", b"mine");
+        let hash = get(&ws.0, "bot", "notes.md").unwrap()["file"]["hash"].as_str().unwrap().to_string();
+        // The agent edits it in between.
+        ws.write("notes.md", b"theirs");
+        let err = set(&ws.0, "bot", "notes.md", "my edit", &hash).unwrap_err();
+        assert_eq!(detail_type(&err), "workspace_file_changed");
+        let current = get(&ws.0, "bot", "notes.md").unwrap()["file"]["hash"].clone();
+        assert_eq!(err.details.as_ref().unwrap()["hash"], current);
+        assert_eq!(std::fs::read_to_string(ws.0.join("notes.md")).unwrap(), "theirs");
+        // Overwriting on purpose names the version it replaces.
+        set(&ws.0, "bot", "notes.md", "my edit", current.as_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(ws.0.join("notes.md")).unwrap(), "my edit");
+    }
+
+    #[test]
+    fn saves_only_existing_text_inside_the_root() {
+        let ws = Scratch::new();
+        ws.write("ok.txt", b"ok");
+        ws.write("blob.bin", &[0, 159, 146, 150]);
+        ws.write("pic.png", b"\x89PNG\r\n\x1a\n");
+        ws.write("big.txt", &vec![b'a'; MAX_TEXT_BYTES as usize + 1]);
+        let hash = hash_of(b"ok");
+        assert_eq!(detail_type(&set(&ws.0, "bot", "new.txt", "x", &hash).unwrap_err()), "workspace_file_not_found");
+        assert!(!ws.0.join("new.txt").exists());
+        assert_eq!(detail_type(&set(&ws.0, "bot", "", "x", &hash).unwrap_err()), "workspace_file_not_found");
+        assert_eq!(detail_type(&set(&ws.0, "bot", "../ok.txt", "x", &hash).unwrap_err()), "workspace_path_invalid");
+        assert_eq!(detail_type(&set(&ws.0, "bot", "/etc/hosts", "x", &hash).unwrap_err()), "workspace_path_invalid");
+        let bin = hash_of(&[0, 159, 146, 150]);
+        assert_eq!(detail_type(&set(&ws.0, "bot", "blob.bin", "x", &bin).unwrap_err()), "workspace_file_unsupported");
+        assert_eq!(detail_type(&set(&ws.0, "bot", "pic.png", "x", &hash).unwrap_err()), "workspace_file_unsupported");
+        assert_eq!(detail_type(&set(&ws.0, "bot", "ok.txt", "a\0b", &hash).unwrap_err()), "workspace_file_unsupported");
+        let huge = "a".repeat(MAX_TEXT_BYTES as usize + 1);
+        assert_eq!(detail_type(&set(&ws.0, "bot", "ok.txt", &huge, &hash).unwrap_err()), "workspace_file_too_large");
+        let big = hash_of(&vec![b'a'; MAX_TEXT_BYTES as usize + 1]);
+        assert_eq!(detail_type(&set(&ws.0, "bot", "big.txt", "small", &big).unwrap_err()), "workspace_file_too_large");
+        assert_eq!(std::fs::read_to_string(ws.0.join("ok.txt")).unwrap(), "ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_keeps_permissions_and_never_follows_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = Scratch::new();
+        let outside = Scratch::new();
+        ws.write("run.sh", b"echo hi\n");
+        std::fs::set_permissions(ws.0.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        set(&ws.0, "bot", "run.sh", "echo bye\n", &hash_of(b"echo hi\n")).unwrap();
+        assert_eq!(std::fs::metadata(ws.0.join("run.sh")).unwrap().permissions().mode() & 0o777, 0o755);
+
+        outside.write("secret.txt", b"keep");
+        std::os::unix::fs::symlink(outside.0.join("secret.txt"), ws.0.join("link.txt")).unwrap();
+        let hash = hash_of(b"keep");
+        assert!(set(&ws.0, "bot", "link.txt", "changed", &hash).is_err());
+        assert_eq!(std::fs::read_to_string(outside.0.join("secret.txt")).unwrap(), "keep");
+    }
+
+    #[test]
+    fn handle_needs_content_and_an_expected_hash() {
+        let ws = Scratch::new();
+        ws.write("a.txt", b"a");
+        let hash = hash_of(b"a");
+        assert!(handle(&ws.0, "bot", "agents.workspace.set", &json!({ "path": "a.txt", "content": "b" })).is_err());
+        assert!(handle(&ws.0, "bot", "agents.workspace.set", &json!({ "path": "a.txt", "expectedHash": hash })).is_err());
+        let out = handle(&ws.0, "bot", "agents.workspace.set", &json!({ "path": "a.txt", "content": "b", "expectedHash": hash })).unwrap();
+        assert_eq!(out["file"]["hash"], hash_of(b"b"));
+        // Images have no hash: they can't be saved here.
+        ws.write("pic.png", b"\x89PNG\r\n\x1a\n");
+        assert!(get(&ws.0, "bot", "pic.png").unwrap()["file"].get("hash").is_none());
     }
 
     #[test]

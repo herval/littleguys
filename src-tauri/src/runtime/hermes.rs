@@ -432,6 +432,7 @@ fn capabilities(mode: HermesMode) -> Capabilities {
         attachments: false,
         models: false,
         files: local,
+        edit_files: false,
         skills: true,
         commands: local,
         tools: true,

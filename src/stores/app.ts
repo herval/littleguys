@@ -55,6 +55,8 @@ interface AppState {
   sidebarTab: MainView;
   /** Open file in the Files tab, per guy (workspace-relative path). */
   fileByGuy: Record<string, string>;
+  /** What the main pane showed before a file took it over, for the file's back button. */
+  fileBack: { uid: string; sessionKey: string | null; view: MainView } | null;
   /** Routine run open in the Routines tab, per guy (null = the routines list). */
   routineRunByGuy: Record<string, string | null>;
   /** Selected item in the Skills tab, per guy (see lib/abilities.ts ids). */
@@ -82,6 +84,8 @@ interface AppState {
   setSidebarTab(tab: MainView): void;
   /** Pick a guy's file (and show it, unless `open` is false). */
   selectFile(uid: string, path: string, open?: boolean): void;
+  /** Back from a file to what was on screen before it (else the open chat). */
+  leaveFile(): void;
   /** Open a routine run's transcript in the Routines tab (null = back to the list). */
   selectRoutineRun(key: string | null, uid?: string): void;
   /** Pick a guy's skill or tool (and show it, unless `open` is false). */
@@ -117,6 +121,7 @@ export const useApp = create<AppState>((set, get) => ({
   browseUid: readJson<string | null>(LAST_GUY_KEY, null),
   sidebarTab: "chat",
   fileByGuy: {},
+  fileBack: null,
   routineRunByGuy: {},
   abilityByGuy: {},
   keptUnread: null,
@@ -178,9 +183,18 @@ export const useApp = create<AppState>((set, get) => ({
   selectFile: (uid, path, open = true) => {
     set({ fileByGuy: { ...get().fileByGuy, [uid]: path } });
     if (open) {
+      // Going from file to file keeps the way back to where the first one was opened from.
+      const { view, selectedUid, selectedSessionKey } = get();
+      if (view !== "files" && selectedUid) set({ fileBack: { uid: selectedUid, sessionKey: selectedSessionKey, view } });
       activate(uid);
       set({ view: "files" });
     }
+  },
+  leaveFile: () => {
+    const back = get().fileBack;
+    if (!back) return set({ view: "chat" });
+    activate(back.uid);
+    set({ selectedSessionKey: back.sessionKey ?? get().selectedSessionKey, view: back.view, fileBack: null });
   },
   selectAbility: (uid, id, open = true) => {
     set({ abilityByGuy: { ...get().abilityByGuy, [uid]: id } });
@@ -237,6 +251,11 @@ export const useApp = create<AppState>((set, get) => ({
     if (nav.view === "routines" || nav.view === "files" || nav.view === "skills") set({ view: nav.view, sidebarTab: nav.view });
   },
 }));
+
+// Leaving the files some other way (a thread clicked in the sidebar) leaves their way back behind.
+useApp.subscribe((s, prev) => {
+  if (prev.view === "files" && s.view !== "files" && s.fileBack) useApp.setState({ fileBack: null });
+});
 
 /** The popover's list, as Settings last saved it (the two windows share localStorage). */
 export function readPopoverShows(): PopoverShows {

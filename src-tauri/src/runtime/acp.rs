@@ -216,6 +216,7 @@ fn capabilities(attachments: bool, local: bool, past: bool) -> Capabilities {
         attachments,
         models: false,
         files: local,
+        edit_files: local,
         skills: true,
         commands: true,
         tools: false,
@@ -1432,7 +1433,7 @@ impl Inner {
                 Ok(json!({ "approvals": approvals }))
             }
             "exec.approval.resolve" => self.resolve_approval(&params),
-            "agents.workspace.list" | "agents.workspace.get" => self.workspace_call(method, params).await,
+            "agents.workspace.list" | "agents.workspace.get" | "agents.workspace.set" => self.workspace_call(method, params).await,
             "skills.status" => self.skills_status(&params).await,
             "skills.read" => self.skills_read(&params).await,
             "commands.list" => self.commands_list(&params).await,

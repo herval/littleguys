@@ -1,8 +1,11 @@
-// The Files tab: a guy's workspace folder, read-only. The tree lives in the
-// sidebar (`FileTree`), the open file in the main pane (`FilesView`).
+// The Files tab: a guy's workspace folder. The tree lives in the sidebar
+// (`FileTree`), the open file in the main pane (`FilesView`). Text files can be
+// edited where the runtime can save them (`editFiles`: guys on this computer), and
+// an OpenClaw guy's own files (SOUL.md, AGENTS.md…) through OpenClaw's file API.
 import {
   Activity,
   Brain,
+  ChevronLeft,
   ChevronRight,
   Copy,
   File,
@@ -15,6 +18,7 @@ import {
   IdCard,
   type LucideIcon,
   Moon,
+  Pencil,
   RotateCw,
   ScrollText,
   Sparkles,
@@ -22,17 +26,22 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { FILE_MANAGER } from "../lib/platform";
-import { workspace } from "../lib/gateway";
-import { followsSessions, gatewayOf, guyHue, guyName, isOnThisMac, sessionsFor, shortTime } from "../lib/guys";
-import { core, errorMessage } from "../lib/ipc";
+import { readEditableFile } from "../lib/fileEdit";
+import { agents, workspace } from "../lib/gateway";
+import { capsOf, findGuy, followsSessions, gatewayOf, guyHue, guyName, hasMainChat, isOnThisMac, sessionsFor, shortTime, threadKind, threadTitle } from "../lib/guys";
+import { core, errorMessage, type RpcError } from "../lib/ipc";
+import { FILE_MANAGER, shortcut } from "../lib/platform";
 import type { Guy, WorkspaceEntry, WorkspaceFile } from "../lib/types";
 import { useApp } from "../stores/app";
 import { Markdown } from "../ui/Markdown";
-import { IconButton, Segmented, Spinner } from "../ui/kit";
+import { confirmAction } from "../ui/confirm";
+import { Button, IconButton, Segmented, Spinner } from "../ui/kit";
 import { threadFolder } from "./FolderPicker";
+
+// CodeMirror loads the first time you edit a file.
+const CodeEditor = lazy(() => import("../ui/CodeEditor"));
 
 type Dir = { entries: WorkspaceEntry[]; total: number; loading: boolean; error?: string };
 
@@ -50,6 +59,8 @@ const CORE_FILES: Array<{ name: string; label: string; icon: LucideIcon }> = [
   { name: "BOOTSTRAP.md", label: "First run", icon: Sparkles },
 ];
 const coreFile = (path: string) => (path.includes("/") ? undefined : CORE_FILES.find((c) => c.name === path));
+/** The files OpenClaw's `agents.files.set` writes; its other workspace files stay read-only here. */
+const OPENCLAW_EDITABLE = new Set(["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md", "MEMORY.md"]);
 
 const CODE_LANG: Record<string, string> = {
   ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
@@ -346,7 +357,8 @@ function CodeView({ content, lang }: { content: string; lang: string }) {
 export function FilePeek({ guy, path, onClose }: { guy: Guy; path: string; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      // In the editor, Esc stops editing; the next one closes the peek.
+      if (e.key === "Escape" && !(e.target instanceof Element && e.target.closest(".cm-editor"))) {
         e.stopPropagation();
         onClose();
       }
@@ -368,6 +380,42 @@ export function FilePeek({ guy, path, onClose }: { guy: Guy; path: string; onClo
   );
 }
 
+/** A file being edited: what it started from, and what you've typed. */
+interface EditSession {
+  /** `workspace`: `agents.workspace.set` (guys on this computer); `core`: OpenClaw's `agents.files.set`. */
+  via: "workspace" | "core";
+  /** The text the edit started from, and its version: a save goes only over that one. */
+  base: string;
+  hash: string;
+  /** OpenClaw said the file isn't there yet (a save creates it). */
+  missing?: boolean;
+  draft: string;
+  saving: boolean;
+  /** A save met a newer version (the guy edited it meanwhile): that version's hash. */
+  conflict: string | null;
+  /** That save was Save (leave the editor), not ⌘S: so is Keep mine. */
+  conflictExits?: boolean;
+  error: string | null;
+}
+
+/** Edits not saved yet, by `${guy uid}|${folder}|${path}`, so opening another file keeps them. */
+const drafts = new Map<string, EditSession>();
+
+/** Where a file's back button goes, as its tooltip says it: the thread's title, or the tab. */
+function backLabel(s: ReturnType<typeof useApp.getState>): string {
+  const back = s.fileBack ?? (s.selectedUid ? { uid: s.selectedUid, sessionKey: s.selectedSessionKey, view: "chat" as const } : null);
+  if (back?.view === "routines") return "Routines";
+  if (back?.view === "skills") return "Skills";
+  if (back?.view === "past") return "past sessions";
+  if (!back?.sessionKey) return "the chat";
+  const gatewayId = back.uid.slice(0, back.uid.indexOf("/"));
+  const row = gatewayOf(s.roster, gatewayId)?.sessions.find((r) => r.key === back.sessionKey);
+  // Another guy's chat: say whose ("Back to Jefe").
+  const other = back.uid !== s.selectedUid ? findGuy(s.roster, back.uid) : null;
+  if (other && (!row || threadKind(row.key) === "main")) return guyName(other);
+  return row ? threadTitle(row, hasMainChat(s.roster, gatewayId)) : "the chat";
+}
+
 /** The open file, in the main pane; with `path` and `onClose`, the one a `FilePeek` shows. */
 export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: string; onClose?: () => void }) {
   const picked = useApp((s) => s.fileByGuy[guy.uid]);
@@ -375,6 +423,9 @@ export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: stri
   const thread = useFilesThread(guy);
   const folder = useFilesFolder(guy, thread);
   const gateway = useApp((s) => gatewayOf(s.roster, guy.gatewayId));
+  const backTo = useApp(backLabel);
+  const leaveFile = useApp((s) => s.leaveFile);
+  const caps = useApp((s) => capsOf(s.roster, guy.gatewayId));
   const [file, setFile] = useState<WorkspaceFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -402,6 +453,103 @@ export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: stri
       cancelled = true;
     };
   }, [guy.gatewayId, guy.id, path, nonce, thread]);
+
+  // ---- editing ----
+  const draftKey = path ? `${guy.uid}|${folder ?? ""}|${path}` : "";
+  const keyRef = useRef(draftKey);
+  keyRef.current = draftKey;
+  const [edit, setEditState] = useState<EditSession | null>(() => drafts.get(draftKey) ?? null);
+  useEffect(() => {
+    setEditState(drafts.get(draftKey) ?? null);
+    // Left without changing anything: nothing to come back to.
+    return () => {
+      const left = drafts.get(draftKey);
+      if (left && left.draft === left.base && !left.saving) drafts.delete(draftKey);
+    };
+  }, [draftKey]);
+  /** Set a file's edit; async work names the file it started on, in case you've moved on. */
+  const putEdit = useCallback((key: string, next: EditSession | null) => {
+    if (next) drafts.set(key, next);
+    else drafts.delete(key);
+    if (key === keyRef.current) setEditState(next);
+  }, []);
+  const editVia: EditSession["via"] | null =
+    !path || !file || file.encoding !== "utf8" || file.truncated
+      ? null
+      : caps.editFiles && file.hash
+        ? "workspace"
+        : caps.manageGuys && gateway?.status.kind === "openclaw" && OPENCLAW_EDITABLE.has(path)
+          ? "core"
+          : null;
+  const [startError, setStartError] = useState<string | null>(null);
+  useEffect(() => setStartError(null), [draftKey]);
+
+  const startEdit = async () => {
+    if (!file || !editVia || !path) return;
+    const key = draftKey;
+    const fresh = { saving: false, conflict: null, error: null };
+    if (editVia === "workspace") return putEdit(key, { via: "workspace", base: file.content, hash: file.hash!, draft: file.content, ...fresh });
+    // OpenClaw's file API has its own version of the file.
+    try {
+      const read = await readEditableFile(guy.gatewayId, guy.id, path);
+      putEdit(key, { via: "core", base: read.content, hash: read.hash ?? "", missing: read.missing, draft: read.content, ...fresh });
+    } catch (e) {
+      if (key === keyRef.current) setStartError(errorMessage(e));
+    }
+  };
+
+  /** Save what you typed; `exit` goes back to reading it, `over` overwrites the newer version with that hash. */
+  const save = async (exit: boolean, over?: string) => {
+    const key = draftKey;
+    const at = drafts.get(key);
+    if (!at || at.saving || !path) return;
+    if (at.draft === at.base && !over) return exit ? putEdit(key, null) : undefined;
+    const sent = at.draft;
+    putEdit(key, { ...at, saving: true, error: null });
+    const latest = () => drafts.get(key) ?? at;
+    try {
+      let hash: string;
+      let saved: Partial<WorkspaceFile> = {};
+      if (at.via === "workspace") {
+        const r = await workspace.set(guy.gatewayId, guy.id, path, sent, over ?? at.hash, thread);
+        ({ hash } = r.file);
+        saved = { size: r.file.size, updatedAtMs: r.file.updatedAtMs };
+      } else {
+        await agents.setFile(guy.gatewayId, guy.id, path, sent, over ?? at.hash, at.missing && !over);
+        // OpenClaw doesn't answer with the new version: read it.
+        const read = await readEditableFile(guy.gatewayId, guy.id, path);
+        hash = read.hash ?? "";
+        saved = { size: new TextEncoder().encode(sent).length, updatedAtMs: Date.now() };
+      }
+      if (key === keyRef.current) setFile((f) => f && { ...f, ...saved, content: sent, hash, truncated: false });
+      const now = latest();
+      // Typing went on while it saved: keep editing, from the version just saved.
+      putEdit(key, exit && now.draft === sent ? null : { ...now, base: sent, hash, missing: false, saving: false, conflict: null, error: null });
+    } catch (e) {
+      const details = (e as RpcError)?.details as { type?: string; hash?: string } | undefined;
+      const now = latest();
+      putEdit(
+        key,
+        details?.type === "workspace_file_changed" && details.hash
+          ? { ...now, saving: false, conflict: details.hash, conflictExits: exit }
+          : { ...now, saving: false, error: errorMessage(e) },
+      );
+    }
+  };
+
+  const cancelEdit = async () => {
+    const key = draftKey;
+    const at = drafts.get(key);
+    if (!at) return;
+    if (at.draft !== at.base && !(await confirmAction(`Discard your changes to ${path?.split("/").pop()}?`, "littleguys", "Discard"))) return;
+    putEdit(key, null);
+  };
+
+  /** Drop what you typed for the guy's newer version. */
+  const takeTheirs = () => {
+    putEdit(draftKey, null);
+    setNonce((n) => n + 1);
+  };
 
   // Hermes roots the files at its working folder, not the guy's profile folder.
   const absolute = path && folder && gateway?.status.kind !== "hermes" ? `${folder.replace(/\/$/, "")}/${path}` : null;
@@ -454,11 +602,20 @@ export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: stri
   return (
     <div className="guy-themed flex h-full min-h-0 flex-col" style={{ ["--guy-h" as string]: guyHue(guy.id) }}>
       <div data-tauri-drag-region className="flex h-14 shrink-0 items-center gap-3 border-b border-[var(--color-line)] px-5">
+        {/* A peek closes with its ✕; the main pane goes back to what it showed before. */}
+        {!onClose && (
+          <IconButton label={`Back to ${backTo}`} onClick={leaveFile} className="-ml-2 -mr-1.5">
+            <ChevronLeft size={16} />
+          </IconButton>
+        )}
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--guy-wash-strong)] text-[var(--guy-ink)]">
           <Icon size={15} strokeWidth={2.1} />
         </span>
         <div data-tauri-drag-region className="min-w-0 flex-1">
-          <h3 className="truncate font-display text-[14.5px] font-semibold leading-tight">{named?.label ?? parts[parts.length - 1]}</h3>
+          <h3 className="flex min-w-0 items-center gap-1.5 font-display text-[14.5px] font-semibold leading-tight">
+            <span className="truncate">{named?.label ?? parts[parts.length - 1]}</span>
+            {edit && edit.draft !== edit.base && <span title="Not saved yet" className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)]" />}
+          </h3>
           <p className="flex min-w-0 gap-3 truncate text-[11.5px] text-[var(--color-ink-3)]">
             <span className="truncate">{named ? named.name : parts.length > 1 ? parts.slice(0, -1).join(" / ") : "Workspace"}</span>
             {file && <span className="shrink-0">{formatBytes(file.size)}</span>}
@@ -467,7 +624,23 @@ export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: stri
             {file?.truncated && <span className="shrink-0">Showing the beginning</span>}
           </p>
         </div>
-        {file && isMarkdown(file.name) && (
+        {edit && (
+          <div className="flex items-center gap-1.5">
+            <Button size="sm" variant="ghost" onClick={cancelEdit} disabled={edit.saving}>
+              Cancel
+            </Button>
+            <Button size="sm" variant="primary" onClick={() => save(true)} disabled={edit.saving} title={`Save (${shortcut("S")})`}>
+              {edit.saving ? <Spinner size={12} /> : null}
+              Save
+            </Button>
+          </div>
+        )}
+        {!edit && editVia && (
+          <IconButton label={startError ?? "Edit"} onClick={startEdit} className={startError ? "text-[var(--color-bad)]" : ""}>
+            <Pencil size={13} />
+          </IconButton>
+        )}
+        {!edit && file && isMarkdown(file.name) && (
           <div className="w-36">
             <Segmented
               value={mode}
@@ -497,9 +670,11 @@ export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: stri
               <FolderOpen size={13} />
             </IconButton>
           )}
-          <IconButton label="Reload" onClick={() => setNonce((n) => n + 1)}>
-            <RotateCw size={13} />
-          </IconButton>
+          {!edit && (
+            <IconButton label="Reload" onClick={() => setNonce((n) => n + 1)}>
+              <RotateCw size={13} />
+            </IconButton>
+          )}
           {onClose && (
             <IconButton label="Close" onClick={onClose}>
               <X size={14} />
@@ -507,8 +682,49 @@ export function FilesView({ guy, path: shown, onClose }: { guy: Guy; path?: stri
           )}
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
-        {loading && !file ? (
+      {edit && (edit.conflict || edit.error) && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-line)] bg-[var(--color-accent-soft)] px-5 py-2 text-[12.5px]">
+          <span className="min-w-0 flex-1">
+            {edit.conflict ? `${guyName(guy)} changed this file since you started editing it.` : `Couldn't save: ${edit.error}`}
+          </span>
+          {edit.conflict ? (
+            <>
+              <Button size="sm" variant="ghost" onClick={takeTheirs}>
+                Use theirs
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => save(Boolean(edit.conflictExits), edit.conflict!)}>
+                Keep mine
+              </Button>
+            </>
+          ) : (
+            <Button size="sm" variant="secondary" onClick={() => save(false)}>
+              Try again
+            </Button>
+          )}
+        </div>
+      )}
+      <div className={`min-h-0 flex-1 ${edit ? "overflow-hidden" : "overflow-auto"}`}>
+        {edit && path ? (
+          <Suspense
+            fallback={
+              <div className="code-view flex h-full items-center justify-center">
+                <Spinner size={18} />
+              </div>
+            }
+          >
+            <CodeEditor
+              key={draftKey}
+              value={edit.draft}
+              filename={path.split("/").pop() ?? path}
+              onChange={(draft) => {
+                const at = drafts.get(draftKey);
+                if (at) putEdit(draftKey, { ...at, draft });
+              }}
+              onSave={() => save(false)}
+              onCancel={cancelEdit}
+            />
+          </Suspense>
+        ) : loading && !file ? (
           <div className="flex h-full items-center justify-center">
             <Spinner size={18} />
           </div>

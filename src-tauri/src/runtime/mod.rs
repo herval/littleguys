@@ -22,7 +22,10 @@
 //! - `agents.workspace.list {agentId, path?, offset?, limit?}` → `{agentId, path, parentPath?, entries:[{path,
 //!   name, kind: file|directory, size?, updatedAtMs?}], totalEntries, offset}` (dirs first, by name; root is `""`)
 //! - `agents.workspace.get {agentId, path}` → `{agentId, file:{path, name, size, updatedAtMs, mimeType,
-//!   encoding: utf8|base64, content}}` (if `files`; text ≤ 256 KB, images ≤ 5 MB)
+//!   encoding: utf8|base64, content, hash?}}` (if `files`; text ≤ 256 KB, images ≤ 5 MB; `hash` on text)
+//! - `agents.workspace.set {agentId, path, content, expectedHash}` → `{agentId, file:{path, name, size,
+//!   updatedAtMs, hash}}` (if `edit_files`): an existing text file, only over the version read
+//!   (`workspace_file_changed` with the current `hash` otherwise)
 //! - `skills.status {agentId}` → `{agentId, skills:[{name, skillKey, description?, source, eligible, disabled,
 //!   filePath?, emoji?, missing?:{bins,env,config,os}}]}`; `skills.read {agentId, name}` → `{name, path?, content}`
 //!   (if `skills`; `source:"command"` marks a slash command)
@@ -116,6 +119,8 @@ pub struct Capabilities {
     pub models: bool,
     /// The guy's workspace can be browsed (`agents.workspace.list|get`).
     pub files: bool,
+    /// Text files in it can be saved (`agents.workspace.set`), over the version that was read.
+    pub edit_files: bool,
     /// Skills / slash commands can be listed (`skills.status`).
     pub skills: bool,
     /// Slash commands can be listed for the composer (`commands.list`) and run with `chat.send`.
@@ -148,6 +153,7 @@ impl Capabilities {
             attachments: true,
             models: true,
             files: true,
+            edit_files: false,
             skills: true,
             commands: true,
             tools: true,
@@ -167,6 +173,8 @@ impl Capabilities {
         let admin = scopes.iter().any(|s| s == "operator.admin");
         Self {
             files: has("agents.workspace.list"),
+            // Only a gateway that says so: an older one that lists nothing can't write files.
+            edit_files: methods.as_ref().is_some_and(|list| list.contains(&"agents.workspace.set")),
             skills: has("skills.status"),
             commands: has("commands.list"),
             tools: has("tools.catalog") || has("tools.effective"),

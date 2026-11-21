@@ -118,6 +118,7 @@ fn capabilities() -> Capabilities {
         attachments: false,
         models: false,
         files: true,
+        edit_files: true,
         skills: false,
         commands: false,
         tools: false,
@@ -598,7 +599,7 @@ impl CodexClient {
             "sessions.open" => sessions_open(inner, &params),
             "sessions.search" => sessions_search(inner, &params).await,
             // The folder of the thread you're on (`sessionKey`), else the one you last worked in.
-            "agents.workspace.list" | "agents.workspace.get" => {
+            "agents.workspace.list" | "agents.workspace.get" | "agents.workspace.set" => {
                 check_agent(&params)?;
                 let root = folder_of(inner, &params);
                 let method = method.to_string();
