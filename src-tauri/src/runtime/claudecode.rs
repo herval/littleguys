@@ -2647,7 +2647,7 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
     let prompt = if text.starts_with('-') { format!(" {text}") } else { text.to_string() };
     let mut cmd = cli::command(&claude);
     cmd.arg(&prompt).arg("--bg").current_dir(cwd);
-    add_attachments_dir(&mut cmd, &inner.data_dir);
+    allow_reading_attachments(&mut cmd, &inner.data_dir);
     if let Some(name) = name {
         cmd.args(["--name", name]);
     }
@@ -3028,7 +3028,7 @@ fn past_sessions(projects: &Path, max: usize) -> Vec<PastSession> {
 
 // ---- attachments ------------------------------------------------------------------------
 
-/// Where attached files are saved; sessions get `--add-dir` to it so they can read them.
+/// Where attached files are saved; sessions may read anything in it.
 fn attachments_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("claude-attachments")
 }
@@ -3060,11 +3060,28 @@ fn with_attachments(data_dir: &Path, text: &str, attachments: &[Value]) -> Resul
 }
 
 /// Lets a session littleguys starts read the files attached to your messages (from the
-/// start: resuming keeps the options a background session started with).
-fn add_attachments_dir(cmd: &mut tokio::process::Command, data_dir: &Path) {
+/// start: resuming keeps the options a background session started with). A Read rule, not
+/// `--add-dir`: Claude Code won't start with an added folder you never trusted.
+fn allow_reading_attachments(cmd: &mut tokio::process::Command, data_dir: &Path) {
     let dir = attachments_dir(data_dir);
     if std::fs::create_dir_all(&dir).is_ok() {
-        cmd.arg("--add-dir").arg(dir);
+        cmd.arg("--settings").arg(read_rule_settings(&dir));
+    }
+}
+
+/// `--settings` that let a session read everything under `dir` without asking.
+fn read_rule_settings(dir: &Path) -> String {
+    json!({ "permissions": { "allow": [format!("Read(/{}/**)", rule_path(dir))] } }).to_string()
+}
+
+/// An absolute path the way Claude Code's permission rules spell it: with `/`s, and a
+/// Windows drive as `/c` (`C:\Users\x` is `/c/Users/x`). A leading `//` in a rule marks
+/// a path from the root.
+fn rule_path(dir: &Path) -> String {
+    let path = dir.to_string_lossy().replace('\\', "/");
+    match path.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => format!("/{}{}", drive.to_ascii_lowercase() as char, &path[2..]),
+        _ => path,
     }
 }
 
@@ -4078,6 +4095,16 @@ mod tests {
         assert_eq!(with_attachments(&dir, "plain", &[]).unwrap(), "plain");
         assert!(with_attachments(&dir, "", &[json!({ "fileName": "x", "content": "%%%" })]).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_may_read_the_attachments_folder_by_a_rule() {
+        let settings = |dir: &str| -> Value { serde_json::from_str(&read_rule_settings(Path::new(dir))).unwrap() };
+        assert_eq!(
+            settings("/Users/sam/Library/Application Support/ai.littleguys.app/claude-attachments")["permissions"]["allow"],
+            json!(["Read(//Users/sam/Library/Application Support/ai.littleguys.app/claude-attachments/**)"])
+        );
+        assert_eq!(rule_path(Path::new(r"C:\Users\sam\AppData\Roaming\ai.littleguys.app\claude-attachments")), "/c/Users/sam/AppData/Roaming/ai.littleguys.app/claude-attachments");
     }
 
     #[tokio::test]
