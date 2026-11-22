@@ -51,6 +51,13 @@
     --color-diff-del: rgb(255 69 58 / 0.15);
     --color-diff-del-mark: rgb(255 69 58 / 0.34);
   }
+
+  /* The macOS popover material can become mid-gray over bright windows. */
+  :root[data-os="mac"] .window-popover {
+    --color-ink-2: #eee8e4;
+    --color-ink-3: #e4ded9;
+    --color-accent-strong: #ffd2be;
+  }
 }
 
 @keyframes breathe {
