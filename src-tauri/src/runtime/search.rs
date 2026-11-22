@@ -62,6 +62,10 @@ pub const BUILD_DELAY: Duration = Duration::from_secs(8);
 /// What the app is started with to build an index in a process of its own:
 /// `<flag> <index path> <runtime kind> <its argument>`.
 const CHILD_FLAG: &str = "--littleguys-search-index";
+/// Set by [`child_main`]: this executable answers [`CHILD_FLAG`]. Any other (an example
+/// probe, a test binary) ignores the flag and runs whole again in the copy, starting copies
+/// of its own: rooms_probe did, two per copy, until the Mac froze. Those build in place.
+static ANSWERS_CHILD_FLAG: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -210,10 +214,12 @@ pub fn search_params(params: &Value) -> Result<(String, usize), RpcError> {
 }
 
 /// When the app was started to build an index ([`Index::build_apart`]): builds it, and
-/// returns the exit code. None otherwise.
+/// returns the exit code. None otherwise, and from then on indexes build in a copy of this
+/// executable.
 pub fn child_main() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
-    if args.next()? != CHILD_FLAG {
+    if args.next().as_deref() != Some(std::ffi::OsStr::new(CHILD_FLAG)) {
+        ANSWERS_CHILD_FLAG.store(true, Ordering::SeqCst);
         return None;
     }
     let (path, kind, arg) = (PathBuf::from(args.next()?), args.next()?, args.next().unwrap_or_default());
@@ -351,8 +357,7 @@ impl Index {
     /// there instead of catching up themselves. None when it can't be started.
     fn build_apart(&self) -> Option<Result<Update, String>> {
         let (kind, arg) = self.recipe.as_ref()?;
-        // (A test binary would take the flag for a test filter.)
-        if cfg!(test) {
+        if !ANSWERS_CHILD_FLAG.load(Ordering::SeqCst) {
             return None;
         }
         let exe = std::env::current_exe().ok()?;
@@ -1213,6 +1218,14 @@ mod tests {
         let index = index(&dir);
         assert_eq!(index.update().unwrap(), Update::Done);
         assert_eq!(found(&index, "walrus").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_program_that_never_ran_child_main_builds_in_place() {
+        let dir = temp_dir("apart");
+        let index = Index::built_apart(dir.join("search.db"), Fake(dir.join("t")), "claudecode", String::new());
+        assert!(index.build_apart().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
