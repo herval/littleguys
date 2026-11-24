@@ -35,7 +35,7 @@ impl Notifications {
     }
 
     /// Set one guy, or (`None`) everyone, which resets every guy to it.
-    pub(super) fn set(&mut self, uid: Option<&str>, prefs: NotifyPrefs) {
+    pub fn set(&mut self, uid: Option<&str>, prefs: NotifyPrefs) {
         match uid {
             None => {
                 self.everyone = prefs;
@@ -48,6 +48,11 @@ impl Notifications {
                 self.guys.insert(uid.to_string(), prefs);
             }
         }
+    }
+
+    /// One guy back to what everyone gets.
+    pub fn reset(&mut self, uid: &str) {
+        self.guys.remove(uid);
     }
 }
 
@@ -143,6 +148,9 @@ impl Preferences {
     }
     pub fn set_notifications(&self, uid: Option<&str>, prefs: NotifyPrefs) -> anyhow::Result<()> {
         self.store.edit(|saved| saved.notifications.set(uid, prefs))
+    }
+    pub fn reset_notifications(&self, uid: &str) -> anyhow::Result<()> {
+        self.store.edit(|saved| saved.notifications.reset(uid))
     }
     pub fn set_coder(&self, coder: crate::code::CoderPrefs) -> anyhow::Result<()> {
         self.store.edit(|saved| saved.coder = coder)

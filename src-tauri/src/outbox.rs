@@ -12,13 +12,141 @@
 //! `chat.queue {sessionKey, queued, sent?:{id, text}, accepted?:{id, receipt}, unsent?, error?}`
 //! event. They're
 //! kept in memory: quitting littleguys drops what's waiting.
+//!
+//! [`call`] and [`hand_over`] are the rules. Activity runs them for the Mac's windows and
+//! paired phones; the bridge's demo host runs the same ones, so phones can be tested against it.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
+use crate::gateway::client::RpcError;
 use crate::gateway::identity::now_ms;
+
+/// Whoever runs the threads: Activity in the app, the demo host in the bridge's tests and `bridge_demo`.
+pub trait Threads {
+    /// Whether this thread's turn is under way, as far as its events tell.
+    fn is_running(&self, gateway: &str, key: &str) -> bool;
+    /// Tell every window and phone that a thread's queue changed (a `chat.queue` event).
+    fn queue_changed(&self, gateway: &str, event: &Value);
+}
+
+/// A call to a guy, with littleguys' queue in between. `chat.send` with `delivery: "queue"`
+/// waits here while the thread works (and goes at once when it doesn't); `"steer"` asks the
+/// guy to take it into the turn under way. `chat.queue.send {sessionKey, id, delivery?}` sends
+/// one now, `chat.queue.remove {sessionKey, id}` takes one back, and `chat.history` lists
+/// what's waiting (`queued`). Everything else goes straight to `forward`.
+///
+/// `steers`: the runtime takes `delivery: "steer"`. OpenClaw's gateway doesn't (it refuses
+/// fields it doesn't know, and steers by default).
+pub async fn call<'a, T, F, Fut>(
+    threads: &T,
+    gateway: &str,
+    steers: bool,
+    method: &'a str,
+    mut params: Value,
+    forward: F,
+) -> Result<Value, RpcError>
+where
+    T: Threads + ?Sized,
+    F: Fn(&'a str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, RpcError>>,
+{
+    let Some(key) = params.get("sessionKey").and_then(Value::as_str).map(str::to_string) else {
+        return forward(method, params).await;
+    };
+    match method {
+        "chat.send" => {
+            let delivery = params.as_object_mut().and_then(|p| p.remove("delivery"));
+            let delivery = delivery.as_ref().and_then(Value::as_str);
+            if delivery == Some("queue") && threads.is_running(gateway, &key) {
+                let text = params.get("message").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+                let attachments = params.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default();
+                if text.is_empty() && attachments.is_empty() {
+                    return Err(RpcError { code: "INVALID_REQUEST".into(), message: "Write something first.".into(), details: None });
+                }
+                let held = hold(gateway, &key, text, attachments);
+                threads.queue_changed(gateway, &event(gateway, &key));
+                return Ok(json!({ "runId": held.id, "status": "held" }));
+            }
+            if delivery == Some("steer") && steers {
+                params["delivery"] = json!("steer");
+            }
+            forward(method, params).await
+        }
+        "chat.queue.send" => {
+            // One you queued, now: into the turn under way, if the guy can (`delivery`).
+            let id = params.get("id").and_then(Value::as_str).unwrap_or_default();
+            let held = remove(gateway, &key, id)
+                .ok_or_else(|| RpcError { code: "NOT_FOUND".into(), message: "It's already been sent.".into(), details: None })?;
+            let mut send = json!({ "sessionKey": key, "message": held.text, "idempotencyKey": held.id });
+            if !held.attachments.is_empty() {
+                send["attachments"] = Value::Array(held.attachments.clone());
+            }
+            if params.get("delivery").and_then(Value::as_str) == Some("steer") && steers {
+                send["delivery"] = json!("steer");
+            }
+            threads.queue_changed(gateway, &sending(gateway, &key, &held.id, &held.text));
+            let sent = forward("chat.send", send).await;
+            match &sent {
+                Ok(receipt) => threads.queue_changed(gateway, &accepted(gateway, &key, &held.id, receipt)),
+                Err(_) => {
+                    let id = held.id.clone();
+                    restore(gateway, &key, vec![held]);
+                    threads.queue_changed(gateway, &unsent(gateway, &key, &id, None));
+                }
+            }
+            sent
+        }
+        "chat.queue.remove" => {
+            let id = params.get("id").and_then(Value::as_str).unwrap_or_default();
+            let removed = remove(gateway, &key, id).is_some();
+            threads.queue_changed(gateway, &event(gateway, &key));
+            Ok(json!({ "ok": true, "removed": removed }))
+        }
+        "chat.history" => {
+            let mut res = forward(method, params).await?;
+            if let Some(obj) = res.as_object_mut() {
+                obj.insert("queued".into(), shown(&list(gateway, &key)));
+            }
+            Ok(res)
+        }
+        _ => forward(method, params).await,
+    }
+}
+
+/// Hands everything waiting for a thread over as one message, with `send` (its `chat.send`),
+/// once its turn is over. What can't be sent waits again.
+pub async fn hand_over<T, F, Fut>(threads: &T, gateway: &str, key: &str, send: F)
+where
+    T: Threads + ?Sized,
+    F: FnOnce(Value) -> Fut,
+    Fut: Future<Output = Result<Value, RpcError>>,
+{
+    let items = take(gateway, key);
+    if items.is_empty() {
+        return;
+    }
+    let (text, attachments) = combine(&items);
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut params = json!({ "sessionKey": key, "message": text, "idempotencyKey": id });
+    if !attachments.is_empty() {
+        params["attachments"] = Value::Array(attachments);
+    }
+    // Shown as sending first: the guy may put it in the thread before chat.send answers.
+    threads.queue_changed(gateway, &sending(gateway, key, &id, &text));
+    match send(params).await {
+        Ok(receipt) => threads.queue_changed(gateway, &accepted(gateway, key, &id, &receipt)),
+        Err(e) => {
+            log::warn!("[{gateway}] couldn't send the queued messages for {key}: {}", e.message);
+            restore(gateway, key, items);
+            let error = format!("Couldn't send what was queued: {}", e.message);
+            threads.queue_changed(gateway, &unsent(gateway, key, &id, Some(&error)));
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Held {

@@ -80,10 +80,12 @@ The Mac now knows the phone's static key.
     "mac": { "name": "Herval's MacBook Pro", "version": "0.2.0", "id": "<id key>" },
     "bots": [ BotStatus, … ],
     "policy": { "maxPayload": 33554432, "tickIntervalMs": 15000, "maxMediaBytes": 104857600 },
+    "features": ["chat.queue", "limits.read", "settings"],
     "push": { "relay": "https://…", "registered": false } }
   ```
 
   - `push` is omitted when push isn't set up.
+  - `features` lists what this Mac does beyond the first version of protocol 1: `chat.queue` (`bot.call` goes through the Mac's queue), `limits.read`, and `settings` (`settings.get`, `notify.set`, the `settings` event). Older Macs don't send it; phones treat a missing `features` as none of them, and ignore names they don't know.
   - A handshake message can't be split. If `hello` wouldn't fit (more than 65,487 bytes), the Mac sends it with `"bots": []` and the full list as a `bots` event right after. Phones should take the list from whichever comes last.
 
 - **Rejected:** the payload is `{"error": {"code", "message", "retryAfterMs"?}}`. The Mac then closes with code **4003**.
@@ -147,6 +149,9 @@ Only the phone sends `req`. Only the Mac sends `event`.
 | `bot.reconnect` | `{gateway}` | `{}` |
 | `bot.media` | `{gateway, source, sessionKey?, agentId?}` | `{available: true, stream, mimeType?, sizeBytes?}` or `{available: false, code?, reason?}` |
 | `guy.face` | `{gateway, agentId, face: string \| null}` | `{}`, or `INVALID_PARAMS` for a picture the Mac won't keep. `UNKNOWN_METHOD` from a Mac that's too old. |
+| `limits.read` | `{provider: "claude" \| "codex"}` | `{limit: {usedPercent, resetsAtMs, readAtMs} \| null}` |
+| `settings.get` | `{}` | `Settings` ([Settings](#settings)) |
+| `notify.set` | `{uid?: "<gatewayId>/<agentId>", prefs: NotifyPrefs \| null}` | `{}` ([Settings](#settings)) |
 | `phone.forget` | `{}` | `{}`. The Mac drops this phone, then closes with 4010. |
 | `push.register` | `{registrationId, relayKey, boxKey, environment}` | `{}`, or `NOT_REGISTERED` / `NO_RELAY` ([Push](#push)) |
 | `push.unregister` | `{}` | `{}` |
@@ -154,6 +159,13 @@ Only the phone sends `req`. Only the Mac sends `event`.
 **`bot.call`:**
 - An unknown `gateway` → `UNKNOWN_GATEWAY`.
 - The Mac's default timeout is the runtime's own. `timeoutMs` overrides it, capped at 10 minutes.
+- It goes through the Mac's message queue, as the Mac's own windows do (`features` has `chat.queue`):
+  - `chat.send` takes `delivery`. With `"queue"`, a message for a thread whose turn is under way waits on the Mac and goes when the turn ends, all waiting messages as one (a stopped turn keeps them waiting). The answer is `{runId: <its queue id>, status: "held"}`; a thread that isn't working gets it at once, as without `delivery`. `"steer"` asks the guy to take it into the turn under way (OpenClaw does that anyway). The Mac takes `delivery` out before the bot sees it.
+  - `chat.queue.send {sessionKey, id, delivery?}` sends one that's waiting now (`delivery: "steer"` as above) and answers what `chat.send` answered; `NOT_FOUND` if it's already gone.
+  - `chat.queue.remove {sessionKey, id}` takes one back: `{ok: true, removed: bool}`.
+  - `chat.history` results gain `queued`: what's waiting, as in the event below.
+  - Every change is a `bot.event` `chat.queue`: `{sessionKey, queued: [{id, text, attachments: [{type, fileName, mimeType}], at}], sent?: {id, text}, accepted?: {id, receipt}, unsent?: id, error?}`. `queued` is the whole list (oldest first, `at` in unix ms, no attachment content). `sent` is a message being handed over (its `id` is the queued one's, or a new one for several sent as one); `accepted` follows with what `chat.send` answered, or `unsent` (with `error`, when there's something to say) when it failed and is waiting again.
+  - What's waiting lives in the Mac's memory: quitting littleguys drops it.
 
 **Guys' pictures:**
 - Photos picked in littleguys (on the Mac, or on a phone with `guy.face`) are kept on the Mac, never sent to the bot.
@@ -165,6 +177,15 @@ Only the phone sends `req`. Only the Mac sends `event`.
 - Other bots answer `{available: false, code: "UNSUPPORTED"}`.
 - **Limits:** files over `policy.maxMediaBytes` → `{available: false, code: "TOO_LARGE"}`. At most 4 streams per session at a time; more → `BUSY`.
 
+**`limits.read`:**
+- What the Mac's popover shows: how much of the provider's rate limit is used (`usedPercent`, 0 to 100) and when that window resets (`resetsAtMs`), for the window closest to running out. `readAtMs` is when it was read, so an old reading isn't passed off as current.
+- `null` when there's no current reading (for Claude Code: "Show usage limits" is off on the Mac, or nothing has reported yet), or for a provider the Mac doesn't know.
+
+**`notify.set`:**
+- With `uid`: sets that guy. Setting them to what `everyone` has puts them back with everyone (that's how the Mac's Settings does it), and so does `prefs: null`.
+- Without `uid`: sets everyone, and every guy goes back to it.
+- `INVALID_PARAMS` for a `uid` that isn't `gatewayId/agentId`, or `prefs` that aren't a `NotifyPrefs` (`null` only with a `uid`).
+
 ## Events
 
 | Event | Payload |
@@ -174,6 +195,7 @@ Only the phone sends `req`. Only the Mac sends `event`.
 | `bot.event` | `{gateway, event, payload}`, every runtime event (`chat`, `session.message`, `agent`, `sessions.changed`, `exec.approval.requested`, `exec.approval.resolved`, `cron`, …) |
 | `tick` | `{ts}` (unix ms), every `policy.tickIntervalMs` |
 | `phone.removed` | `{}`, just before closing with 4010 |
+| `settings` | `Settings` ([Settings](#settings)), whenever notifications or Coder mode change, on the Mac or on any phone |
 
 **Back-pressure:** each session queues at most 2,000 outgoing events. When full, the Mac closes with 4008, and the phone reconnects and refetches.
 
@@ -197,6 +219,21 @@ The Mac's `ConnStatus` (camelCase, as the webview gets it in `gw:status`), with 
 - **`kind`:** `openclaw | hermes | acp | claudecode | codex | …`. Phones treat kinds they don't know as generic bots and show `kindLabel`.
 - **`phase`:** `starting | connecting | connected | pairing | auth-failed | offline | no-config | error`.
 - **`endpoint`:** the normalized URL the bot connects to, or `null` for local agents. Phones use it to skip a relayed bot they also reach directly.
+
+## Settings
+
+What a phone sees of the Mac's settings: `settings.get` answers it, and the `settings` event carries it.
+
+```json
+{ "notifications": {
+    "everyone": { "replies": true, "routines": "all" },
+    "guys": { "<gatewayId>/<agentId>": { "replies": false, "routines": "failing" } } },
+  "coder": { "on": true, "edits": true, "prs": false } }
+```
+
+- **`NotifyPrefs`** is `{replies: bool, routines: "all" | "failing" | "off"}`: whether a guy's replies notify, and which finished routine runs do. Approvals always notify. These decide the Mac's own notifications and the pushes it sends phones alike.
+- **`guys`** holds only the guys set apart from everyone; any other guy gets `everyone`. `notify.set` changes them.
+- **`coder`** is Coder mode's switch (`on`), whether a coding thread's edits show as diffs between its messages (`edits`), and whether pull requests and checks show (`prs`). Phones only read it; the rest of Coder mode (folders, the terminal) stays on the Mac.
 
 ## Push
 

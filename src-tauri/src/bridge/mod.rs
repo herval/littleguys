@@ -34,7 +34,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 pub use addresses::{Address, AddressKind};
-pub use host::{BridgeHost, HostEvent, MediaFetch, Notice, NoticeKind};
+pub use host::{BridgeHost, HostEvent, MediaFetch, Notice, NoticeKind, PhoneCoder, PhoneSettings};
 
 use crate::gateway::identity::{now_ms, write_private};
 use keys::MacKeys;

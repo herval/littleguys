@@ -28,6 +28,7 @@ use super::keys::{prologue, NOISE_PARAMS};
 use super::pairing::{b64, Phone, ProofCheck};
 use super::records::{self, Joiner, Record, MAX_NOISE_MESSAGE, MAX_STREAM_CHUNK};
 use super::{CloseReason, Inner};
+use crate::activity::NotifyPrefs;
 use crate::gateway::client::RpcError;
 use crate::gateway::identity::now_ms;
 
@@ -35,6 +36,9 @@ pub const PROTOCOL: u64 = 1;
 /// The biggest JSON frame either side sends (`policy.maxPayload`).
 pub const MAX_PAYLOAD: usize = 32 * 1024 * 1024;
 pub const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024;
+/// What this Mac does beyond protocol 1 as it first shipped (`hello.features`). Phones
+/// treat a Mac that doesn't say as having none of them.
+pub const FEATURES: &[&str] = &["chat.queue", "limits.read", "settings"];
 const EVENT_QUEUE: usize = 2_000;
 const MAX_STREAMS: usize = 4;
 const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(600);
@@ -246,6 +250,7 @@ fn hello(inner: &Inner, bots: Vec<Value>, phone: &str) -> Value {
             "tickIntervalMs": inner.tick_interval().as_millis() as u64,
             "maxMediaBytes": MAX_MEDIA_BYTES,
         },
+        "features": FEATURES,
     });
     if let Some(relay) = inner.relay_url() {
         hello["push"] = json!({ "relay": relay, "registered": inner.has_push(phone) });
@@ -368,6 +373,7 @@ async fn pump(
                 push("bot.event", json!({ "gateway": gateway, "event": name, "payload": payload }))
             }
             Ok(HostEvent::Event { .. } | HostEvent::Notice(_)) => true,
+            Ok(HostEvent::Settings(settings)) => push("settings", serde_json::to_value(settings).unwrap_or_default()),
             Ok(HostEvent::BotsChanged) => {
                 let bots: Vec<Value> = inner.host.statuses().iter().map(bot_status).collect();
                 listed = bots.iter().filter_map(|b| b["gatewayId"].as_str().map(str::to_string)).collect();
@@ -423,6 +429,11 @@ fn dispatch(session: Arc<Session>, frame: &[u8]) {
     });
 }
 
+/// `gatewayId/agentId`.
+fn is_guy(uid: &str) -> bool {
+    uid.split_once('/').is_some_and(|(gateway, agent)| !gateway.is_empty() && !agent.is_empty())
+}
+
 fn param<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {
     params[key]
         .as_str()
@@ -453,6 +464,31 @@ impl Session {
             "guy.face" => {
                 let face = params["face"].as_str().map(str::to_string);
                 host.set_face(param(&params, "gateway")?, param(&params, "agentId")?, face)?;
+                Ok(json!({}))
+            }
+            "limits.read" => {
+                let limit = host.limit(param(&params, "provider")?).await?;
+                Ok(json!({ "limit": limit }))
+            }
+            "settings.get" => Ok(serde_json::to_value(host.settings()?).unwrap_or_default()),
+            "notify.set" => {
+                // No `uid`: everyone.
+                let uid = match &params["uid"] {
+                    Value::Null => None,
+                    uid => Some(
+                        uid.as_str().filter(|u| is_guy(u)).ok_or_else(|| RpcError::new("INVALID_PARAMS", "uid is gatewayId/agentId"))?,
+                    ),
+                };
+                // `null` for a guy: back to everyone's.
+                let prefs = match &params["prefs"] {
+                    Value::Null if uid.is_some() => None,
+                    Value::Null => return Err(RpcError::new("INVALID_PARAMS", "prefs is required")),
+                    prefs => Some(
+                        serde_json::from_value::<NotifyPrefs>(prefs.clone())
+                            .map_err(|e| RpcError::new("INVALID_PARAMS", format!("prefs: {e}")))?,
+                    ),
+                };
+                host.set_notify(uid, prefs)?;
                 Ok(json!({}))
             }
             "push.register" => self.inner.register_push(&self.phone, &params).await,

@@ -1,8 +1,11 @@
 //! Pretend bots for `examples/bridge_demo.rs` and the bridge tests: an
 //! OpenClaw gateway with Jefe and Fox (whose `chat.send` streams a canned
 //! reply, and Jefe waits on an approval), a Hermes and a Claude Code bot.
+//! Messages sent with `delivery: "queue"` while a reply streams wait in
+//! littleguys' queue (outbox.rs), as they do in the app. Settings are kept in
+//! memory, and Claude's usage limit is always 42%.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -11,9 +14,12 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-use super::host::{BridgeHost, HostEvent, MediaFetch};
+use super::host::{BridgeHost, HostEvent, MediaFetch, PhoneSettings};
+use crate::activity::{Notifications, NotifyPrefs};
 use crate::gateway::client::RpcError;
 use crate::gateway::identity::now_ms;
+use crate::limits::Limit;
+use crate::outbox;
 
 pub const OPENCLAW: &str = "openclaw";
 pub const HERMES: &str = "hermes-demo";
@@ -34,6 +40,9 @@ struct State {
     enabled: HashMap<String, bool>,
     /// Photos picked for guys (`gateway/agentId`), as littleguys keeps them.
     faces: HashMap<String, String>,
+    /// Threads whose reply is streaming: `(gateway, sessionKey)`.
+    working: HashSet<(String, String)>,
+    notifications: Notifications,
 }
 
 pub struct DemoHost {
@@ -100,7 +109,15 @@ impl DemoHost {
         let enabled = [OPENCLAW, HERMES, CLAUDE].iter().map(|id| (id.to_string(), true)).collect();
         Self {
             events: broadcast::channel(4096).0,
-            state: Mutex::new(State { sessions, history, approvals, enabled, faces: HashMap::new() }),
+            state: Mutex::new(State {
+                sessions,
+                history,
+                approvals,
+                enabled,
+                faces: HashMap::new(),
+                working: HashSet::new(),
+                notifications: Notifications::default(),
+            }),
             word_delay: Duration::from_millis(80),
         }
     }
@@ -227,7 +244,8 @@ impl DemoHost {
         })
     }
 
-    /// `chat.send`: the user's message, then a reply word by word, then final.
+    /// `chat.send`: the user's message, then a reply word by word, then final. What was
+    /// queued meanwhile goes next, as one message.
     fn send(&'static self, gateway: &str, p: &Value) -> Result<Value, RpcError> {
         let key = p["sessionKey"].as_str().ok_or_else(|| RpcError::new("INVALID_PARAMS", "sessionKey is required"))?.to_string();
         let text = p["message"].as_str().unwrap_or_default().to_string();
@@ -235,7 +253,11 @@ impl DemoHost {
         let gateway = gateway.to_string();
         let agent = key.split(':').nth(1).unwrap_or("main").to_string();
         let user = text_message("user", &text, now_ms(), &format!("{run_id}:user"));
-        self.state.lock().unwrap().history.entry(format!("{gateway}|{key}")).or_default().push(user.clone());
+        {
+            let mut state = self.state.lock().unwrap();
+            state.history.entry(format!("{gateway}|{key}")).or_default().push(user.clone());
+            state.working.insert((gateway.clone(), key.clone()));
+        }
         let reply = format!("You said: “{text}”. On it! 🫡 This reply comes from bridge_demo on the Mac.");
         let id = run_id.clone();
         tokio::spawn(async move {
@@ -252,10 +274,19 @@ impl DemoHost {
             }
             let mut message = text_message("assistant", &reply, now_ms(), &uuid::Uuid::new_v4().to_string());
             message["__openclaw"]["runId"] = json!(id);
-            self.state.lock().unwrap().history.entry(format!("{gateway}|{key}")).or_default().push(message.clone());
+            {
+                let mut state = self.state.lock().unwrap();
+                state.history.entry(format!("{gateway}|{key}")).or_default().push(message.clone());
+                state.working.remove(&(gateway.clone(), key.clone()));
+            }
             ev("session.message", json!({ "sessionKey": key, "runId": id, "message": message }));
             ev("chat", json!({ "sessionKey": key, "runId": id, "state": "final", "message": message }));
             ev("sessions.changed", json!({ "sessionKey": key, "agentId": agent, "phase": "end" }));
+            outbox::hand_over(self, &gateway, &key, |params| {
+                let sent = self.send(&gateway, &params);
+                async move { sent }
+            })
+            .await;
         });
         Ok(json!({ "runId": run_id, "status": "started" }))
     }
@@ -263,6 +294,16 @@ impl DemoHost {
     /// Leak one for the process (the demo and tests keep it for good).
     pub fn leak(self) -> &'static DemoHost {
         Box::leak(Box::new(self))
+    }
+}
+
+impl outbox::Threads for DemoHost {
+    fn is_running(&self, gateway: &str, key: &str) -> bool {
+        self.state.lock().unwrap().working.contains(&(gateway.to_string(), key.to_string()))
+    }
+
+    fn queue_changed(&self, gateway: &str, event: &Value) {
+        self.emit(gateway, "chat.queue", event.clone());
     }
 }
 
@@ -277,22 +318,53 @@ impl BridgeHost for Demo {
 
     fn call(&self, gateway: &str, method: &str, params: Value, _timeout: Option<Duration>) -> BoxFuture<'static, Result<Value, RpcError>> {
         let host = self.0;
-        let mut result = if method == "chat.send" && host.state.lock().unwrap().enabled.get(gateway).copied().unwrap_or(false) {
-            host.send(gateway, &params)
-        } else {
-            host.answer(gateway, method, &params)
-        };
-        // Picked photos, as AppHost adds them.
-        if let (Ok(answer), "agents.list") = (&mut result, method) {
-            let faces = host.state.lock().unwrap().faces.clone();
-            for agent in answer["agents"].as_array_mut().into_iter().flatten() {
-                if let Some(face) = agent["id"].as_str().and_then(|id| faces.get(&format!("{gateway}/{id}"))) {
-                    agent["identity"]["avatarUrl"] = json!(face);
-                    agent["littleguysFace"] = json!(true);
+        let (gateway, method) = (gateway.to_string(), method.to_string());
+        Box::pin(async move {
+            if !host.state.lock().unwrap().enabled.get(&gateway).copied().unwrap_or(false) {
+                return Err(RpcError::new("UNKNOWN_GATEWAY", format!("no bot {gateway}")));
+            }
+            // Through the queue, as AppHost goes through Activity.
+            let mut result = outbox::call(host, &gateway, gateway != OPENCLAW, &method, params, |method, params| {
+                let answer = if method == "chat.send" { host.send(&gateway, &params) } else { host.answer(&gateway, method, &params) };
+                async move { answer }
+            })
+            .await;
+            // Picked photos, as AppHost adds them.
+            if let (Ok(answer), "agents.list") = (&mut result, method.as_str()) {
+                let faces = host.state.lock().unwrap().faces.clone();
+                for agent in answer["agents"].as_array_mut().into_iter().flatten() {
+                    if let Some(face) = agent["id"].as_str().and_then(|id| faces.get(&format!("{gateway}/{id}"))) {
+                        agent["identity"]["avatarUrl"] = json!(face);
+                        agent["littleguysFace"] = json!(true);
+                    }
                 }
             }
+            result
+        })
+    }
+
+    fn limit(&self, provider: &str) -> BoxFuture<'static, Result<Option<Limit>, RpcError>> {
+        let now = now_ms();
+        let limit = (provider == "claude").then_some(Limit { used_percent: 42.0, resets_at_ms: now + 2 * 3_600_000, read_at_ms: now });
+        Box::pin(async move { Ok(limit) })
+    }
+
+    fn settings(&self) -> Result<PhoneSettings, RpcError> {
+        let notifications = self.0.state.lock().unwrap().notifications.clone();
+        Ok(PhoneSettings::new(notifications, &crate::code::CoderPrefs { on: true, ..Default::default() }))
+    }
+
+    fn set_notify(&self, uid: Option<&str>, prefs: Option<NotifyPrefs>) -> Result<(), RpcError> {
+        {
+            let notifications = &mut self.0.state.lock().unwrap().notifications;
+            match (uid, prefs) {
+                (uid, Some(prefs)) => notifications.set(uid, prefs),
+                (Some(uid), None) => notifications.reset(uid),
+                (None, None) => return Err(RpcError::new("INVALID_PARAMS", "prefs is required")),
+            }
         }
-        Box::pin(async move { result })
+        let _ = self.0.events.send(HostEvent::Settings(self.settings()?));
+        Ok(())
     }
 
     fn set_face(&self, gateway: &str, agent_id: &str, face: Option<String>) -> Result<(), RpcError> {
