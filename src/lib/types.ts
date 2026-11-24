@@ -268,6 +268,18 @@ export interface ClaudeCodeProbe {
   installed: boolean;
   version?: string | null;
   plugin?: { enabled: boolean; folder?: string | null } | null;
+  /** It has an account to work with; null when it can't tell. */
+  signedIn?: boolean | null;
+}
+
+/** What "Add a bot" can install and sign in to (src-tauri/src/agent_setup.rs). */
+export type SetupAgent = "claude" | "codex";
+
+/** A line of an install or sign-in's output (`lg:agent-setup`). */
+export interface AgentSetupLine {
+  agent: SetupAgent;
+  step: "install" | "signin";
+  line: string;
 }
 
 /** Whose rate limit a guy runs on (see src/lib/limits.ts). */
@@ -287,6 +299,8 @@ export interface CodexProbe {
   version?: string | null;
   /** It has run here: there are sessions to show. */
   sessions?: boolean;
+  /** It has an account to work with; null when it can't tell. */
+  signedIn?: boolean | null;
 }
 
 export interface GatewayEntry {

@@ -2665,13 +2665,32 @@ async fn codex_version(codex: &Path) -> Option<String> {
     out.split_whitespace().last().map(str::to_string)
 }
 
+/// Whether Codex has an account to work with (`codex login status`); None when it can't tell.
+async fn signed_in(codex: &Path) -> Option<bool> {
+    let mut cmd = cli::command(codex);
+    cmd.args(["login", "status"]).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = tokio::time::timeout(CLI_TIMEOUT, cmd.output()).await.ok()?.ok()?;
+    let text = format!("{}\n{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    login_status(out.status.success(), &text)
+}
+
+/// `codex login status` exits 0 when signed in, and 1 saying "Not logged in" (on stderr,
+/// maybe after a warning) when not. Any other failure says nothing either way.
+fn login_status(success: bool, output: &str) -> Option<bool> {
+    if success {
+        return Some(true);
+    }
+    output.lines().any(|l| l.trim().starts_with("Not logged in")).then_some(false)
+}
+
 /// Codex on this machine, for Add a bot and the first-run screen:
-/// `{installed, version, sessions: whether it has run here}`.
+/// `{installed, version, sessions: whether it has run here, signedIn}`.
 pub async fn detect() -> Value {
     let Some(codex) = find_codex() else {
-        return json!({ "installed": false, "version": Value::Null, "sessions": false });
+        return json!({ "installed": false, "version": Value::Null, "sessions": false, "signedIn": Value::Null });
     };
-    json!({ "installed": true, "version": codex_version(&codex).await, "sessions": codex_home().join("sessions").is_dir() })
+    let (version, signed_in) = tokio::join!(codex_version(&codex), signed_in(&codex));
+    json!({ "installed": true, "version": version, "sessions": codex_home().join("sessions").is_dir(), "signedIn": signed_in })
 }
 
 #[cfg(test)]
@@ -2679,6 +2698,14 @@ mod tests {
     use super::*;
 
     const ID: &str = "01a1a900-0000-7000-8000-00000000abcd";
+
+    #[test]
+    fn login_status_reads_codex_login_status() {
+        assert_eq!(login_status(true, "Logged in using ChatGPT\n"), Some(true));
+        assert_eq!(login_status(false, "Not logged in\n"), Some(false));
+        assert_eq!(login_status(false, "WARNING: unknown key in config.toml\nNot logged in\n"), Some(false));
+        assert_eq!(login_status(false, "error: unrecognized subcommand 'status'\n"), None);
+    }
 
     fn event(kind: &str, rest: Value) -> Value {
         let mut payload = json!({ "type": kind });

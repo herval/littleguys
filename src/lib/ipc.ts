@@ -18,6 +18,7 @@ import type {
   LimitProvider,
   Navigate,
   RegistryAgent,
+  SetupAgent,
   NotifyPrefs,
   Roster,
   TerminalApp,
@@ -159,6 +160,11 @@ export const core = {
     addCodex: () => invoke<GatewayEntry>("bot_add", { kind: "codex", name: null, acp: null, hermes: null, claude: null, secretKind: null, secret: null }),
     codexDetect: () => invoke<CodexProbe>("codex_detect"),
     codexConfigure: (id: string, codex: CodexConfig) => invoke<void>("codex_configure", { id, codex }),
+    /** Installs Claude Code or Codex with the vendor's own installer; progress comes as `lg:agent-setup`. */
+    agentInstall: (agent: SetupAgent) => invoke<void>("agent_install", { agent }),
+    /** The CLI's own sign-in: opens the browser, resolves once you've signed in there. */
+    agentSignIn: (agent: SetupAgent) => invoke<void>("agent_sign_in", { agent }),
+    agentSignInCancel: (agent: SetupAgent) => invoke<void>("agent_sign_in_cancel", { agent }),
   },
   /** How much of a provider's rate limit is used; null when there's no current reading. */
   limit: (provider: LimitProvider) => invoke<Limit | null>("limits_read", { provider }),

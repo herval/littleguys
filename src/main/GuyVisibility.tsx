@@ -7,6 +7,7 @@ import type { Guy } from "../lib/types";
 import { useApp } from "../stores/app";
 import { Avatar } from "../ui/Avatar";
 import { Button, Switch } from "../ui/kit";
+import { AgentsToAdd } from "./AgentsToAdd";
 
 /** Settings section: choose which little guys show up in littleguys, and whose steps their threads show. */
 export function GuyVisibility() {
@@ -16,7 +17,7 @@ export function GuyVisibility() {
   const steps = useMemo(() => new Set(roster.steps ?? []), [roster.steps]);
   const multi = isMultiGateway(roster);
   const [error, setError] = useState<string | null>(null);
-  // A gateway that makes guys (OpenClaw); without one, Connections has "Add a bot".
+  // A gateway that makes guys (OpenClaw); other kinds of agent are under "Add an agent" below.
   const canMake = useApp((s) => s.roster.gateways.some((g) => g.loaded && g.status.capabilities?.manageGuys));
   const newGuy = () => {
     useApp.getState().setSettingsOpen(false);
@@ -28,7 +29,13 @@ export function GuyVisibility() {
     </Button>
   );
 
-  if (guys.length === 0) return newButton ? <section className="mt-5 flex justify-end">{newButton}</section> : null;
+  if (guys.length === 0)
+    return (
+      <>
+        {newButton && <section className="mt-5 flex justify-end">{newButton}</section>}
+        <MoreAgents />
+      </>
+    );
   const hiddenCount = guys.filter((g) => hidden.has(g.uid)).length;
 
   const toggle = async (guy: Guy) => {
@@ -108,6 +115,19 @@ export function GuyVisibility() {
         need your OK.
       </p>
       {error && <p className="mt-1 text-[11.5px] text-[var(--color-bad)]">{error}</p>}
+      <MoreAgents />
+    </section>
+  );
+}
+
+/** Other kinds of agent to bring in (Claude Code, Codex, ACP, Hermes), so they're found where the guys are. */
+function MoreAgents() {
+  return (
+    <section className="mt-5">
+      <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]">Add an agent</h3>
+      <div className="rounded-xl border border-[var(--color-line)] px-3.5 py-0.5">
+        <AgentsToAdd />
+      </div>
     </section>
   );
 }

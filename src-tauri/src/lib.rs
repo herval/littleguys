@@ -1,4 +1,5 @@
 mod activity;
+mod agent_setup;
 mod avatar_file;
 pub mod bridge;
 mod browser_stream;
@@ -75,6 +76,9 @@ pub fn run() {
             commands::claude_code_configure,
             commands::codex_configure,
             commands::codex_detect,
+            agent_setup::agent_install,
+            agent_setup::agent_sign_in,
+            agent_setup::agent_sign_in_cancel,
             commands::gateway_setup_code,
             commands::acp_registry,
             commands::hermes_detect,

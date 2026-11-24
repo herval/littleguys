@@ -1,13 +1,13 @@
-import { ChevronRight, Plus, RotateCw, Stethoscope, Terminal, Waypoints } from "lucide-react";
+import { ChevronRight, Plus, RotateCw, Stethoscope } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { COMPUTER } from "../lib/platform";
-import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { core, errorMessage, listen } from "../lib/ipc";
-import type { ClaudeCodeProbe, CodexProbe, ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
+import type { ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
 import { needsProxyFix, statusLabel } from "../lib/guys";
-import { type AddBotTab, useApp } from "../stores/app";
+import { useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { Button, Field, inputClass, Spinner } from "../ui/kit";
+import { AgentsToAdd } from "./AgentsToAdd";
 import { CredentialFix, hostOf, PairingFix, ProxyFix } from "./GatewayFix";
 
 /**
@@ -169,68 +169,14 @@ function subline(status: ConnStatus | null): string {
 
 const sectionLabel = "text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]";
 
-/** First run: the agents littleguys connects to besides OpenClaw, each opening "Add a bot" on its tab. */
+/** First run: the agents people already have, before OpenClaw. */
 function AgentsYouHave() {
-  const openAdd = useApp((s) => s.setAddGatewayOpen);
-  const [claude, setClaude] = useState<ClaudeCodeProbe | null>(null);
-  const [codex, setCodex] = useState<CodexProbe | null>(null);
-  useEffect(() => {
-    core.bots
-      .claudeDetect()
-      .then(setClaude)
-      .catch(() => setClaude({ installed: false }));
-    core.bots
-      .codexDetect()
-      .then(setCodex)
-      .catch(() => setCodex({ installed: false }));
-  }, []);
-  const rows: Array<{ tab: AddBotTab; icon: React.ReactNode; title: string; detail: string }> = [
-    {
-      tab: "claude",
-      icon: <img src={claudeFace} alt="" className="h-8 w-8 rounded-lg" />,
-      title: "Claude Code",
-      detail: `${claude?.installed ? `Found on this ${COMPUTER}. ` : ""}Every session, terminal ones too, as a chat you can answer.`,
-    },
-    ...(codex?.installed
-      ? [
-          {
-            tab: "codex" as const,
-            icon: <span className="text-[16px]">🌀</span>,
-            title: "Codex",
-            detail: `Found on this ${COMPUTER}. Every session, terminal ones too, as a chat you can answer.`,
-          },
-        ]
-      : []),
-    {
-      tab: "acp",
-      icon: <Terminal size={16} />,
-      title: codex?.installed ? "Gemini CLI and more" : "Codex, Gemini CLI and more",
-      detail: "Any agent from the ACP registry: littleguys starts it for you.",
-    },
-    {
-      tab: "hermes",
-      icon: <Waypoints size={16} />,
-      title: "Hermes",
-      detail: `Your Hermes Agent profiles, on this ${COMPUTER} or a server.`,
-    },
-  ];
   return (
     <div className="mt-7 space-y-3">
       <p className={sectionLabel}>Agents you already use</p>
       <Card>
-        <div className="-my-1.5 divide-y divide-[var(--color-line)]">
-          {rows.map((r) => (
-            <div key={r.tab} className="flex items-center gap-3 py-2.5">
-              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--color-chip)] text-[var(--color-ink-2)]">{r.icon}</span>
-              <div className="min-w-0 flex-1">
-                <p className="font-medium">{r.title}</p>
-                <p className="text-[12px] text-[var(--color-ink-3)]">{r.detail}</p>
-              </div>
-              <Button size="sm" onClick={() => openAdd(true, r.tab)}>
-                Add
-              </Button>
-            </div>
-          ))}
+        <div className="-my-1.5">
+          <AgentsToAdd />
         </div>
       </Card>
     </div>

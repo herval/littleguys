@@ -1,12 +1,13 @@
 // "Add a bot" tabs for runtimes other than OpenClaw: Hermes, Claude Code, Codex and ACP agents.
 import { Check, ChevronRight, Folder, Laptop, Network, RefreshCw, Terminal } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { COMPUTER } from "../lib/platform";
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
-import { core, errorMessage, isTauri } from "../lib/ipc";
+import { core, errorMessage, isTauri, listen } from "../lib/ipc";
 import { isAcpCodexHere } from "../lib/limits";
-import type { ClaudeCodeProbe, CodexProbe, HermesProbe, RegistryAgent } from "../lib/types";
+import type { AgentSetupLine, ClaudeCodeProbe, CodexProbe, HermesProbe, RegistryAgent, SetupAgent } from "../lib/types";
 import { useApp } from "../stores/app";
+import { openExternal } from "../ui/openExternal";
 import { Button, Field, inputBase, inputClass, Spinner } from "../ui/kit";
 
 const sectionTitle = "mb-2 block text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-3)]";
@@ -161,6 +162,127 @@ export function HermesTab({ onAdded }: { onAdded: (id: string) => void }) {
   );
 }
 
+// ---- Installing and signing in (Claude Code, Codex) -------------------------------
+
+const SETUP: Record<SetupAgent, { name: string; maker: string; signIn: string }> = {
+  claude: { name: "Claude Code", maker: "Anthropic", signIn: "Sign in to Claude" },
+  codex: { name: "Codex", maker: "OpenAI", signIn: "Sign in with ChatGPT" },
+};
+
+function notInstalled(agent: SetupAgent) {
+  return `Not on this ${COMPUTER} yet. Install puts it in your home folder with ${SETUP[agent].maker}'s own installer.`;
+}
+
+/**
+ * Installing an agent that isn't on this computer yet, then signing in to it: the vendor's
+ * installer, then the CLI's own browser sign-in (src-tauri/src/agent_setup.rs). `detect`
+ * looks again once a step is done.
+ */
+function useAgentSetup(agent: SetupAgent, detect: () => Promise<unknown>) {
+  const [running, setRunning] = useState<"install" | "signin" | null>(null);
+  const [lines, setLines] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const signingIn = useRef(false);
+  const cancelled = useRef(false);
+
+  useEffect(() => {
+    const un = listen<AgentSetupLine>("lg:agent-setup", (p) => {
+      if (p.agent === agent) setLines((l) => [...l.slice(-200), p.line]);
+    });
+    return () => {
+      un.then((u) => u());
+    };
+  }, [agent]);
+  // Closing the dialog stops a sign-in still waiting on the browser.
+  useEffect(
+    () => () => {
+      if (signingIn.current) core.bots.agentSignInCancel(agent).catch(() => {});
+    },
+    [agent],
+  );
+
+  const run = async (step: "install" | "signin") => {
+    setRunning(step);
+    setError(null);
+    setLines([]);
+    signingIn.current = step === "signin";
+    cancelled.current = false;
+    try {
+      await (step === "install" ? core.bots.agentInstall(agent) : core.bots.agentSignIn(agent));
+    } catch (e) {
+      if (!cancelled.current) setError(errorMessage(e));
+    } finally {
+      signingIn.current = false;
+      await detect();
+      setRunning(null);
+    }
+  };
+  const cancel = () => {
+    cancelled.current = true;
+    core.bots.agentSignInCancel(agent).catch(() => {});
+  };
+  return { agent, running, lines, error, install: () => run("install"), signIn: () => run("signin"), cancel };
+}
+
+type AgentSetup = ReturnType<typeof useAgentSetup>;
+
+function InstallButton({ setup }: { setup: AgentSetup }) {
+  const installing = setup.running === "install";
+  return (
+    <Button variant="primary" disabled={setup.running !== null} onClick={setup.install}>
+      {installing && <Spinner size={11} />} {installing ? "Installing…" : "Install"}
+    </Button>
+  );
+}
+
+/** Under the agent's row: the installer's output, and signing in once it's installed. */
+function SetupSteps({ agent, setup, probe }: { agent: SetupAgent; setup: AgentSetup; probe: { installed: boolean; signedIn?: boolean | null } | null }) {
+  const logRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+  }, [setup.lines]);
+  const { name, signIn } = SETUP[agent];
+  // The CLI prints the sign-in page's address in case the browser didn't open.
+  const page = setup.running === "signin" ? [...setup.lines].reverse().join("\n").match(/https:\/\/[^\s"'<>]+/)?.[0] : undefined;
+  const showLog = setup.running === "install" || (setup.error !== null && setup.lines.length > 0);
+  return (
+    <>
+      {probe?.installed && probe.signedIn === false && setup.running === null && (
+        <div className="mt-3 flex items-center gap-3 rounded-xl bg-[var(--color-warn)]/12 px-3.5 py-2.5">
+          <p className="min-w-0 flex-1 text-[12px] text-[var(--color-ink-2)]">
+            {name} isn't signed in on this {COMPUTER}, so it can't work yet.
+          </p>
+          <Button size="sm" variant="primary" onClick={setup.signIn}>
+            {signIn}
+          </Button>
+        </div>
+      )}
+      {setup.running === "signin" && (
+        <div className="mt-3 flex items-center gap-3 rounded-xl border border-[var(--color-line)] px-3.5 py-2.5">
+          <Spinner size={12} />
+          <p className="min-w-0 flex-1 text-[12px] text-[var(--color-ink-2)]">
+            Finish signing in in your browser.{" "}
+            {page && (
+              <button className="text-[var(--color-accent-strong)] hover:underline" onClick={() => openExternal(page)}>
+                Open the sign-in page
+              </button>
+            )}
+          </p>
+          <Button size="sm" variant="ghost" onClick={setup.cancel}>
+            Cancel
+          </Button>
+        </div>
+      )}
+      {showLog && (
+        <pre ref={logRef} className="selectable mt-3 max-h-36 overflow-auto rounded-lg bg-[var(--color-chip)] p-2.5 font-mono text-[11px] text-[var(--color-ink-2)]">
+          {setup.lines.join("\n") || "Starting…"}
+        </pre>
+      )}
+      {setup.error && <p className="mt-3 text-[12.5px] text-[var(--color-bad)]">{setup.error}</p>}
+    </>
+  );
+}
+
 // ---- Claude Code -----------------------------------------------------------------
 
 export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
@@ -169,13 +291,18 @@ export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const added = useApp((s) => s.roster.gateways.find((g) => g.status.kind === "claudecode")?.id ?? null);
-
+  const detect = useCallback(
+    () =>
+      core.bots
+        .claudeDetect()
+        .then(setProbe)
+        .catch(() => setProbe({ installed: false })),
+    [],
+  );
   useEffect(() => {
-    core.bots
-      .claudeDetect()
-      .then(setProbe)
-      .catch(() => setProbe({ installed: false }));
-  }, []);
+    detect();
+  }, [detect]);
+  const setup = useAgentSetup("claude", detect);
 
   const add = async () => {
     setBusy(true);
@@ -207,9 +334,7 @@ export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
             ) : probe.installed ? (
               "Every session, in a terminal or in the background, shows up as a thread you can follow and reply to."
             ) : (
-              <>
-                Not installed. Get it at <span className="font-mono">claude.com/claude-code</span>, then come back.
-              </>
+              notInstalled("claude")
             )}
           </p>
         </div>
@@ -217,14 +342,18 @@ export function ClaudeCodeTab({ onAdded }: { onAdded: (id: string) => void }) {
           <Button size="sm" onClick={() => onAdded(added)}>
             <Check size={12} /> Added
           </Button>
+        ) : probe && !probe.installed ? (
+          <InstallButton setup={setup} />
         ) : (
-          <Button variant="primary" disabled={busy || !probe?.installed} onClick={add}>
+          // Signing in comes first, so it gets the colour until then.
+          <Button variant={probe?.signedIn === false ? undefined : "primary"} disabled={busy || !probe?.installed} onClick={add}>
             {busy && <Spinner size={11} />} Add
           </Button>
         )}
       </div>
+      <SetupSteps agent="claude" setup={setup} probe={probe} />
 
-      {!added && (
+      {!added && probe?.installed && (
         <label className="mt-3 flex items-start gap-2.5 px-1 text-[12.5px]">
           <input
             type="checkbox"
@@ -257,13 +386,18 @@ export function CodexTab({ onAdded }: { onAdded: (id: string) => void }) {
   const [error, setError] = useState<string | null>(null);
   const added = useApp((s) => s.roster.gateways.find((g) => g.status.kind === "codex")?.id ?? null);
   const acpCodex = useApp((s) => s.roster.gateways.some(isAcpCodexHere));
-
+  const detect = useCallback(
+    () =>
+      core.bots
+        .codexDetect()
+        .then(setProbe)
+        .catch(() => setProbe({ installed: false })),
+    [],
+  );
   useEffect(() => {
-    core.bots
-      .codexDetect()
-      .then(setProbe)
-      .catch(() => setProbe({ installed: false }));
-  }, []);
+    detect();
+  }, [detect]);
+  const setup = useAgentSetup("codex", detect);
 
   const add = async () => {
     setBusy(true);
@@ -294,9 +428,7 @@ export function CodexTab({ onAdded }: { onAdded: (id: string) => void }) {
             ) : probe.installed ? (
               "Every session, terminal ones too, shows up as a thread you can follow and reply to."
             ) : (
-              <>
-                Not installed. Get it at <span className="font-mono">developers.openai.com/codex</span>, then come back.
-              </>
+              notInstalled("codex")
             )}
           </p>
         </div>
@@ -304,15 +436,19 @@ export function CodexTab({ onAdded }: { onAdded: (id: string) => void }) {
           <Button size="sm" onClick={() => onAdded(added)}>
             <Check size={12} /> Added
           </Button>
+        ) : probe && !probe.installed ? (
+          <InstallButton setup={setup} />
         ) : (
-          <Button variant="primary" disabled={busy || !probe?.installed} onClick={add}>
+          // Signing in comes first, so it gets the colour until then.
+          <Button variant={probe?.signedIn === false ? undefined : "primary"} disabled={busy || !probe?.installed} onClick={add}>
             {busy && <Spinner size={11} />} Add
           </Button>
         )}
       </div>
+      <SetupSteps agent="codex" setup={setup} probe={probe} />
       {error && <p className="mt-3 text-[12.5px] text-[var(--color-bad)]">{error}</p>}
       <p className="mt-4 text-[11.5px] text-[var(--color-ink-3)]">
-        Nothing gets installed: littleguys reads the session logs Codex already keeps. Permission prompts show up here for sessions on Codex's
+        Adding it changes nothing in Codex: littleguys reads the session logs Codex already keeps. Permission prompts show up here for sessions on Codex's
         shared server, unless you turn that off in Settings. Sessions outside it keep asking in their terminal.
         {acpCodex && " Your ACP Codex guy stays as it is, so its sessions will show up on both guys."}
       </p>

@@ -3557,16 +3557,31 @@ pub async fn install_plugin(data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether Claude Code has an account to work with (`claude auth status`, which exits 1
+/// when it hasn't); None when it can't tell, as with a Claude Code too old to have it.
+async fn signed_in(claude: &Path) -> Option<bool> {
+    let mut cmd = cli::command(claude);
+    cmd.args(["auth", "status", "--json"]).stdout(Stdio::piped()).stderr(Stdio::null());
+    let out = tokio::time::timeout(CLI_TIMEOUT, cmd.output()).await.ok()?.ok()?;
+    logged_in(&out.stdout)
+}
+
+/// `claude auth status --json`'s `loggedIn`, printed whether it exits 0 or 1.
+fn logged_in(stdout: &[u8]) -> Option<bool> {
+    serde_json::from_slice::<Value>(stdout).ok()?.get("loggedIn")?.as_bool()
+}
+
 /// Claude Code on this Mac, for the "Add a bot" tab.
 pub async fn detect() -> Value {
     let Some(claude) = find_claude() else {
-        return json!({ "installed": false, "version": Value::Null, "plugin": Value::Null });
+        return json!({ "installed": false, "version": Value::Null, "plugin": Value::Null, "signedIn": Value::Null });
     };
-    let (version, plugin) = tokio::join!(claude_version(&claude), plugin_state(&claude));
+    let (version, plugin, signed_in) = tokio::join!(claude_version(&claude), plugin_state(&claude), signed_in(&claude));
     json!({
         "installed": true,
         "version": version,
         "plugin": plugin.map(|p| json!({ "enabled": p.enabled, "folder": p.folder })),
+        "signedIn": signed_in,
     })
 }
 
@@ -3577,6 +3592,14 @@ pub(super) fn first_line(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logged_in_reads_claude_auth_status() {
+        assert_eq!(logged_in(br#"{"loggedIn": true, "authMethod": "claude.ai"}"#), Some(true));
+        assert_eq!(logged_in(br#"{"loggedIn": false, "authMethod": "none"}"#), Some(false));
+        // An older Claude Code without `auth status` prints its usage, not JSON.
+        assert_eq!(logged_in(b"error: unknown command 'auth'\n"), None);
+    }
 
     fn line(v: Value) -> Value {
         v

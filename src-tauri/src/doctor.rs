@@ -174,7 +174,7 @@ fn openclaw(hub: &Hub) -> Result<GatewayClient, String> {
     hub.openclaw_client().ok_or_else(|| "the OpenClaw gateway entry is missing".to_string())
 }
 
-fn first_meaningful_line(stderr: &str, stdout: &str) -> String {
+pub(crate) fn first_meaningful_line(stderr: &str, stdout: &str) -> String {
     stderr
         .lines()
         .chain(stdout.lines())
@@ -189,12 +189,17 @@ fn progress(app: &AppHandle, step: &str, line: &str) {
     let _ = app.emit("lg:doctor-progress", serde_json::json!({ "step": step, "line": line }));
 }
 
-/// Install OpenClaw with the official installer (see [`INSTALLER_URL`]).
-#[tauri::command]
-pub async fn doctor_install_openclaw(app: AppHandle, hub: State<'_, Arc<Hub>>, version: Option<String>) -> Result<(), String> {
-    let client = openclaw(&hub)?;
-    progress(&app, "install", "Downloading the OpenClaw installer…");
-    let script = reqwest::get(INSTALLER_URL)
+/// Downloads a vendor's official installer script and runs it: with `shell` on macOS and
+/// Linux, with PowerShell on Windows. `args` follow the script, `envs` are set for it, and
+/// each line it prints goes to `on_line`.
+pub(crate) async fn run_installer(
+    url: &str,
+    shell: &str,
+    args: &[String],
+    envs: &[(&str, &str)],
+    on_line: impl Fn(&str) + Send + Sync + 'static,
+) -> Result<(), String> {
+    let script = reqwest::get(url)
         .await
         .and_then(|r| r.error_for_status())
         .map_err(|e| format!("couldn't download the installer: {e}"))?
@@ -205,30 +210,46 @@ pub async fn doctor_install_openclaw(app: AppHandle, hub: State<'_, Arc<Hub>>, v
     let tmp = std::env::temp_dir().join(format!("littleguys-install-{}.{ext}", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, script).map_err(|e| e.to_string())?;
 
-    let version = version.as_deref().map(str::trim).filter(|v| !v.is_empty());
     #[cfg(not(windows))]
-    let cmd = {
-        let mut cmd = runtime::command(std::path::Path::new("/bin/bash"));
-        cmd.arg(&tmp).arg("--json");
-        if let Some(v) = version {
-            cmd.args(["--version", v]);
-        }
+    let mut cmd = {
+        let mut cmd = runtime::command(std::path::Path::new(shell));
+        cmd.arg(&tmp);
         cmd
     };
-    // Progress comes as plain lines here (no --json); littleguys onboards on its own.
     #[cfg(windows)]
-    let cmd = {
+    let mut cmd = {
+        let _ = shell;
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
         let powershell = std::path::PathBuf::from(root).join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
         let mut cmd = runtime::command(&powershell);
-        cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&tmp).arg("-NoOnboard");
-        if let Some(v) = version {
-            cmd.args(["-Tag", v]);
-        }
+        cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&tmp);
         cmd
     };
+    cmd.args(args).envs(envs.iter().copied());
+    let result = runtime::run_streaming(cmd, Duration::from_secs(1800), on_line).await;
+    let _ = std::fs::remove_file(&tmp);
+    let out = result.map_err(|e| e.to_string())?;
+    if !out.ok {
+        return Err(first_meaningful_line(&out.stderr, &out.stdout));
+    }
+    // The installer may have put things somewhere new on PATH.
+    crate::platform::refresh_login_path();
+    Ok(())
+}
+
+/// Install OpenClaw with the official installer (see [`INSTALLER_URL`]).
+#[tauri::command]
+pub async fn doctor_install_openclaw(app: AppHandle, hub: State<'_, Arc<Hub>>, version: Option<String>) -> Result<(), String> {
+    let client = openclaw(&hub)?;
+    progress(&app, "install", "Downloading the OpenClaw installer…");
+    let version = version.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    #[cfg(not(windows))]
+    let args: Vec<String> = ["--json"].into_iter().chain(version.map(|v| ["--version", v]).into_iter().flatten()).map(String::from).collect();
+    // Progress comes as plain lines here (no --json); littleguys onboards on its own.
+    #[cfg(windows)]
+    let args: Vec<String> = ["-NoOnboard"].into_iter().chain(version.map(|v| ["-Tag", v]).into_iter().flatten()).map(String::from).collect();
     let app2 = app.clone();
-    let result = runtime::run_streaming(cmd, Duration::from_secs(1800), move |line| {
+    run_installer(INSTALLER_URL, "/bin/bash", &args, &[], move |line| {
         let label = serde_json::from_str::<Value>(line)
             .ok()
             .and_then(|v| {
@@ -247,14 +268,7 @@ pub async fn doctor_install_openclaw(app: AppHandle, hub: State<'_, Arc<Hub>>, v
             .unwrap_or_else(|| line.to_string());
         progress(&app2, "install", &label);
     })
-    .await;
-    let _ = std::fs::remove_file(&tmp);
-    let out = result.map_err(|e| e.to_string())?;
-    if !out.ok {
-        return Err(first_meaningful_line(&out.stderr, &out.stdout));
-    }
-    // The installer may have put node and openclaw somewhere new on PATH.
-    crate::platform::refresh_login_path();
+    .await?;
     client.reconnect_now();
     Ok(())
 }

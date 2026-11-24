@@ -2,13 +2,16 @@
 // Shapes mirror real gateway responses. Query params:
 //   ?phase=pairing|offline|no-config   previews the Doctor (no gateway connected)
 //   ?single=1                          one gateway only
+//   ?only=claudecode                   only the gateways of that kind (someone who's added just Claude Code)
+//   ?missing=codex,claude              not installed yet, so Add a bot offers to install them
+//   ?signedout=codex                   installed but not signed in; ?installfails=codex fails its install
 //   ?empty=1                           connected, but no guys yet
 //   ?stills=1                          the browser tab isn't in front, so its stream sends no frames
 //   ?slow=1                            replies take a while (time to queue messages while a guy works)
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { bridgeMockInvoke } from "./bridge";
 import type { Backend } from "./ipc";
-import type { ChatMessage, CoderPrefs, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster, TerminalApp } from "./types";
+import type { ChatMessage, CoderPrefs, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster, SetupAgent, TerminalApp } from "./types";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -208,12 +211,23 @@ codexSessions.status = {
 /** The face each bot gave a guy, from before a photo was picked for them. */
 const botFaces = new Map<string, string | undefined>();
 
+// Claude Code and Codex on this computer, for Add a bot's install and sign-in.
+const missing = (params.get("missing") ?? "").split(",");
+const signedOut = (params.get("signedout") ?? "").split(",");
+const setup: Record<SetupAgent, { installed: boolean; signedIn: boolean }> = {
+  claude: { installed: !missing.includes("claude"), signedIn: !signedOut.includes("claude") },
+  codex: { installed: !missing.includes("codex"), signedIn: !signedOut.includes("codex") },
+};
+const signInCancel: Partial<Record<SetupAgent, () => void>> = {};
+
 const roster: Roster = {
   gateways: forcedPhase
     ? [attic]
     : params.get("single")
       ? [attic]
-      : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude, params.get("codex") ? codexSessions : codex],
+      : params.get("only")
+        ? [attic, garage, shed, lab, hermes, claude, claudeCode, codex, codexSessions].filter((g) => g.status.kind === params.get("only"))
+        : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude, params.get("codex") ? codexSessions : codex],
   hidden: ["hermes-1/research"],
   steps: [],
   notifications: { everyone: { replies: true, routines: "all" }, guys: {} },
@@ -1232,10 +1246,44 @@ export const mockBackend: Backend = {
         return [{ url: "http://127.0.0.1:9119", version: "0.21.5", mode: "local", authRequired: false }] as T;
       case "claude_code_detect":
         await new Promise((r) => setTimeout(r, 400));
-        return { installed: true, version: "2.1.296", plugin: null } as T;
+        return setup.claude.installed
+          ? ({ installed: true, version: "2.1.296", plugin: null, signedIn: setup.claude.signedIn } as T)
+          : ({ installed: false, version: null, plugin: null, signedIn: null } as T);
       case "codex_detect":
         await new Promise((r) => setTimeout(r, 400));
-        return { installed: true, version: "0.166.0", sessions: true } as T;
+        return setup.codex.installed
+          ? ({ installed: true, version: "0.166.0", sessions: true, signedIn: setup.codex.signedIn } as T)
+          : ({ installed: false, version: null, sessions: false, signedIn: null } as T);
+      case "agent_install": {
+        const agent = (args as { agent: SetupAgent }).agent;
+        const say = (line: string) => emit("lg:agent-setup", { agent, step: "install", line });
+        const lines =
+          agent === "codex"
+            ? ["Downloading the Codex installer…", "==> Installing Codex CLI 0.166.0", "==> Downloading codex-package-aarch64-apple-darwin.tar.gz", "==> Verifying checksum", "==> Adding ~/.local/bin to PATH in ~/.zshrc", "Codex CLI 0.166.0 installed successfully."]
+            : ["Downloading the Claude Code installer…", "Setting up Claude Code...", "✔ Claude Code successfully installed!", "", "✅ Installation complete!"];
+        for (const line of lines) {
+          say(line);
+          await new Promise((r) => setTimeout(r, 450));
+        }
+        if (params.get("installfails") === agent) throw "curl: (6) Could not resolve host: releases.openai.com";
+        setup[agent] = { installed: true, signedIn: false };
+        return undefined as T;
+      }
+      case "agent_sign_in": {
+        const agent = (args as { agent: SetupAgent }).agent;
+        const page = agent === "codex" ? "https://auth.openai.com/oauth/authorize?client_id=app_EXAMPLE&state=x1" : "https://claude.ai/oauth/authorize?code=true&state=x1";
+        emit("lg:agent-setup", { agent, step: "signin", line: `If your browser did not open, navigate to this URL to authenticate: ${page}` });
+        const done = await new Promise<boolean>((resolve) => {
+          signInCancel[agent] = () => resolve(false);
+          setTimeout(() => resolve(true), 4000);
+        });
+        if (!done) throw "Sign-in cancelled.";
+        setup[agent].signedIn = true;
+        return undefined as T;
+      }
+      case "agent_sign_in_cancel":
+        signInCancel[(args as { agent: SetupAgent }).agent]?.();
+        return undefined as T;
       case "claude_code_install_plugin":
         await new Promise((r) => setTimeout(r, 900));
         return undefined as T;
