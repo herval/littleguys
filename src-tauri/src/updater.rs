@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -83,15 +84,14 @@ impl Updates {
                     s.checked_at = Some(chrono::Utc::now().timestamp_millis());
                 });
                 crate::tray::set_update_ready(app, &version);
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title(format!("littleguys {version} is ready"))
-                    .body(format!(
-                        "It'll restart itself next time you're away, or restart now from the {}.",
-                        crate::platform::TRAY
-                    ))
-                    .show();
+                let title = format!("littleguys {version} is ready");
+                let body =
+                    format!("It'll restart itself next time you're away, or restart now from the {}.", crate::platform::TRAY);
+                // On macOS the plugin's library would take over the delegate that opens chats from notifications.
+                #[cfg(target_os = "macos")]
+                crate::mac_notifications::show(app, &title, &body, None);
+                #[cfg(not(target_os = "macos"))]
+                let _ = app.notification().builder().title(title).body(body).show();
             }
             Ok(None) => self.set(app, |s| {
                 s.phase = "idle";

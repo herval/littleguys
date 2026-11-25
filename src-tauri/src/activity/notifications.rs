@@ -125,29 +125,10 @@ impl Activity {
 
     /// Shows a notification; clicking it opens `nav` (macOS and Windows — the
     /// notification plugin ignores clicks on desktop, so those go through
-    /// mac-notification-sys and Windows toasts directly).
+    /// NSUserNotificationCenter and Windows toasts directly).
     pub(super) fn show_notification(&self, title: &str, body: &str, nav: Navigate) {
         #[cfg(target_os = "macos")]
-        {
-            static APP_SET: std::sync::Once = std::sync::Once::new();
-            let identifier = self.app.config().identifier.clone();
-            APP_SET.call_once(|| {
-                // Same as the plugin: unbundled dev builds borrow Terminal's identity.
-                let _ = mac_notification_sys::set_application(if tauri::is_dev() { "com.apple.Terminal" } else { &identifier });
-            });
-            let (app, title, body) = (self.app.clone(), title.to_string(), body.to_string());
-            // Blocks until the notification is clicked, closed or cleared from Notification Center.
-            std::thread::spawn(move || {
-                match mac_notification_sys::Notification::new().title(&title).message(&body).wait_for_click(true).send() {
-                    Ok(mac_notification_sys::NotificationResponse::Click) => {
-                        let handle = app.clone();
-                        let _ = app.run_on_main_thread(move || crate::windows::open_main(&handle, Some(nav)));
-                    }
-                    Ok(_) => {}
-                    Err(e) => log::warn!("notification failed: {e}"),
-                }
-            });
-        }
+        crate::mac_notifications::show(&self.app, title, body, Some(nav));
         #[cfg(windows)]
         {
             use tauri_winrt_notification::Toast;

@@ -11,6 +11,8 @@ pub mod gateways;
 mod hub;
 mod limits;
 pub mod localfs;
+#[cfg(target_os = "macos")]
+mod mac_notifications;
 mod media;
 pub mod openclaw;
 mod outbox;
@@ -183,6 +185,8 @@ pub fn run() {
             animator.start(handle.clone());
 
             windows::setup(&handle);
+            #[cfg(target_os = "macos")]
+            mac_notifications::setup(&handle);
 
             // Self-update from GitHub releases
             let updates = Updates::new(app.package_info().version.to_string());
