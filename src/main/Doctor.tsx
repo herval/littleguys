@@ -4,7 +4,7 @@ import { COMPUTER } from "../lib/platform";
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { core, errorMessage, listen } from "../lib/ipc";
 import type { ClaudeCodeProbe, CodexProbe, ConnStatus, DoctorIssue, DoctorReport } from "../lib/types";
-import { needsProxyFix, statusLabel } from "../lib/guys";
+import { botGateways, needsProxyFix, statusLabel } from "../lib/guys";
 import { type AddBotTab, useApp } from "../stores/app";
 import { GuyMark } from "../ui/Avatar";
 import { Button, Field, inputClass, Spinner } from "../ui/kit";
@@ -20,9 +20,10 @@ export function Doctor() {
   const roster = useApp((s) => s.roster);
   const setAddGatewayOpen = useApp((s) => s.setAddGatewayOpen);
   // The gateway from ~/.openclaw is the one this screen can actually fix.
-  const primary = roster.gateways.find((g) => g.id === "openclaw" && g.enabled) ?? roster.gateways.find((g) => g.enabled);
+  const bots = botGateways(roster);
+  const primary = bots.find((g) => g.id === "openclaw" && g.enabled) ?? bots.find((g) => g.enabled);
   const status = primary?.status ?? null;
-  const others = roster.gateways.filter((g) => g.enabled && g.id !== primary?.id);
+  const others = bots.filter((g) => g.enabled && g.id !== primary?.id);
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [checking, setChecking] = useState(false);
   const phase = status?.phase ?? "starting";

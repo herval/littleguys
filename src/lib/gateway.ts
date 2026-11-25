@@ -114,7 +114,7 @@ export const chat = {
    * `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode).
    * `delivery`: while the guy works. `status: "held"` means littleguys keeps it until the turn ends.
    */
-  send: (gw: string, sessionKey: string, message: string, attachments: Attachment[] = [], cwd?: string, clientSendId = newIdempotencyKey(), worktree?: boolean, delivery?: Delivery) =>
+  send: (gw: string, sessionKey: string, message: string, attachments: Attachment[] = [], cwd?: string, clientSendId = newIdempotencyKey(), worktree?: boolean, delivery?: Delivery, to?: string[]) =>
     gwCall<SendReceipt>(
       gw,
       "chat.send",
@@ -125,6 +125,7 @@ export const chat = {
         ...(cwd ? { cwd } : {}),
         ...(worktree ? { worktree: true } : {}),
         ...(delivery ? { delivery } : {}),
+        ...(to?.length ? { to } : {}),
         ...(attachments.length
           ? {
               attachments: attachments.map(({ type, mimeType, fileName, content, sizeBytes }) => ({

@@ -14,6 +14,7 @@ import {
   Settings as SettingsIcon,
   Sparkles,
   SquarePen,
+  Users,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -27,8 +28,10 @@ import {
   capsOf,
   channelName,
   cleanPreview,
+  allGuys,
   findGuy,
   gatewayOf,
+  isRoom,
   followsSessions,
   guyName,
   isMultiGateway,
@@ -60,7 +63,11 @@ import { RenameInput, ThreadMenu, useCanFile } from "./ThreadMenu";
 export function Sidebar() {
   const roster = useApp((s) => s.roster);
   const browseUid = useApp((s) => s.browseUid);
-  const guy = useMemo(() => findGuy(roster, browseUid), [roster, browseUid]);
+  // A room is one chat: it's opened from the list, never browsed into.
+  const guy = useMemo(() => {
+    const found = findGuy(roster, browseUid);
+    return found && !isRoom(found) ? found : undefined;
+  }, [roster, browseUid]);
   const groupBy = useGroupBy();
   return (
     <aside className="flex w-[300px] shrink-0 flex-col">
@@ -86,6 +93,8 @@ function SidebarTop({ back }: { back: boolean }) {
   const browse = useApp((s) => s.browse);
   const setSettingsOpen = useApp((s) => s.setSettingsOpen);
   const setSearchOpen = useApp((s) => s.setSearchOpen);
+  // With two guys there's a room to make.
+  const canRoom = useApp((s) => allGuys(s.roster).filter((g) => !isRoom(g)).length >= 2);
   return (
     <div data-tauri-drag-region className={`flex h-14 shrink-0 items-center gap-0.5 ${IS_MAC ? "pl-[84px]" : "pl-2"} pr-2`}>
       {back && (
@@ -98,6 +107,11 @@ function SidebarTop({ back }: { back: boolean }) {
         </button>
       )}
       <div data-tauri-drag-region className="flex-1 self-stretch" />
+      {canRoom && (
+        <IconButton label="New room: a chat with several guys" onClick={() => useApp.getState().setNewRoomOpen(true)}>
+          <Users size={15} />
+        </IconButton>
+      )}
       <IconButton label={`Search (${shortcut("K")})`} onClick={() => setSearchOpen(true)}>
         <Search size={15} />
       </IconButton>

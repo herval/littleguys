@@ -1,7 +1,7 @@
 import { Settings as SettingsIcon } from "lucide-react";
 import { useEffect } from "react";
 import { isModKey, shortcut } from "../lib/platform";
-import { capsOf, liveGateways } from "../lib/guys";
+import { capsOf, liveBots } from "../lib/guys";
 import { core, listen } from "../lib/ipc";
 import { recentGuys, useApp, useSelectedGuy } from "../stores/app";
 import { IconButton } from "../ui/kit";
@@ -13,6 +13,7 @@ import { Doctor } from "./Doctor";
 import { FilesView } from "./Files";
 import { GuyEditor } from "./GuyEditor";
 import { PastSessions } from "./PastSessions";
+import { NewRoom } from "./Room";
 import { RoutinesPanel } from "./Routines";
 import { SearchPalette } from "./SearchPalette";
 import { Settings } from "./Settings";
@@ -30,7 +31,8 @@ export function App() {
   const guy = useSelectedGuy();
   const browserOpen = useApp((s) => (guy ? Boolean(s.browser.open[guy.uid]) : false));
   const routineRun = useApp((s) => (guy ? (s.routineRunByGuy[guy.uid] ?? null) : null));
-  const connected = liveGateways(roster).length > 0;
+  const connected = liveBots(roster).length > 0;
+  const newRoomOpen = useApp((s) => s.newRoomOpen);
   const caps = capsOf(roster, guy?.gatewayId);
   const gatewayId = guy?.gatewayId ?? null;
 
@@ -127,6 +129,7 @@ export function App() {
       {editor.open && <GuyEditor uid={editor.uid} />}
       {settingsOpen && <Settings />}
       {addGatewayOpen && <AddGateway />}
+      {newRoomOpen && <NewRoom onClose={() => useApp.getState().setNewRoomOpen(false)} />}
       {/* Last, so Cmd+K comes up over any dialog that's open. */}
       {searchOpen && connected && <SearchPalette />}
     </div>

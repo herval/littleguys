@@ -1,7 +1,7 @@
 import { Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { shortcut, TRAY } from "../lib/platform";
-import { followsSessions, needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
+import { botGateways, followsSessions, needsAction, needsProxyFix, RUNTIME_LABEL, statusLabel } from "../lib/guys";
 import { core, errorMessage, isTauri, listen } from "../lib/ipc";
 import type { GatewayRoster, UpdateState } from "../lib/types";
 import { type PopoverShows, useApp } from "../stores/app";
@@ -77,7 +77,7 @@ export function Settings() {
                 </Button>
               </div>
               <div className="space-y-2">
-                {roster.gateways.map((g) => (
+                {botGateways(roster).map((g) => (
                   <GatewayRow key={g.id} gateway={g} />
                 ))}
               </div>

@@ -56,7 +56,37 @@ export function isOnThisMac(g: GatewayRoster | undefined): boolean {
   return kind === "acp" && !(url ?? "").startsWith("ws");
 }
 
-export const RUNTIME_LABEL: Record<string, string> = { openclaw: "OpenClaw", hermes: "Hermes", acp: "ACP agent", claudecode: "Claude Code", codex: "Codex" };
+export const RUNTIME_LABEL: Record<string, string> = { openclaw: "OpenClaw", hermes: "Hermes", acp: "ACP agent", claudecode: "Claude Code", codex: "Codex", rooms: "Room" };
+
+/** Rooms are a runtime of littleguys' own (src-tauri/src/runtime/rooms): each room shows as a guy on it. */
+export const ROOMS_GATEWAY = "rooms";
+
+export function isRoomsGateway(g: Pick<GatewayRoster, "id"> | undefined): boolean {
+  return g?.id === ROOMS_GATEWAY;
+}
+
+export function isRoom(guy: Pick<Guy, "gatewayId"> | undefined): boolean {
+  return guy?.gatewayId === ROOMS_GATEWAY;
+}
+
+export function isRoomUid(uid: string | null | undefined): boolean {
+  return Boolean(uid?.startsWith(`${ROOMS_GATEWAY}/`));
+}
+
+/** The room a thread is a guy's seat in, if it's one: such threads stay out of lists. */
+export function seatOf(row: SessionRow | undefined): { id: string; name: string } | null {
+  return (row as { room?: { id: string; name: string } } | undefined)?.room ?? null;
+}
+
+/** The bots: every gateway but the rooms' own. */
+export function botGateways(roster: Roster): GatewayRoster[] {
+  return roster.gateways.filter((g) => !isRoomsGateway(g));
+}
+
+/** Bots that are connected. Rooms alone aren't anyone to talk to. */
+export function liveBots(roster: Roster): GatewayRoster[] {
+  return liveGateways(roster).filter((g) => !isRoomsGateway(g));
+}
 
 /** Claude Code and Codex: one guy, and every session on this computer a thread of theirs. */
 export function followsSessions(kind: string | undefined): boolean {
@@ -86,7 +116,7 @@ export function findGuy(roster: Roster, uid: string | null | undefined): Guy | u
 
 /** More than one gateway in play → label guys with where they live. */
 export function isMultiGateway(roster: Roster): boolean {
-  return roster.gateways.filter((g) => g.enabled).length > 1;
+  return botGateways(roster).filter((g) => g.enabled).length > 1;
 }
 
 export function guyName(agent: Pick<AgentSummary, "id" | "name" | "identity">): string {
@@ -171,7 +201,7 @@ function agentIdOf(key: string): string | null {
 
 export function sessionsFor(roster: Roster, guy: Pick<Guy, "gatewayId" | "id">): SessionRow[] {
   const g = gatewayOf(roster, guy.gatewayId);
-  return g ? g.sessions.filter((s) => (s.agentId ?? agentIdOf(s.key)) === guy.id) : [];
+  return g ? g.sessions.filter((s) => (s.agentId ?? agentIdOf(s.key)) === guy.id && !seatOf(s)) : [];
 }
 
 export function sessionRow(roster: Roster, gatewayId: string, key: string): SessionRow | undefined {

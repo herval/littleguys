@@ -22,7 +22,7 @@ export type Phase =
   | "no-config"
   | "error";
 
-export type RuntimeKind = "openclaw" | "hermes" | "acp" | "claudecode" | "codex";
+export type RuntimeKind = "openclaw" | "hermes" | "acp" | "claudecode" | "codex" | "rooms";
 
 /** What a bot runtime can do; the UI hides the rest (see src-tauri/src/runtime/mod.rs). */
 export interface Capabilities {
@@ -231,7 +231,43 @@ export type Guy = AgentSummary & {
   gatewayName: string;
   /** `${gatewayId}/${agentId}` — unique across gateways. */
   uid: string;
+  /** Set when this "guy" is a room: a chat with several guys in it (src/lib/rooms.ts). */
+  room?: RoomInfo;
 };
+
+/** When a guy in a room gets a turn: only when addressed, or also one look when the room goes quiet. */
+export type Attention = "oncall" | "listening";
+
+export interface RoomMember {
+  /** The guy, as `gatewayId/agentId`. */
+  uid: string;
+  /** Its name when the room last saw it (its bot may be away). */
+  name: string;
+  /** What follows the `@` to address it. */
+  handle: string;
+  attention: Attention;
+  /** Its own thread for this room, on its bot, once it has had a turn. */
+  seat?: string | null;
+  /** The folder that thread works in, when you picked one (Claude Code, Codex, ACP). */
+  folder?: string | null;
+}
+
+/** A room, on its row in the roster (`agents.list` of the rooms runtime). */
+export interface RoomInfo {
+  /** Takes what you write to nobody in particular, until someone has spoken. */
+  lead: string;
+  members: RoomMember[];
+  /** The guys addressed each other too many times in a row: they wait for you. */
+  paused?: boolean;
+}
+
+/** Who is working in a room right now (`room.state`). */
+export interface RoomState {
+  id: string;
+  sessionKey: string;
+  working: Array<{ uid: string; why: "addressed" | "lead" | "look" }>;
+  paused: boolean;
+}
 
 export interface AcpConfig {
   transport: "stdio" | "websocket";
@@ -361,6 +397,8 @@ export interface ChatMessage {
   diffs?: ToolDiff[];
   /** On a question tool's result: each question → the answer given. */
   answers?: Record<string, string>;
+  /** In a room: the guy that said it (none on yours), and the members it addresses. */
+  room?: { from?: string | null; to?: string[] };
   /** `idempotencyKey`: OpenClaw's for the row; `<chat.send idempotencyKey>:user` for a message it took from chat.send. */
   __openclaw?: { clientSendId?: string; id?: string; seq?: number; runId?: string; kind?: string; idempotencyKey?: string };
 }

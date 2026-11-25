@@ -28,6 +28,7 @@ import { artifacts, workspace } from "../lib/gateway";
 import { findGuy, gatewayOf, guyUid, isOnThisMac } from "../lib/guys";
 import { type FileDiff, fileDiffs, jsonField } from "../lib/diff";
 import { core, errorMessage } from "../lib/ipc";
+import { boldMentions, type Seat, seatFace } from "../lib/rooms";
 import { presentTense, summarizeSteps, type ToolKind, toolKind, toolLabel } from "../lib/toolPhrases";
 import { cleanOutput, commandOf, numberedLines, shellLines, toolArgs } from "../lib/toolView";
 import { cleanDirectives, extractMediaLines, type Item, type MediaRef, mediaTarget, type ToolCallBlock, type ToolResult } from "../lib/transcript";
@@ -151,6 +152,7 @@ export function Transcript({
   newFrom = -1,
   showSteps = true,
   editsIn = null,
+  seats,
 }: {
   gatewayId: string;
   sessionKey: string;
@@ -166,8 +168,15 @@ export function Transcript({
   showSteps?: boolean;
   /** Coder mode: the repo of a thread whose edits show as diffs between messages, step rows or not. */
   editsIn?: string | null;
+  /** A room's members: each message shows who said it, and to whom. */
+  seats?: Seat[];
 }) {
   const sections: Section[] = [];
+  const seatOf = (uid: string | undefined) => seats?.find((s) => s.uid === uid);
+  const toLabel = (to: string[] | undefined) => {
+    const names = (to ?? []).map((uid) => seatOf(uid)?.name).filter(Boolean);
+    return seats && names.length ? `to ${names.length === seats.length && names.length > 1 ? "everyone" : names.join(", ")}` : undefined;
+  };
   let prevKind: string | null = null;
   const where = { gatewayId, sessionKey };
   // Working out a step's diffs can be slow (a whole file written), so each is kept until it changes.
@@ -228,13 +237,18 @@ export function Transcript({
       section.nodes.push(<NewDivider key="new" />);
       prevKind = null;
     }
-    const side = item.kind === "user" ? `user:${item.sender ?? ""}:${item.via ?? ""}` : item.kind === "note" ? null : "guy";
+    const side =
+      item.kind === "user"
+        ? `user:${item.sender ?? ""}:${item.via ?? ""}:${seats ? (item.to ?? []).join() : ""}`
+        : item.kind === "note"
+          ? null
+          : `guy:${(item.kind === "text" && item.from) || ""}:${seats && item.kind === "text" ? (item.to ?? []).join() : ""}`;
     const startsGroup = side !== prevKind;
     const before: string | null = prevKind;
     prevKind = side;
 
     if (item.kind === "user") {
-      section.nodes.push(<UserBubble key={item.id} item={item} first={startsGroup} where={where} />);
+      section.nodes.push(<UserBubble key={item.id} item={item} first={startsGroup} where={where} to={toLabel(item.to)} seats={seats} />);
     } else if (item.kind === "note") {
       section.nodes.push(
         <p
@@ -266,9 +280,10 @@ export function Transcript({
         ),
       );
     } else {
+      const seat = item.kind === "text" ? seatOf(item.from) : undefined;
       section.nodes.push(
-        <GuyLine key={item.id} agent={agent} showAvatar={startsGroup}>
-          {item.kind === "text" && <TextBubble text={item.text} ts={item.ts} media={item.media} where={where} />}
+        <GuyLine key={item.id} agent={seat ? seatFace(seat) : agent} showAvatar={startsGroup} name={seat?.name} to={item.kind === "text" ? toLabel(item.to) : undefined}>
+          {item.kind === "text" && <TextBubble text={seats ? boldMentions(item.text, seats) : item.text} ts={item.ts} media={item.media} where={where} />}
           {item.kind === "media" && <MediaView media={item.media} where={where} />}
           {item.kind === "media" && ts > 0 && !timeShownAbove(items[i - 1], ts) && (
             <MessageTime ts={ts} className="mt-1 block px-1 text-[var(--color-ink-3)]" />
@@ -280,7 +295,7 @@ export function Transcript({
 
   if (live) {
     const section = sectionFor(Date.now());
-    const startsGroup = prevKind !== "guy";
+    const startsGroup = !prevKind?.startsWith("guy:");
     // With the steps out of sight, the typing bubble says what the guy is doing.
     const doing = !showSteps && !live.text ? runningTool(items, toolStatus) : null;
     const status = doing ? `${presentTense(doing)}…` : live.phase ? phaseLabel(live.phase) : null;
@@ -344,30 +359,65 @@ function TextBubble({ text, ts, media, where }: { text: string; ts?: number; med
   );
 }
 
-function GuyLine({ agent, showAvatar, children }: { agent: AgentSummary; showAvatar: boolean; children: React.ReactNode }) {
+/** `name`, `to`: in a room, who is speaking and to whom, over the first of its messages. */
+function GuyLine({
+  agent,
+  showAvatar,
+  name,
+  to,
+  children,
+}: {
+  agent: Pick<AgentSummary, "id" | "name" | "identity">;
+  showAvatar: boolean;
+  name?: string;
+  to?: string;
+  children: React.ReactNode;
+}) {
+  const labelled = showAvatar && Boolean(name);
   return (
     <div className={`flex items-start gap-2 pr-12 ${showAvatar ? "mt-3" : "mt-1"}`}>
-      <div className="w-7 shrink-0">{showAvatar && <Avatar agent={agent} size={28} />}</div>
-      <div className="min-w-0 max-w-[720px]">{children}</div>
+      <div className={`w-7 shrink-0 ${labelled ? "pt-[19px]" : ""}`}>{showAvatar && <Avatar agent={agent} size={28} />}</div>
+      <div className="min-w-0 max-w-[720px]">
+        {labelled && (
+          <p className="mb-[3px] px-1 text-[11.5px] leading-4 text-[var(--color-ink-3)]">
+            <span className="font-semibold text-[var(--color-ink-2)]">{name}</span>
+            {to && <span> {to}</span>}
+          </p>
+        )}
+        {children}
+      </div>
     </div>
   );
 }
 
 type Where = { gatewayId: string; sessionKey: string };
 
-const UserBubble = memo(function UserBubble({ item, first, where }: { item: Extract<Item, { kind: "user" }>; first: boolean; where: Where }) {
+const UserBubble = memo(function UserBubble({
+  item,
+  first,
+  where,
+  to,
+  seats,
+}: {
+  item: Extract<Item, { kind: "user" }>;
+  first: boolean;
+  where: Where;
+  /** In a room: who it's for ("to Patch"), and the members, whose handles show in bold. */
+  to?: string;
+  seats?: Seat[];
+}) {
   return (
     <div className={`flex justify-end pl-16 ${first ? "mt-3" : "mt-1"} ${item.pending ? "opacity-60" : ""}`}>
       <div className="flex min-w-0 max-w-[640px] flex-col items-end gap-1">
-        {first && (item.sender || item.via) && (
-          <span className="px-1 text-[11px] text-[var(--color-ink-3)]">{[item.sender, item.via].filter(Boolean).join(" · ")}</span>
+        {first && (item.sender || item.via || to) && (
+          <span className="px-1 text-[11px] text-[var(--color-ink-3)]">{[item.sender, item.via, to].filter(Boolean).join(" · ")}</span>
         )}
         {item.media.map((m, i) => (
           <MediaView key={i} media={m} where={where} />
         ))}
         {item.text ? (
           <Bubble ts={item.ts} mine>
-            <Markdown text={item.text} />
+            <Markdown text={seats ? boldMentions(item.text, seats) : item.text} />
           </Bubble>
         ) : item.ts ? (
           <MessageTime ts={item.ts} className="px-1 text-[var(--color-ink-3)]" />

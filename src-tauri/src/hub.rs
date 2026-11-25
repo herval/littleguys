@@ -12,6 +12,7 @@ use crate::gateway::client::{ConnStatus, EndpointSource, GatewayClient, Hooks};
 use crate::gateway::identity::{now_ms, DeviceIdentity, DeviceTokenStore};
 use crate::gateways::{self, AcpConfig, ClaudeCodeConfig, CodexConfig, Discovered, GatewayEntry, GatewayStore, HermesConfig, OPENCLAW_GATEWAY_ID};
 use crate::openclaw::config::{self, Credential, OpenclawPaths};
+use crate::runtime::rooms::{RoomsClient, ROOMS_GATEWAY_ID};
 use crate::runtime::{acp::AcpClient, claudecode::ClaudeCodeClient, codex::CodexClient, hermes::HermesClient, Runtime, RuntimeKind};
 
 pub struct Hub {
@@ -56,6 +57,7 @@ impl Hub {
         for entry in entries {
             self.spawn(&entry);
         }
+        self.spawn_rooms();
     }
 
     /// The name shown for a gateway: the user's, else derived from its address.
@@ -91,18 +93,32 @@ impl Hub {
         }
     }
 
+    /// A runtime's way to tell Activity what happens on it.
+    fn hooks(&self, id: &str, generation: u64) -> Hooks {
+        let (a, b, c) = (Arc::downgrade(&self.activity), Arc::downgrade(&self.activity), Arc::downgrade(&self.activity));
+        let (gid_b, gid_c) = (id.to_string(), id.to_string());
+        Hooks {
+            status: Box::new(move |status| { if let Some(a) = a.upgrade() { a.on_status(status, generation); } }),
+            event: Box::new(move |name, payload, _frame| { if let Some(b) = b.upgrade() { b.on_event(&gid_b, generation, name, payload); } }),
+            connected: Box::new(move || { if let Some(c) = c.upgrade() { c.on_connected(&gid_c, generation); } }),
+        }
+    }
+
+    /// Rooms are built in: not a saved bot, always there (runtime/rooms).
+    fn spawn_rooms(&self) {
+        let generation = self.activity.next_generation();
+        let rooms = RoomsClient::new(self.data_dir.clone(), self.hooks(ROOMS_GATEWAY_ID, generation));
+        rooms.set_bots(self.activity.bots());
+        self.activity.set_rooms(rooms.clone());
+        let client = Runtime::Rooms(rooms);
+        self.activity.attach(generation, client.clone(), "Rooms".into(), true);
+        client.start();
+    }
+
     fn spawn(&self, entry: &GatewayEntry) {
         let name = self.display_name(entry);
         let generation = self.activity.next_generation();
-        let hooks = {
-            let (a, b, c) = (Arc::downgrade(&self.activity), Arc::downgrade(&self.activity), Arc::downgrade(&self.activity));
-            let (gid_b, gid_c) = (entry.id.clone(), entry.id.clone());
-            Hooks {
-                status: Box::new(move |status| { if let Some(a) = a.upgrade() { a.on_status(status, generation); } }),
-                event: Box::new(move |name, payload, _frame| { if let Some(b) = b.upgrade() { b.on_event(&gid_b, generation, name, payload); } }),
-                connected: Box::new(move || { if let Some(c) = c.upgrade() { c.on_connected(&gid_c, generation); } }),
-            }
-        };
+        let hooks = self.hooks(&entry.id, generation);
         let credential = self.store.credential(&entry.id);
         let client = match entry.kind {
             RuntimeKind::Openclaw => {
@@ -152,6 +168,8 @@ impl Hub {
                 self.data_dir.clone(),
                 hooks,
             )),
+            // Never a saved bot: see `spawn_rooms`.
+            RuntimeKind::Rooms => return,
         };
         self.activity.attach(generation, client.clone(), name, entry.enabled);
         if entry.enabled {
@@ -270,6 +288,7 @@ impl Hub {
     ) -> Result<GatewayEntry, String> {
         let url = match kind {
             RuntimeKind::Openclaw => return Err("use add() for OpenClaw gateways".into()),
+            RuntimeKind::Rooms => return Err("Rooms are built in.".into()),
             RuntimeKind::Hermes => hermes.as_ref().and_then(|h| h.url.clone()),
             RuntimeKind::Acp => acp.as_ref().and_then(|a| a.url.clone()),
             RuntimeKind::Claudecode | RuntimeKind::Codex => None,

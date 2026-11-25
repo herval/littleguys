@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { sessions as sessionsApi } from "../lib/gateway";
 import { channelName, followsSessions, gatewayOf, guyName, hasMainChat, isOnThisMac, isRunning, phaseLabel, sessionRow, threadKind, threadTitle } from "../lib/guys";
 import { core } from "../lib/ipc";
+import { defaultTo } from "../lib/rooms";
 import { doingNow, presentTense, rowActivity, toolKind } from "../lib/toolPhrases";
 import { firstUnread } from "../lib/transcript";
 import type { Guy, SessionRow } from "../lib/types";
@@ -17,6 +18,7 @@ import { Approvals } from "./Approvals";
 import { CoderOffer, NextSteps, RepoButtons, RepoPlace, TerminalButton } from "./ChangesPanel";
 import { Composer } from "./Composer";
 import { FolderPicker, threadFolder, tildify, useCanWorktree, usePendingFolder } from "./FolderPicker";
+import { RoomHeader, RoomStatus, useSeats } from "./Room";
 import { phaseLabel as livePhaseLabel, runningTool, toItems, Transcript } from "./Transcript";
 
 /** How far down the pane an unread thread opens its "New" divider: under the day chip, with a bit of what you'd read. */
@@ -92,14 +94,18 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
 
   const pendingMessages = useMemo(() => thread?.pending.map((p) => p.message) ?? [], [thread?.pending]);
   const items = useMemo(() => toItems(thread?.messages ?? [], pendingMessages), [thread?.messages, pendingMessages]);
-  const live = thread?.live ?? null;
+  // A room says who's working under its transcript (RoomStatus): no typing bubble of its own.
+  const room = guy.room;
+  const seats = useSeats(room);
+  const roomTo = useMemo(() => (room ? defaultTo(room, thread?.messages ?? []) : null), [room, thread?.messages]);
+  const live = room ? null : (thread?.live ?? null);
   // Settings → Agents: this guy's steps ("Ran 3 commands…"), off unless turned on.
   const showSteps = useApp((s) => s.roster.steps?.includes(guy.uid) ?? false);
   // Coder mode: a coding thread's edits show as diffs between its messages.
   const coder = useCoderPrefs();
   const repo = useRepoStatus(gw, sessionKey);
   const edits = coder.edits && repo ? repo.repo.root : null;
-  const running = Boolean(live) || rosterRunning;
+  const running = Boolean(thread?.live) || rosterRunning;
   const newFrom = useMemo(() => (readTo == null ? -1 : firstUnread(items, readTo || undefined)), [items, readTo]);
 
   const openedAtNew = useRef(false);
@@ -157,15 +163,19 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <ChatHeader
-        guy={guy}
-        title={title}
-        threadKey={tid}
-        sessionKey={sessionKey}
-        folder={canPickFolder && unstarted ? null : folder}
-        activity={activity}
-        browsing={browsing}
-      />
+      {room ? (
+        <RoomHeader guy={guy} room={room} />
+      ) : (
+        <ChatHeader
+          guy={guy}
+          title={title}
+          threadKey={tid}
+          sessionKey={sessionKey}
+          folder={canPickFolder && unstarted ? null : folder}
+          activity={activity}
+          browsing={browsing}
+        />
+      )}
       <div
         ref={scrollRef}
         onScroll={(e) => {
@@ -209,7 +219,9 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
               {kind === "routine" ? "Nothing from this run yet" : `Say hi to ${guyName(agent)}`}
             </p>
             <p className="mt-1 max-w-xs text-[12.5px] text-[var(--color-ink-3)]">
-              {isMain
+              {room
+                ? `${seats.find((s) => s.lead)?.name ?? "The lead"} answers unless you name someone else with @. They only speak when they have a reason to.`
+                : isMain
                 ? "This is your main chat. Ask for anything — research, errands on the web, files, reminders."
                 : kind === "routine"
                   ? `${guyName(agent)}'s messages for this run show up here as they work.`
@@ -229,7 +241,9 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             newFrom={newFrom}
             showSteps={showSteps}
             editsIn={edits}
+            seats={room ? seats : undefined}
           />
+          {room && <RoomStatus guy={guy} room={room} />}
           {thread?.untrustedFolder ? (
             <TrustFolder folder={thread.untrustedFolder} onTrust={() => trustFolder(tid)} />
           ) : thread?.pending.some((p) => p.status === "unknown") && (
@@ -258,7 +272,12 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
           </button>
         </div>
       )}
-      <Approvals guy={guy} sessionKey={sessionKey} />
+      {room ? (
+        // What a member asks to run for the room, it asks in its own thread: answered here.
+        seats.map((seat) => seat.guy && seat.seat && <Approvals key={seat.uid} guy={seat.guy} sessionKey={seat.seat} only />)
+      ) : (
+        <Approvals guy={guy} sessionKey={sessionKey} />
+      )}
       <div className="mx-auto w-full max-w-[900px]">
         {canPickFolder && unstarted && (pendingFolder ?? folder) && (
           <FolderPicker guy={guy} value={(pendingFolder ?? folder) as string} onChange={setPendingFolder} worktree={worktree} onWorktree={setWorktree} />
@@ -277,7 +296,8 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
           queued={thread?.queued ?? []}
           onSendQueued={(id, delivery) => sendQueued(tid, id, delivery)}
           onUnqueue={(id) => unqueue(tid, id)}
-          onSend={async (text, attachments, delivery) => {
+          room={room && roomTo ? { seats, to: roomTo } : undefined}
+          onSend={async (text, attachments, delivery, to) => {
             // Replying means you've caught up.
             atNew.current = false;
             setReadTo(null);
@@ -285,7 +305,7 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             if (row?.archived) await useArchive.getState().unarchive(guy, row);
             setFollow(true);
             const cwd = canPickFolder && unstarted && pendingFolder !== folder ? (pendingFolder ?? undefined) : undefined;
-            await send(tid, text, attachments, cwd, canPickFolder && unstarted && worktree && canWorktree, delivery);
+            await send(tid, text, attachments, cwd, canPickFolder && unstarted && worktree && canWorktree, delivery, to);
             setPendingFolder(null);
             setWorktree(false);
           }}

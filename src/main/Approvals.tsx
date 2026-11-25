@@ -27,9 +27,10 @@ function approvalAgent(a: ExecApproval): string | null {
  * Pending "can I run this?" requests from the selected guy, answered inline.
  * When the guy's threads are separate sessions (ACP, Claude Code), each shows only its own.
  */
-export function Approvals({ guy, sessionKey }: { guy: Guy; sessionKey: string }) {
+/** `only`: just this thread's, even for a guy whose approvals otherwise show in all of its chats (a room's member). */
+export function Approvals({ guy, sessionKey, only = false }: { guy: Guy; sessionKey: string; only?: boolean }) {
   const all = useApp((s) => gatewayOf(s.roster, guy.gatewayId)?.approvals);
-  const perSession = useApp((s) => !hasMainChat(s.roster, guy.gatewayId));
+  const perSession = useApp((s) => only || !hasMainChat(s.roster, guy.gatewayId));
   const approvals = useMemo(
     () =>
       (all ?? []).filter(

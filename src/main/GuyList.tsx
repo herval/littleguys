@@ -2,6 +2,7 @@ import { ChevronRight } from "lucide-react";
 import { useMemo } from "react";
 import { shortcut } from "../lib/platform";
 import { activityFor, cleanPreview, guyName, hasMainChat, isMultiGateway, shortTime, threadKind, threadTitle } from "../lib/guys";
+import { useRooms, workingLine, seatsOf } from "../lib/rooms";
 import type { Guy, Roster } from "../lib/types";
 import { recentGuys, useApp } from "../stores/app";
 import { Avatar } from "../ui/Avatar";
@@ -61,11 +62,15 @@ function GuyCard({
   // Which thread the latest message is in, unless it's the main chat (that's just "the guy").
   const withMain = hasMainChat(roster, guy.gatewayId);
   const thread = latest && !(withMain && threadKind(latest.key) === "main") ? threadTitle(latest, withMain) : null;
+  // A room says who's at it, and how many are in it where a guy says where it lives.
+  const room = guy.room;
+  const roomState = useRooms((s) => (room ? s.states[guy.id] : undefined));
+  const doing = room ? workingLine(roomState, seatsOf(roster, room)) : null;
 
   return (
     <button
       onClick={onSelect}
-      title={`${guyName(guy)}${showGateway ? ` on ${guy.gatewayName}` : ""}${index < 9 ? ` (${shortcut(String(index + 1))})` : ""}`}
+      title={`${guyName(guy)}${showGateway && !room ? ` on ${guy.gatewayName}` : ""}${index < 9 ? ` (${shortcut(String(index + 1))})` : ""}`}
       className={`flex w-full items-center gap-3 rounded-xl pl-2 text-left outline-none transition ${
         selected ? "bg-[var(--color-chip)]" : "hover:bg-[var(--color-chip)]"
       }`}
@@ -75,8 +80,12 @@ function GuyCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className="truncate font-display text-[14px] font-semibold">{guyName(guy)}</span>
-            {showGateway && guy.gatewayName !== guyName(guy) && (
-              <span className="shrink-0 truncate text-[11px] text-[var(--color-ink-3)]">{guy.gatewayName}</span>
+            {room ? (
+              <span className="shrink-0 truncate text-[11px] text-[var(--color-ink-3)]">{room.members.length} guys</span>
+            ) : (
+              showGateway && guy.gatewayName !== guyName(guy) && (
+                <span className="shrink-0 truncate text-[11px] text-[var(--color-ink-3)]">{guy.gatewayName}</span>
+              )
             )}
             <span
               className={`ml-auto shrink-0 text-[11px] ${
@@ -97,7 +106,7 @@ function GuyCard({
                   {thread} <span className="text-[10px]">▸</span>{" "}
                 </span>
               )}
-              {act.running ? "working…" : preview || "Say hi"}
+              {act.running ? (doing ?? "working…") : preview || "Say hi"}
             </p>
             {act.unread > 0 && (
               <span className="min-w-[18px] shrink-0 rounded-full bg-[var(--color-accent)] px-1.5 text-center text-[10.5px] font-bold leading-[18px] text-white">
@@ -106,7 +115,7 @@ function GuyCard({
             )}
           </div>
         </div>
-        <ChevronRight size={15} className="shrink-0 text-[var(--color-ink-3)]/70" />
+        {!room && <ChevronRight size={15} className="shrink-0 text-[var(--color-ink-3)]/70" />}
       </div>
     </button>
   );

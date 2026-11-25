@@ -1,10 +1,13 @@
-import type { AgentSummary } from "../lib/types";
+import type { AgentSummary, RoomInfo } from "../lib/types";
 import { guyAvatarUrl, guyEmoji, guyHue, guyName } from "../lib/guys";
+import { seatFace, seatsOf } from "../lib/rooms";
+import { useApp } from "../stores/app";
 
 export type RingState = "idle" | "working" | "unread" | "needs-you" | "none";
 
 interface AvatarProps {
-  agent: Pick<AgentSummary, "id" | "name" | "identity">;
+  /** A room (`room` set) shows as its members' faces together. */
+  agent: Pick<AgentSummary, "id" | "name" | "identity"> & { room?: RoomInfo };
   size?: number;
   ring?: RingState;
   selected?: boolean;
@@ -23,6 +26,7 @@ export function Avatar({ agent, size = 44, ring = "none", selected = false, clas
   const ringWidth = ring === "none" ? 0 : Math.max(2, Math.round(size / 22));
   const gap = ring === "none" ? 0 : Math.max(2, Math.round(size / 26));
   const inner = size - (ringWidth + gap) * 2;
+  if (agent.room) return <RoomFace room={agent.room} name={name} size={size} working={ring === "working"} className={className} />;
 
   const ringBackground =
     ring === "working"
@@ -73,6 +77,24 @@ export function Avatar({ agent, size = 44, ring = "none", selected = false, clas
           !
         </span>
       )}
+    </div>
+  );
+}
+
+/** A room's face: up to three of its members', overlapping. */
+function RoomFace({ room, name, size, working, className }: { room: RoomInfo; name: string; size: number; working: boolean; className: string }) {
+  const roster = useApp((s) => s.roster);
+  const faces = seatsOf(roster, room).slice(0, 3);
+  const each = Math.round(size * (faces.length > 2 ? 0.58 : 0.66));
+  // Top left, right, bottom middle: a little pile.
+  const spots = faces.length > 2 ? [[0, 0], [size - each, size * 0.1], [(size - each) * 0.4, size - each]] : [[0, 0], [size - each, size - each]];
+  return (
+    <div className={`relative shrink-0 ${working ? "animate-breathe" : ""} ${className}`} style={{ width: size, height: size }} title={name}>
+      {faces.map((seat, i) => (
+        <div key={seat.uid} className="absolute rounded-full ring-2 ring-[var(--color-pane-solid)]" style={{ left: spots[i][0], top: spots[i][1] }}>
+          <Avatar agent={seatFace(seat)} size={each} />
+        </div>
+      ))}
     </div>
   );
 }

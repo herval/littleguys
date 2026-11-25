@@ -19,6 +19,7 @@ impl Activity {
                 let mut roster = g.roster.clone();
                 apply_live_previews(&mut roster.sessions, &g.live_previews);
                 apply_faces(&mut roster.agents, &roster.id, &faces);
+                self.mark_seats(&mut roster);
                 roster
             })
             .collect();
@@ -52,7 +53,9 @@ impl Activity {
 
 pub(super) fn mood(roster: &Roster, automated: &HashMap<String, HashSet<String>>) -> Mood {
     let enabled: Vec<&GatewayRoster> = roster.gateways.iter().filter(|g| g.enabled).collect();
-    let connected: Vec<&&GatewayRoster> = enabled.iter().filter(|g| g.status.phase == Phase::Connected).collect();
+    // Rooms are always there; without a bot connected there's nobody in them.
+    let any_bot = enabled.iter().any(|g| g.status.phase == Phase::Connected && !super::rooms::is_rooms(g));
+    let connected: Vec<&&GatewayRoster> = enabled.iter().filter(|g| any_bot && g.status.phase == Phase::Connected).collect();
     let shown =
         |g: &GatewayRoster, key: &str| agent_id_from_key(key).is_none_or(|agent| !roster.hidden.contains(&format!("{}/{agent}", g.id)));
     if connected.iter().any(|g| !g.approvals.is_empty())

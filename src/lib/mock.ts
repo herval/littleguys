@@ -7,6 +7,7 @@
 //   ?slow=1                            replies take a while (time to queue messages while a guy works)
 import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { bridgeMockInvoke } from "./bridge";
+import { mockRooms } from "./mockRooms";
 import type { Backend } from "./ipc";
 import type { ChatMessage, CoderPrefs, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster, TerminalApp } from "./types";
 
@@ -232,6 +233,13 @@ const roster: Roster = {
   },
   updatedAt: now,
 };
+// Rooms (mockRooms.ts): there whenever there are guys to put in one. Claude's thread for the room
+// is its seat, so it stays out of Claude's own list.
+const rooms = forcedPhase || params.get("single") || params.get("empty") ? null : mockRooms(roster, emit, status("rooms", "Rooms", "", "connected"), now);
+if (rooms) {
+  roster.gateways.push(rooms.gateway);
+  (claude.sessions as unknown as object[]).push({ key: "agent:bot:dashboard:room-launch", agentId: "bot", kind: "direct", label: "Launch (room)", updatedAt: now - 2 * min, lastMessagePreview: "Good catch, fixed there too.", workspaceDir: "/Users/you/dev/shop-api", room: { id: "room-launch", name: "Launch" } });
+}
 // ?steps=1: every guy's threads show their steps ("Ran 3 commands…"), off by default as in the app.
 if (params.has("steps")) roster.steps = roster.gateways.flatMap((g) => g.agents.map((a) => `${g.id}/${a.id}`));
 
@@ -910,6 +918,7 @@ function searchMessages(gateway: string, p: Record<string, unknown>) {
 
 async function gwCall(gateway: string, method: string, p: Record<string, unknown>): Promise<unknown> {
   await new Promise((r) => setTimeout(r, 120));
+  if (rooms && gateway === "rooms") return rooms.call(method, p);
   switch (method) {
     case "chat.history": {
       const past = pastSessions.find((s) => s.key === p.sessionKey);

@@ -39,9 +39,10 @@ export interface MediaRef {
 }
 
 export type Item =
-  | { kind: "user"; id: string; text: string; media: MediaRef[]; sender?: string; via?: string; ts?: number; pending?: boolean }
-  /** `media`: images, videos and audio the text mentions by path or link. */
-  | { kind: "text"; id: string; text: string; media?: MediaRef[]; ts?: number }
+  /** `to`: in a room, the members it's for. */
+  | { kind: "user"; id: string; text: string; media: MediaRef[]; sender?: string; via?: string; ts?: number; pending?: boolean; to?: string[] }
+  /** `media`: images, videos and audio the text mentions by path or link. `from`, `to`: in a room, who said it and to whom. */
+  | { kind: "text"; id: string; text: string; media?: MediaRef[]; ts?: number; from?: string; to?: string[] }
   | { kind: "thinking"; id: string; text: string; ts?: number }
   | { kind: "tool"; id: string; call: ToolCallBlock; result?: ToolResult; ts?: number }
   | { kind: "media"; id: string; media: MediaRef; ts?: number }
@@ -321,7 +322,7 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
       }
       events.forEach((text, k) => items.push({ kind: "note", id: `${id}:e${k}`, text, tone: "muted", ts: m.timestamp }));
       if (!texts.length && !media.length) return;
-      items.push({ kind: "user", id, text: texts.join("\n"), media, sender, via, ts: m.timestamp });
+      items.push({ kind: "user", id, text: texts.join("\n"), media, sender, via, ts: m.timestamp, to: m.room?.to });
       return;
     }
 
@@ -336,7 +337,7 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
           if (text && !HIDDEN_REPLIES.has(text.trim())) {
             const attached = new Set(files.map((f) => f.path));
             const media = mentionedMedia(text).filter((m) => !m.path || !attached.has(m.path));
-            items.push({ kind: "text", id: bid, text, media: media.length ? media : undefined, ts });
+            items.push({ kind: "text", id: bid, text, media: media.length ? media : undefined, ts, from: m.room?.from ?? undefined, to: m.room?.to });
           }
           files.forEach((f, k) => items.push({ kind: "media", id: `${bid}:f${k}`, media: f, ts }));
         } else if (type === "thinking" || type === "reasoning") {
@@ -371,6 +372,7 @@ export function toItems(messages: ChatMessage[], pending: ChatMessage[]): Item[]
       media: bs.map((b) => mediaFrom(b as Rec)).filter((x): x is MediaRef => Boolean(x)),
       ts: m.timestamp,
       pending: true,
+      to: m.room?.to,
     });
   });
   return items;

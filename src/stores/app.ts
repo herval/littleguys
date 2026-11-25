@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { create } from "zustand";
-import { activityFor, allGuys, defaultThread, findGuy, guyName, guyUid, liveGateways, threadKind } from "../lib/guys";
+import { activityFor, allGuys, defaultThread, findGuy, guyName, guyUid, isRoomUid, liveGateways, threadKind } from "../lib/guys";
 import { core, listen } from "../lib/ipc";
 import type { ConnStatus, Guy, Navigate, Roster } from "../lib/types";
 import { readGroupBy } from "./sidebar";
@@ -71,6 +71,8 @@ interface AppState {
   popoverShows: PopoverShows;
   editor: { open: boolean; uid: string | null };
   settingsOpen: boolean;
+  /** The "New room" dialog (main/Room.tsx). */
+  newRoomOpen: boolean;
   /** The Cmd+K search over every guy, thread and message. */
   searchOpen: boolean;
   addGatewayOpen: boolean;
@@ -103,6 +105,7 @@ interface AppState {
   openEditor(uid: string | null): void;
   closeEditor(): void;
   setSettingsOpen(open: boolean): void;
+  setNewRoomOpen(open: boolean): void;
   setSearchOpen(open: boolean): void;
   setAddGatewayOpen(open: boolean, tab?: AddBotTab): void;
   navigate(nav: Navigate): void;
@@ -122,7 +125,7 @@ export const useApp = create<AppState>((set, get) => ({
   view: "chat",
   // At launch, the sidebar opens on the guy you were last on (if they show up), unless it
   // lists everyone's threads: then it opens on that list.
-  browseUid: readGroupBy() === "agent" ? readJson<string | null>(LAST_GUY_KEY, null) : null,
+  browseUid: readGroupBy() === "agent" ? notRoom(readJson<string | null>(LAST_GUY_KEY, null)) : null,
   sidebarTab: "chat",
   fileByGuy: {},
   fileBack: null,
@@ -133,6 +136,7 @@ export const useApp = create<AppState>((set, get) => ({
   popoverShows: readPopoverShows(),
   editor: { open: false, uid: null },
   settingsOpen: false,
+  newRoomOpen: false,
   searchOpen: false,
   addGatewayOpen: false,
   addGatewayTab: "openclaw",
@@ -162,7 +166,8 @@ export const useApp = create<AppState>((set, get) => ({
   },
   selectGuy: (uid, sessionKey) => {
     activate(uid);
-    set({ browseUid: uid, sidebarTab: "chat" });
+    // A room is one chat: there's nothing of it to browse, so the list stays.
+    set(isRoomUid(uid) ? { browseUid: null } : { browseUid: uid, sidebarTab: "chat" });
     showGuy(uid, sessionKey);
   },
   openThread: (uid, sessionKey) => {
@@ -181,7 +186,10 @@ export const useApp = create<AppState>((set, get) => ({
   },
   setView: (view) => set({ view }),
   // Back in a guy you're on, the sidebar shows what's open; anyone else starts at their chats.
-  browse: (uid) => set({ browseUid: uid, sidebarTab: uid && uid === get().selectedUid ? get().view : "chat" }),
+  browse: (uid) => {
+    if (isRoomUid(uid)) return get().selectGuy(uid as string);
+    set({ browseUid: uid, sidebarTab: uid && uid === get().selectedUid ? get().view : "chat" });
+  },
   setSidebarTab: (sidebarTab) => set({ sidebarTab }),
   selectRoutineRun: (key, uid = get().selectedUid ?? undefined) => {
     if (!uid) return;
@@ -237,6 +245,7 @@ export const useApp = create<AppState>((set, get) => ({
   openEditor: (uid) => set({ editor: { open: true, uid } }),
   closeEditor: () => set({ editor: { open: false, uid: null } }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setNewRoomOpen: (newRoomOpen) => set({ newRoomOpen }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
   setAddGatewayOpen: (addGatewayOpen, tab = "openclaw") => set({ addGatewayOpen, addGatewayTab: tab }),
   startNewGuy: () => {
@@ -259,6 +268,10 @@ export const useApp = create<AppState>((set, get) => ({
     if (nav.view === "routines" || nav.view === "files" || nav.view === "skills") set({ view: nav.view, sidebarTab: nav.view });
   },
 }));
+
+function notRoom(uid: string | null): string | null {
+  return isRoomUid(uid) ? null : uid;
+}
 
 // Leaving the files some other way (a thread clicked in the sidebar) leaves their way back behind.
 useApp.subscribe((s, prev) => {

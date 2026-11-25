@@ -19,8 +19,9 @@ interface ChatState {
   /**
    * `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode).
    * `delivery`: while the guy works, wait for its turn to end (`queue`) or go into it (`steer`).
+   * `to`: in a room, the members it's for.
    */
-  send(id: string, text: string, attachments: Attachment[], cwd?: string, worktree?: boolean, delivery?: Delivery): Promise<void>;
+  send(id: string, text: string, attachments: Attachment[], cwd?: string, worktree?: boolean, delivery?: Delivery, to?: string[]): Promise<void>;
   /** A queued message, now (`steer`: into the turn under way). */
   sendQueued(id: string, queuedId: string, delivery?: Delivery): Promise<void>;
   /** Takes a queued message back. */
@@ -54,16 +55,16 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
         try { dispatch(key, { type: "history", request: ticket, epoch, history: await api.history(gw, sessionKey), now: Date.now() }); }
         catch (e) { dispatch(key, { type: "loadError", request: ticket, epoch, error: errorMessage(e) }); }
       },
-      async send(key, text, attachments, cwd, worktree, delivery) {
+      async send(key, text, attachments, cwd, worktree, delivery, to) {
         const id = crypto.randomUUID();
         const message: ChatMessage = { role: "user", content: [
           ...(text ? [{ type: "text" as const, text }] : []),
           ...attachments.filter((a) => a.type === "image").map((a) => ({ type: "image" as const, url: a.previewUrl, mimeType: a.mimeType })),
-        ], timestamp: Date.now(), __openclaw: { clientSendId: id } };
+        ], timestamp: Date.now(), __openclaw: { clientSendId: id }, ...(to?.length ? { room: { to } } : {}) };
         dispatch(key, { type: "send", pending: { idempotencyKey: id, message, status: "sending" } });
         const [gw, sessionKey] = splitThreadId(key);
         try {
-          const receipt = await api.send(gw, sessionKey, text, attachments, cwd, id, worktree, delivery);
+          const receipt = await api.send(gw, sessionKey, text, attachments, cwd, id, worktree, delivery, to);
           dispatch(key, { type: "receipt", id, receipt });
         } catch (e) {
           const code = e && typeof e === "object" && "code" in e ? String(e.code) : "";

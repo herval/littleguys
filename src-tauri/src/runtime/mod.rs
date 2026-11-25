@@ -43,6 +43,8 @@
 //!   `mcp.servers.list {agentId?}` → `{servers:[{name, transport, command?, url?, enabled?, status?, tools?}]}`
 //!   (if `plugins`; never env values or secrets)
 //!
+//! Rooms (rooms/mod.rs) are a runtime too, with a few calls and one event of their own.
+//!
 //! Session keys always look like OpenClaw's: `agent:<agentId>:main` (the guy's
 //! main chat), `agent:<agentId>:dashboard:<id>` (threads), `agent:<agentId>:cron:<job>:run:<id>`
 //! (routine runs), `agent:<agentId>:<channel>:<id>` (messaging-channel threads).
@@ -67,6 +69,7 @@ pub mod acp;
 pub mod claudecode;
 pub mod codex;
 pub mod hermes;
+pub mod rooms;
 pub mod scheduler;
 mod delivery;
 pub(crate) mod events;
@@ -95,6 +98,8 @@ pub enum RuntimeKind {
     Claudecode,
     /// Every Codex session on this machine (`codex`).
     Codex,
+    /// littleguys' own: chats with several guys in them (`rooms`).
+    Rooms,
 }
 
 /// What a runtime can do; the UI hides everything else.
@@ -165,6 +170,30 @@ impl Capabilities {
         }
     }
 
+    /// A room is only a chat: what its members can do, they do in their own threads.
+    pub fn rooms() -> Self {
+        Self {
+            manage_guys: false,
+            routines: false,
+            routines_local: false,
+            approvals: false,
+            thread_actions: false,
+            new_threads: false,
+            attachments: false,
+            models: false,
+            files: false,
+            edit_files: false,
+            skills: false,
+            commands: false,
+            tools: false,
+            plugins: false,
+            browser: false,
+            past_sessions: false,
+            code: false,
+            steer: false,
+        }
+    }
+
     /// OpenClaw's real abilities, from the hello-ok `features.methods` list
     /// (all of them when an older gateway doesn't send one) and granted scopes.
     pub fn openclaw_from_hello(hello: &Value, scopes: &[String]) -> Self {
@@ -199,6 +228,7 @@ pub enum Runtime {
     Acp(acp::AcpClient),
     ClaudeCode(claudecode::ClaudeCodeClient),
     Codex(codex::CodexClient),
+    Rooms(rooms::RoomsClient),
 }
 
 macro_rules! each {
@@ -209,6 +239,7 @@ macro_rules! each {
             Runtime::Acp($c) => $e,
             Runtime::ClaudeCode($c) => $e,
             Runtime::Codex($c) => $e,
+            Runtime::Rooms($c) => $e,
         }
     };
 }
@@ -282,7 +313,7 @@ impl Runtime {
     /// machine, and for OpenClaw, which serves its own (see media.rs).
     pub async fn local_folder(&self, session_key: Option<&str>, agent_id: Option<&str>) -> Option<PathBuf> {
         match self {
-            Runtime::OpenClaw(_) => None,
+            Runtime::OpenClaw(_) | Runtime::Rooms(_) => None,
             Runtime::ClaudeCode(c) => Some(c.thread_folder(session_key)),
             Runtime::Codex(c) => Some(c.thread_folder(session_key)),
             Runtime::Acp(c) => c.thread_folder(session_key),

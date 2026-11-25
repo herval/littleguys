@@ -1,12 +1,14 @@
 import { ArrowUp, Clock3, Paperclip, Pencil, Square, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { findCommand, loadCommands, matchSlash } from "../lib/commands";
 import type { Delivery } from "../lib/gateway";
 import { errorMessage } from "../lib/ipc";
 import { isModKey, shortcut } from "../lib/platform";
 import type { Attachment, CommandEntry, QueuedMessage } from "../lib/types";
 import { capsOf, gatewayOf } from "../lib/guys";
+import { mentionAt, mentioned, type Seat } from "../lib/rooms";
 import { useApp } from "../stores/app";
+import { MentionMenu, mentionOptions, ToChip } from "./Room";
 import { SlashMenu } from "./SlashMenu";
 
 const DEFAULT_MAX_IMAGE = 6 * 1024 * 1024;
@@ -25,6 +27,7 @@ export function Composer({
   onUnqueue,
   onStop,
   draftKey,
+  room,
 }: {
   gatewayId: string;
   agentId: string;
@@ -35,12 +38,17 @@ export function Composer({
   running: boolean;
   /** Written while the guy worked, waiting for its turn to end. */
   queued: QueuedMessage[];
-  /** `delivery`: only while the guy works (`queue` for after its turn, `steer` for now). */
-  onSend: (text: string, attachments: Attachment[], delivery?: Delivery) => Promise<void>;
+  /** `delivery`: only while the guy works (`queue` for after its turn, `steer` for now). `to`: in a room, who it's for. */
+  onSend: (text: string, attachments: Attachment[], delivery?: Delivery, to?: string[]) => Promise<void>;
   onSendQueued: (id: string, delivery?: Delivery) => void;
   onUnqueue: (id: string) => void;
   onStop: () => void;
   draftKey: string;
+  /**
+   * In a room: its members, and who a message that names nobody goes to. A message there
+   * never waits for a turn to end: it's for the room, and the room takes it from there.
+   */
+  room?: { seats: Seat[]; to: string };
 }) {
   const [text, setText] = useState(() => sessionStorage.getItem(`draft:${draftKey}`) ?? "");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -56,6 +64,34 @@ export function Composer({
   const [active, setActive] = useState(0);
   const [menuOff, setMenuOff] = useState(false);
   const typingCommand = hasCommands && text.startsWith("/");
+  // In a room: who you picked instead of the usual guy (until it's sent), and the `@` being typed.
+  const [picked, setPicked] = useState<string[] | null>(null);
+  const [caret, setCaret] = useState(0);
+  const [mentionOff, setMentionOff] = useState(false);
+  const named = useMemo(() => (room ? mentioned(text, room.seats) : []), [room, text]);
+  const to = room ? (named.length ? named : (picked ?? [room.to])) : undefined;
+  const typingMention = room && !mentionOff ? mentionAt(text, caret) : null;
+  const mentions = useMemo(() => (typingMention && room ? mentionOptions(room.seats, typingMention.query) : []), [typingMention?.query, room]);
+  const mentionKey = typingMention ? `${typingMention.start}:${typingMention.query}` : "";
+  useEffect(() => setActive(0), [mentionKey]);
+  useEffect(() => setPicked(null), [draftKey]);
+  const pickMention = (i: number) => {
+    const option = mentions[i];
+    if (!option || !typingMention) return;
+    const filled = `${text.slice(0, typingMention.start)}@${option.handle} `;
+    // The caret goes right after it, before the next key can land (see the layout effect below).
+    caretAfterPick.current = filled.length;
+    setText(filled + text.slice(caret));
+    setCaret(filled.length);
+  };
+  const caretAfterPick = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const at = caretAfterPick.current;
+    if (at === null) return;
+    caretAfterPick.current = null;
+    taRef.current?.focus();
+    taRef.current?.setSelectionRange(at, at);
+  }, [text]);
 
   // Fetched the first time a "/" is typed in this thread.
   useEffect(() => {
@@ -173,12 +209,13 @@ export function Composer({
     if (!message && attachments.length === 0) return;
     const sending = attachments;
     const command = hasCommands && message.startsWith("/");
-    const delivery: Delivery | undefined = !running || command ? undefined : now && canSteer ? "steer" : "queue";
+    const delivery: Delivery | undefined = !running || command || room ? undefined : now && canSteer ? "steer" : "queue";
     setText("");
     setAttachments([]);
     setError(null);
+    setPicked(null);
     try {
-      await onSend(message, sending, delivery);
+      await onSend(message, sending, delivery, to);
     } catch (e) {
       setText(message);
       setAttachments(sending);
@@ -265,6 +302,7 @@ export function Composer({
         }`}
       >
         {match && <SlashMenu match={match} active={active} onHover={setActive} onPick={(i) => pick(i, true)} />}
+        {mentions.length > 0 && <MentionMenu options={mentions} active={Math.min(active, mentions.length - 1)} onHover={setActive} onPick={pickMention} />}
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {attachments.map((a, i) => (
@@ -298,6 +336,7 @@ export function Composer({
           >
             <Paperclip size={16} />
           </button>
+          {room && to && <ToChip seats={room.seats} to={to} named={named.length > 0} onPick={setPicked} />}
           <input
             ref={fileRef}
             type="file"
@@ -315,8 +354,11 @@ export function Composer({
             placeholder={placeholder}
             onChange={(e) => {
               setText(e.target.value);
+              setCaret(e.target.selectionStart);
+              setMentionOff(false);
               if (!e.target.value.startsWith("/") || e.target.value === "/") setMenuOff(false);
             }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onPaste={(e) => {
               const files = Array.from(e.clipboardData.files);
               if (files.length) {
@@ -325,10 +367,27 @@ export function Composer({
               }
             }}
             role="combobox"
-            aria-expanded={options > 0}
-            aria-controls={options > 0 ? "slash-menu" : undefined}
-            aria-activedescendant={options > 0 ? `slash-${active}` : undefined}
+            aria-expanded={options > 0 || mentions.length > 0}
+            aria-controls={mentions.length > 0 ? "mention-menu" : options > 0 ? "slash-menu" : undefined}
+            aria-activedescendant={mentions.length > 0 ? `mention-${Math.min(active, mentions.length - 1)}` : options > 0 ? `slash-${active}` : undefined}
             onKeyDown={(e) => {
+              if (mentions.length > 0 && !e.nativeEvent.isComposing) {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setMentionOff(true);
+                  return;
+                }
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setActive((a) => (Math.min(a, mentions.length - 1) + (e.key === "ArrowDown" ? 1 : mentions.length - 1)) % mentions.length);
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  e.preventDefault();
+                  pickMention(Math.min(active, mentions.length - 1));
+                  return;
+                }
+              }
               if (match && e.key === "Escape") {
                 e.preventDefault();
                 setMenuOff(true);
@@ -365,7 +424,7 @@ export function Composer({
             <button
               onClick={() => submit()}
               disabled={!text.trim() && attachments.length === 0}
-              title={running ? `Send when ${name} is done (↵)${canSteer ? `, or now (${shortcut("↵")})` : ""}` : "Send (↵)"}
+              title={running && !room ? `Send when ${name} is done (↵)${canSteer ? `, or now (${shortcut("↵")})` : ""}` : "Send (↵)"}
               className="mb-[calc(18px_-_1rem)] flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)] text-white shadow-sm transition hover:bg-[var(--color-accent-strong)] active:scale-95 disabled:bg-[var(--color-chip)] disabled:text-[var(--color-ink-3)] disabled:shadow-none"
             >
               <ArrowUp size={17} strokeWidth={2.4} />
@@ -373,7 +432,7 @@ export function Composer({
           )}
         </div>
       </div>
-      {running && (text.trim() !== "" || attachments.length > 0) && !(hasCommands && text.startsWith("/")) && (
+      {running && !room && (text.trim() !== "" || attachments.length > 0) && !(hasCommands && text.startsWith("/")) && (
         <p className="px-2 pt-1 text-right text-[11px] text-[var(--color-ink-3)]">
           ↵ sends when {name} is done{canSteer && <> · {shortcut("↵")} sends now</>}
         </p>

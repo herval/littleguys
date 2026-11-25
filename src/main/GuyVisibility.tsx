@@ -1,7 +1,7 @@
 import { Eye, EyeOff, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { TRAY } from "../lib/platform";
-import { allGuys, guyName, isMultiGateway } from "../lib/guys";
+import { allGuys, guyName, isMultiGateway, isRoom } from "../lib/guys";
 import { core, errorMessage } from "../lib/ipc";
 import type { Guy } from "../lib/types";
 import { useApp } from "../stores/app";
@@ -11,7 +11,8 @@ import { Button, Switch } from "../ui/kit";
 /** Settings section: choose which little guys show up in littleguys, and whose steps their threads show. */
 export function GuyVisibility() {
   const roster = useApp((s) => s.roster);
-  const guys = useMemo(() => allGuys(roster, { includeHidden: true }), [roster]);
+  // Rooms aren't guys to hide: deleting one is in its own menu.
+  const guys = useMemo(() => allGuys(roster, { includeHidden: true }).filter((g) => !isRoom(g)), [roster]);
   const hidden = useMemo(() => new Set(roster.hidden ?? []), [roster.hidden]);
   const steps = useMemo(() => new Set(roster.steps ?? []), [roster.steps]);
   const multi = isMultiGateway(roster);

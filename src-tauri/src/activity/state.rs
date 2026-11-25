@@ -290,7 +290,9 @@ impl State {
     }
     pub fn status(&mut self, status: &ConnStatus, generation: u64) -> Option<bool> {
         let others_connected =
-            self.gateways.iter().any(|g| g.roster.id != status.gateway_id && g.roster.enabled && g.roster.status.phase == Phase::Connected);
+            self.gateways.iter().any(|g| {
+                g.roster.id != status.gateway_id && g.roster.enabled && g.roster.status.phase == Phase::Connected && !super::rooms::is_rooms(&g.roster)
+            });
         let g = self.gateway(&status.gateway_id).filter(|g| g.generation == generation)?;
         if status.phase != Phase::Connected && g.roster.status.phase == Phase::Connected {
             g.disconnect();

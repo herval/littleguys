@@ -8,6 +8,7 @@ mod bridge;
 mod notifications;
 mod preferences;
 mod presentation;
+mod rooms;
 mod state;
 mod turns;
 pub(crate) use avatars::is_face;
@@ -84,6 +85,8 @@ pub struct Activity {
     publish_pending: AtomicBool,
     /// Statuses, events and bot-list changes for paired phones (the bridge).
     bridge: tokio::sync::broadcast::Sender<crate::bridge::HostEvent>,
+    /// The rooms runtime (activity/rooms.rs): it hears every bot's events, for its members' turns.
+    rooms: std::sync::OnceLock<crate::runtime::rooms::RoomsClient>,
 }
 
 const SESSION_LIST_LIMIT: u64 = 400;
@@ -114,6 +117,7 @@ impl Activity {
             state: Mutex::new(State::default()),
             publish_pending: AtomicBool::new(false),
             bridge: tokio::sync::broadcast::channel(4096).0,
+            rooms: std::sync::OnceLock::new(),
         })
     }
 
@@ -267,8 +271,9 @@ impl Activity {
         self.state.lock().unwrap().focused = gateway.zip(key);
     }
 
+    /// How many bots are on (rooms aren't one).
     fn gateway_count(&self) -> usize {
-        self.state.lock().unwrap().gateways.iter().filter(|g| g.roster.enabled).count()
+        self.state.lock().unwrap().gateways.iter().filter(|g| g.roster.enabled && !rooms::is_rooms(&g.roster)).count()
     }
 
     // ---- gateway hooks -----------------------------------------------------------
@@ -318,6 +323,7 @@ impl Activity {
             (g.connection(), g.event(name, payload))
         };
         self.broadcast_event(gateway, name, payload);
+        self.tell_rooms(gateway, name, payload);
         for effect in effects {
             if self.state.lock().unwrap().current(gateway, connection).is_none() {
                 return;
@@ -326,6 +332,8 @@ impl Activity {
                 Effect::Publish => self.publish(),
                 Effect::PublishSoon => self.publish_soon(),
                 Effect::Refresh => self.schedule_refresh(gateway),
+                // A guy's turn for a room: the room says what came of it.
+                Effect::Reply(key) if self.seat_room(gateway, &key).is_some() => {}
                 Effect::Reply(key) => self.notify_reply_later(gateway.to_string(), key, connection),
                 Effect::Approval(payload) => self.notify_approval(gateway, &payload),
                 Effect::ApprovalResolved(id) => self.push_to_phones(NoticeKind::ApprovalResolved, "", "", gateway, None, Some(id)),

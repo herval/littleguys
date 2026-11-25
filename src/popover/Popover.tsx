@@ -19,6 +19,8 @@ import {
   statusLabel,
   threadKind,
   threadTitle,
+  botGateways,
+  liveBots,
 } from "../lib/guys";
 import { core, errorMessage, listen } from "../lib/ipc";
 import { limitLine, limitProvider } from "../lib/limits";
@@ -72,8 +74,8 @@ export function Popover() {
   const guys = useMemo(() => sortGuys(roster, order), [roster, order]);
   const threads = useMemo(() => (shows === "threads" ? activeThreads(roster) : []), [roster, shows]);
   const multi = isMultiGateway(roster);
-  const live = liveGateways(roster);
-  const enabled = roster.gateways.filter((g) => g.enabled);
+  const live = liveBots(roster);
+  const enabled = botGateways(roster).filter((g) => g.enabled);
   const troubled = enabled.filter((g) => g.status.phase !== "connected");
   const providerOf = (guy: Guy) => limitProvider(gatewayOf(roster, guy.gatewayId));
   const limits = useLimits([...new Set(guys.map(providerOf))].filter(Boolean).sort().join());
@@ -159,7 +161,7 @@ export function Popover() {
                 <AllQuiet />
               ))
             : multi
-            ? live.map((g) => {
+            ? liveGateways(roster).map((g) => {
                 const theirs = guys.filter((guy) => guy.gatewayId === g.id);
                 if (!theirs.length) return null;
                 return (
@@ -185,7 +187,7 @@ export function Popover() {
 }
 
 function Header({ roster }: { roster: Roster }) {
-  const enabled = roster.gateways.filter((g) => g.enabled);
+  const enabled = botGateways(roster).filter((g) => g.enabled);
   const live = enabled.filter((g) => g.status.phase === "connected");
   const connecting = enabled.some((g) => g.status.phase === "connecting" || g.status.phase === "starting");
   const dot = live.length
