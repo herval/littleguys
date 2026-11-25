@@ -102,6 +102,16 @@ const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const CLI_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a session `claude --bg` started has to show up in `claude agents`.
 const LAUNCH_FIND: Duration = Duration::from_secs(30);
+/// How long a background session `claude stop` was sent to gets to stop before littleguys
+/// resumes it anyway.
+const STOP_WAIT: Duration = Duration::from_secs(20);
+/// Claude Code lets go of a stopped session a moment after `claude agents` stops listing its
+/// process, and resuming it before then starts a copy (seen 2026-11-24: one resume 0.7 s
+/// before the daemon settled the original, one 64 ms after).
+const STOP_SETTLE: Duration = Duration::from_millis(1500);
+/// Resumes Claude Code turns away because the session is still shutting down, retried this
+/// many times, a second apart.
+const RESUME_RETRIES: u32 = 5;
 /// A routine's turn gets this long before littleguys stops waiting for it.
 const ROUTINE_MAX: Duration = Duration::from_secs(4 * 3600);
 /// Sessions littleguys started are remembered (by the key it gave them) this long.
@@ -236,7 +246,9 @@ impl State {
         if self.drafts.contains_key(key) {
             return Some(Thread::Draft);
         }
-        if let Some((sid, _)) = self.started.iter().find(|(_, t)| t.key == key) {
+        // A copy that took a thread over (see `adopt_copy`) shares its key with the original,
+        // which is hidden: the copy is the thread.
+        if let Some((sid, _)) = self.started.iter().filter(|(_, t)| t.key == key).min_by_key(|(_, t)| t.hidden) {
             return Some(Thread::Session(sid.clone()));
         }
         match keys::split(key) {
@@ -2590,14 +2602,20 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
     let mut emits: Emits = vec![delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
+        let st = &mut *st;
         if let Some(s) = st.sessions.get_mut(&sid) {
             s.delivering = false;
             match &result {
-                Ok(()) => {
+                Ok(None) => {
                     s.running = true;
                     // Its hooks take a moment to report; don't let `claude agents` say otherwise meanwhile.
                     s.last_hook = Some(Instant::now());
                     s.set_busy(true, &mut emits);
+                }
+                Ok(Some(copy)) => {
+                    // The copy is at work on it. If it reports before `adopt_copy` finds it, it
+                    // shows under this thread's key from the start.
+                    st.pending.insert(copy.clone(), key.clone());
                 }
                 Err(e) => emits.push((
                     "chat",
@@ -2607,39 +2625,145 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
         }
     }
     flush(&inner, emits);
+    if let Ok(Some(copy)) = &result {
+        adopt_copy(&inner, &sid, copy).await;
+    }
     inner.poke.store(true, Ordering::SeqCst);
 }
 
+/// Claude Code continued `sid` in a copy (short id `short`) instead of resuming it, as it does
+/// while the original is still running. The copy has the whole conversation and your message,
+/// so it becomes the thread, under the same key, and the original is hidden: you see one thread.
+async fn adopt_copy(inner: &Arc<Inner>, sid: &str, short: &str) {
+    let Some(claude) = inner.claude.lock().unwrap().clone() else { return };
+    let found = find_session(inner, &claude, short).await;
+    let mut emits: Emits = vec![refresh()];
+    {
+        let mut st = inner.st.lock().unwrap();
+        let st = &mut *st;
+        st.pending.remove(short);
+        let Some(copy) = found.filter(|c| c != sid) else {
+            log::warn!("[claude] {sid} went on in a copy ({short}) that never showed up in `claude agents`");
+            return;
+        };
+        let Some(original) = st.sessions.get_mut(sid) else { return };
+        let key = original.key();
+        original.hidden = true;
+        original.unsaved = true;
+        let (kept, flags, cwd) = (original.kept, original.flags.clone(), original.cwd.clone());
+        let (outbox, steer) = (std::mem::take(&mut original.outbox), std::mem::take(&mut original.steer));
+        let thread = Started { key: key.clone(), at: now_ms(), cwd: (!cwd.is_empty()).then(|| cwd.clone()), keep: kept, flags: flags.clone(), hidden: false };
+        if let Err(e) = remember(&inner.started_path, &mut st.started, &copy, thread) {
+            log::warn!("[claude] couldn't save {copy} as the thread {key}: {}", e.message);
+        }
+        let s = st.session(&copy);
+        s.kept = kept;
+        s.flags = flags;
+        s.hidden = false;
+        s.background = true;
+        s.short_id = Some(short.to_string());
+        s.running = true;
+        if s.cwd.is_empty() {
+            s.cwd = cwd;
+        }
+        // What you sent while it was being resumed goes to the copy.
+        s.outbox.extend(outbox);
+        s.steer.extend(steer);
+        let before = s.key();
+        if before != key {
+            // It reported under a key of its own first: its turn moves over to the thread's.
+            if s.busy {
+                emits.push(("chat", json!({ "sessionKey": before, "runId": s.run_id(), "state": "aborted" })));
+                emits.push(("sessions.changed", json!({ "sessionKey": before, "agentId": AGENT_ID, "runId": s.run_id(), "phase": "end" })));
+            }
+            s.key = Some(key.clone());
+            if s.busy {
+                emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": s.run_id(), "phase": "start" })));
+                emits.push(("chat", json!({ "sessionKey": key, "runId": s.run_id(), "state": "status", "phase": "thinking" })));
+            }
+        }
+        if !s.hooked {
+            // Its hooks take a moment to report; don't let `claude agents` say otherwise meanwhile.
+            s.last_hook = Some(Instant::now());
+            s.set_busy(true, &mut emits);
+        }
+    }
+    if let Err(e) = save_flags(inner) {
+        log::warn!("[claude] couldn't save that {sid} was replaced: {}", e.message);
+    }
+    flush(inner, emits);
+}
+
 /// `claude "<text>" --resume <id> --bg`, after stopping it if it's up in the background
-/// (resuming a running session starts a copy).
-async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, running_bg: bool, cwd: &str) -> Result<(), String> {
+/// (resuming a running session starts a copy). The copy's short id, if one started anyway.
+async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, running_bg: bool, cwd: &str) -> Result<Option<String>, String> {
     let claude = inner.claude.lock().unwrap().clone().ok_or("Claude Code isn't installed")?;
     if running_bg {
         if let Some(short) = short_id {
             run_cli(&claude, &["stop", short], CLI_TIMEOUT).await?;
-            for _ in 0..30 {
-                let up = list_agents(&claude).await.is_some_and(|all| all.iter().any(|l| l.session_id == sid && l.pid.is_some()));
-                if !up {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
+            wait_stopped(&claude, sid).await;
         }
     }
     // A prompt starting with '-' would read as a flag.
     let prompt = if text.starts_with('-') { format!(" {text}") } else { text.to_string() };
-    let mut cmd = cli::command(&claude);
-    // No other flags: a background session keeps the options it started with, and any
-    // passed here would start a copy of it instead.
-    cmd.arg(&prompt).args(["--resume", sid, "--bg"]);
-    if Path::new(cwd).is_dir() {
-        cmd.current_dir(cwd);
-    }
-    let out = output(cmd, Duration::from_secs(60)).await?;
-    if out.contains("started a copy") {
+    let mut tries = 0;
+    let out = loop {
+        let mut cmd = cli::command(&claude);
+        // No other flags: a background session keeps the options it started with, and any
+        // passed here would start a copy of it instead.
+        cmd.arg(&prompt).args(["--resume", sid, "--bg"]);
+        if Path::new(cwd).is_dir() {
+            cmd.current_dir(cwd);
+        }
+        match output(cmd, Duration::from_secs(60)).await {
+            // It's still letting go of the session: Claude Code says to try again in a moment.
+            Err(e) if e.contains("still shutting down") && tries < RESUME_RETRIES => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            done => break done?,
+        }
+    };
+    let copy = started_copy(&out, sid);
+    if copy.is_some() {
         log::warn!("[claude] resuming {sid} started a copy: {out}");
     }
-    Ok(())
+    Ok(copy)
+}
+
+/// Waits for a background session `claude stop` was sent to: until `claude agents` lists it
+/// without a process, then [`STOP_SETTLE`] more. A listing that fails says nothing either way.
+/// After [`STOP_WAIT`] it goes ahead regardless (a copy that starts then becomes the thread).
+async fn wait_stopped(claude: &Path, sid: &str) {
+    let deadline = Instant::now() + STOP_WAIT;
+    loop {
+        if list_agents(claude).await.is_some_and(|all| !all.iter().any(|l| l.session_id == sid && l.pid.is_some())) {
+            tokio::time::sleep(STOP_SETTLE).await;
+            return;
+        }
+        if Instant::now() >= deadline {
+            log::warn!("[claude] {sid} was still running {}s after `claude stop`", STOP_WAIT.as_secs());
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// The short id of the copy resuming `sid` started instead, when Claude Code made one: the id
+/// its note names (`… so this started a copy as 1a2b3c4d.`, `started a copy of that
+/// conversation as …`), or the session `claude --bg` says it started, when that isn't `sid`.
+/// A full session id counts by its short id (its first part).
+fn started_copy(stdout: &str, sid: &str) -> Option<String> {
+    let noted = stdout.lines().find_map(|line| {
+        let (_, rest) = line[line.find("started a copy")?..].split_once(" as ")?;
+        let id: String = rest.trim_start_matches(['`', '"', '\'']).chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        id.split('-').next().map(str::to_string)
+    });
+    let id = match noted.filter(|id| !id.is_empty()) {
+        Some(id) => id,
+        None => backgrounded_id(stdout)?,
+    };
+    (!sid.starts_with(&id)).then_some(id)
 }
 
 // ---- new sessions -------------------------------------------------------------------------
@@ -4159,6 +4283,21 @@ mod tests {
     }
 
     #[test]
+    fn a_resume_that_started_a_copy_says_which() {
+        let sid = "aaaa1111-0000-4000-8000-000000000001";
+        assert_eq!(started_copy("backgrounded · aaaa1111 · shop\n", sid), None, "resumed in place");
+        assert_eq!(started_copy("", sid), None);
+        let out = "note: session aaaa1111 is already running in the background, so this started a copy as c0ffee12. `claude attach aaaa1111` opens the original.\nbackgrounded · c0ffee12 · shop\n";
+        assert_eq!(started_copy(out, sid).as_deref(), Some("c0ffee12"));
+        // The note alone, naming the copy by its full session id.
+        let out = "note: started a copy of that conversation as `c0ffee12-0000-4000-8000-000000000002`. To continue a session under its own id, pass its full session id.\n";
+        assert_eq!(started_copy(out, sid).as_deref(), Some("c0ffee12"));
+        // Only what `claude --bg` printed, and the hint naming the original.
+        assert_eq!(started_copy("backgrounded · c0ffee12 · shop\n  claude attach c0ffee12\n", sid).as_deref(), Some("c0ffee12"));
+        assert_eq!(started_copy("  claude attach aaaa1111    open the original\n", sid), None);
+    }
+
+    #[test]
     fn threads_resolve_to_drafts_and_the_sessions_littleguys_started() {
         let mut st = State::default();
         let draft = keys::thread(AGENT_ID, "d-1");
@@ -5545,5 +5684,136 @@ mod tests {
         };
         assert!(launched.starts_with("add a cart --bg"), "{launched}");
         assert!(launched.ends_with("--model opus --effort high"), "{launched}");
+    }
+
+    #[cfg(unix)]
+    const IDLE_SID: &str = "aaaa1111-0000-4000-8000-000000000001";
+    #[cfg(unix)]
+    const COPY_SID: &str = "c0ffee12-0000-4000-8000-000000000002";
+
+    /// `claude` with one background session, `aaaa1111`, that logs each call. `claude stop`
+    /// leaves its process listed `stopping` more times; resuming it while it's listed, or
+    /// whenever `<dir>/always-copy` exists, starts a copy (`c0ffee12`) the way Claude Code does.
+    /// A `<dir>/fail` file makes the next `claude agents` fail.
+    #[cfg(unix)]
+    fn fake_stopping_claude(dir: &Path, stopping: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = r#"#!/bin/sh
+D='@DIR@'
+echo "$*" >> "$D/calls.log"
+up=$(cat "$D/up" 2>/dev/null || echo 0)
+case "$1" in
+  stop) echo @STOPPING@ > "$D/up" ;;
+  agents)
+    if [ -f "$D/fail" ]; then rm "$D/fail"; exit 1; fi
+    if [ "$up" -gt 0 ]; then echo $((up - 1)) > "$D/up"; pid=4242; else pid=null; fi
+    copy=''
+    if [ -f "$D/copied" ]; then copy=',{"pid":4343,"id":"c0ffee12","kind":"background","sessionId":"@COPY@","cwd":"/shop","status":"busy","state":"working"}'; fi
+    echo "[{\"pid\":$pid,\"id\":\"aaaa1111\",\"kind\":\"background\",\"sessionId\":\"@IDLE@\",\"cwd\":\"/shop\",\"status\":\"idle\",\"state\":\"done\"}$copy]" ;;
+  *)
+    if [ "$up" -gt 0 ] || [ -f "$D/always-copy" ]; then
+      touch "$D/copied"
+      echo 'note: session aaaa1111 is already running in the background, so this started a copy as c0ffee12. `claude attach aaaa1111` opens the original.'
+      echo 'backgrounded · c0ffee12 · shop'
+    else
+      echo 'backgrounded · aaaa1111 · shop'
+    fi ;;
+esac
+"#
+        .replace("@DIR@", &dir.display().to_string())
+        .replace("@STOPPING@", &stopping.to_string())
+        .replace("@IDLE@", IDLE_SID)
+        .replace("@COPY@", COPY_SID);
+        let claude = dir.join("claude");
+        write(&claude, &script);
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    /// A client following `aaaa1111`, up and idle in the background, as a pinned thread you started.
+    #[cfg(unix)]
+    fn idle_background_thread(dir: &Path, claude: PathBuf) -> (ClaudeCodeClient, String) {
+        let hooks = Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.to_path_buf(), hooks);
+        let key = keys::thread(AGENT_ID, "mine");
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            let flags = ThreadFlags { pinned: true, ..Default::default() };
+            st.started.insert(IDLE_SID.into(), Started { key: key.clone(), at: now_ms(), keep: true, flags, ..Default::default() });
+            let s = st.session(IDLE_SID);
+            s.running = true;
+            s.background = true;
+            s.short_id = Some("aaaa1111".into());
+            s.cwd = dir.display().to_string();
+        }
+        *client.inner.claude.lock().unwrap() = Some(claude);
+        (client, key)
+    }
+
+    #[cfg(unix)]
+    async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_message_to_an_idle_background_session_waits_for_it_to_stop() {
+        let dir = temp_dir("stop");
+        // The first listing after `claude stop` fails, then it's listed stopping three more times.
+        write(&dir.join("fail"), "");
+        let (client, key) = idle_background_thread(&dir, fake_stopping_claude(&dir, 3));
+        client.call("chat.send", json!({ "sessionKey": key, "message": "add a cart" })).await.unwrap();
+        let calls = || std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default();
+        wait_for("never resumed", || calls().contains("--resume")).await;
+
+        let calls = calls();
+        assert!(!dir.join("copied").exists(), "resumed while it was still up:\n{calls}");
+        let order: Vec<&str> = calls.lines().map(|l| l.split_whitespace().next().unwrap_or_default()).collect();
+        assert_eq!(order, ["stop", "agents", "agents", "agents", "agents", "agents", "add"], "{calls}");
+        assert!(calls.contains(&format!("add a cart --resume {IDLE_SID} --bg")), "{calls}");
+        wait_for("never marked busy", || client.inner.st.lock().unwrap().sessions[IDLE_SID].busy).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_copy_claude_code_starts_anyway_becomes_the_thread() {
+        let dir = temp_dir("copy");
+        write(&dir.join("always-copy"), "");
+        let (client, key) = idle_background_thread(&dir, fake_stopping_claude(&dir, 0));
+        client.call("chat.send", json!({ "sessionKey": key, "message": "add a cart", "idempotencyKey": "send-1" })).await.unwrap();
+        let resolves_to_copy = || matches!(client.inner.st.lock().unwrap().thread(&key), Some(Thread::Session(sid)) if sid == COPY_SID);
+        wait_for("the thread never became the copy", resolves_to_copy).await;
+
+        {
+            let st = client.inner.st.lock().unwrap();
+            assert!(st.sessions[IDLE_SID].hidden, "the original is hidden");
+            let copy = &st.sessions[COPY_SID];
+            assert_eq!(copy.key.as_deref(), Some(key.as_str()));
+            assert!(copy.kept && copy.flags.pinned, "the thread keeps what you set on it");
+            assert!(copy.busy, "at work on your message");
+            assert_eq!(copy.short_id.as_deref(), Some("c0ffee12"));
+            assert!(st.pending.is_empty());
+        }
+        let listed = client.call("sessions.list", json!({})).await.unwrap();
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.iter().filter(|r| r["key"] == key).count(), 1, "one thread: {listed}");
+        assert!(rows.iter().any(|r| r["key"] == key && r["sessionId"] == COPY_SID), "{listed}");
+        assert!(rows.iter().all(|r| r["sessionId"] != IDLE_SID), "{listed}");
+
+        // It's saved: after a restart the thread is still the copy.
+        let saved = load_started(&client.inner.started_path);
+        assert!(saved[IDLE_SID].hidden);
+        assert_eq!(saved[COPY_SID].key, key);
+        assert!(saved[COPY_SID].keep && !saved[COPY_SID].hidden);
+        let mut st = State { started: saved, ..Default::default() };
+        assert!(matches!(st.thread(&key), Some(Thread::Session(sid)) if sid == COPY_SID));
+        assert_eq!(st.session(COPY_SID).key.as_deref(), Some(key.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
