@@ -137,8 +137,8 @@ const claudeCode = gateway("claude-5f2a9c1e7b", "Claude Code", "This Mac", "conn
   agents: [{ id: "claude", name: "Claude Code", identity: { name: "Claude Code", avatarUrl: claudeFace }, workspace: "/Users/you/dev/shop-api" }] as never,
   sessions: [
     { key: ccKey("c1"), agentId: "claude", kind: "direct", derivedTitle: "Fix the flaky checkout test", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 20_000, lastMessagePreview: "Running the suite 20 times to catch the race…", hasActiveRun: true, status: "running" },
-    { key: ccKey("c2"), agentId: "claude", kind: "direct", derivedTitle: "Upgrade the Terraform providers", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 2 * min, lastMessagePreview: "The plan only touches the providers. Applying it next.", status: "done" },
-    { key: ccKey("c3"), agentId: "claude", kind: "direct", derivedTitle: "Add CSV export", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 40 * min, lastMessagePreview: "CSV export is in; 14 tests pass.", status: "done" },
+    { key: ccKey("c2"), agentId: "claude", kind: "direct", derivedTitle: "Upgrade the Terraform providers", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 2 * min, lastMessagePreview: "The plan only touches the providers. Applying it next.", status: "done", model: "claude-opus-5-5", effort: "high", modelChoice: "opus" },
+    { key: ccKey("c3"), agentId: "claude", kind: "direct", derivedTitle: "Add CSV export", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 40 * min, lastMessagePreview: "CSV export is in; 14 tests pass.", status: "done", model: "claude-sonnet-5-5", effort: "medium" },
     { key: ccKey("c4"), agentId: "claude", kind: "direct", derivedTitle: "Weekly dependency bump", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 5 * 60 * min, lastMessagePreview: "Bumped 9 packages; nothing broke.", status: "done" },
   ] as never,
   running: [ccKey("c1")],
@@ -159,7 +159,7 @@ claudeCode.status = {
   mode: "local",
   serverVersion: "2.1.296",
   hello: { approvals: true },
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, editFiles: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, editFiles: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: true, threadModels: true, switchModels: false },
 };
 
 const codex = gateway("acp-codex", "Codex", "npx -y @agentclientprotocol/codex-acp", "connected", {
@@ -185,8 +185,8 @@ const codexSessions = gateway("codex-8e1d4b7a20", "Codex", "This Mac", "connecte
   agents: [{ id: "codex", name: "Codex", identity: { name: "Codex", emoji: "🌀" }, workspace: "/Users/you/dev/shop-api" }] as never,
   sessions: [
     { key: cxKey("x1"), agentId: "codex", kind: "direct", derivedTitle: "Speed up the search index", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 30_000, lastMessagePreview: "Rebuilding the index with the new tokenizer…", hasActiveRun: true, status: "running" },
-    { key: cxKey("x2"), agentId: "codex", kind: "direct", derivedTitle: "Clean up the old build scripts", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 3 * min, lastMessagePreview: "Waiting for you in Codex", status: "done" },
-    { key: cxKey("x3"), agentId: "codex", kind: "direct", derivedTitle: "Write the changelog for 2.4", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 50 * min, lastMessagePreview: "Changelog's in; 6 entries.", status: "done" },
+    { key: cxKey("x2"), agentId: "codex", kind: "direct", derivedTitle: "Clean up the old build scripts", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 3 * min, lastMessagePreview: "Waiting for you in Codex", status: "done", model: "gpt-6.2-sol", effort: "high" },
+    { key: cxKey("x3"), agentId: "codex", kind: "direct", derivedTitle: "Write the changelog for 2.4", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 50 * min, lastMessagePreview: "Changelog's in; 6 entries.", status: "done", model: "gpt-6-luna", effort: "low", modelChoice: "gpt-6-luna", effortChoice: "low" },
   ] as never,
   running: [cxKey("x1")],
   approvals: [
@@ -205,7 +205,7 @@ codexSessions.status = {
   kind: "codex",
   mode: "local",
   serverVersion: "0.166.0",
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, editFiles: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true, steer: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, editFiles: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true, steer: true, threadModels: true, switchModels: true },
 };
 
 /** The face each bot gave a guy, from before a photo was picked for them. */
@@ -922,6 +922,27 @@ function searchMessages(gateway: string, p: Record<string, unknown>) {
   return { results: [...results, ...past].slice(0, Number(p.limit ?? 10)) };
 }
 
+// What `models.list` answers for Claude Code (its `--model` aliases) and Codex (its app server's list).
+const claudeModels = {
+  models: [
+    { id: "fable", name: "Fable", description: "The most capable, for the hardest work" },
+    { id: "opus", name: "Opus", description: "Complex, long tasks" },
+    { id: "sonnet", name: "Sonnet", description: "Everyday coding" },
+    { id: "haiku", name: "Haiku", description: "Quick, simple tasks" },
+  ],
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+  default: { model: "sonnet", effort: "high" },
+};
+const codexEfforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+const codexModels = {
+  models: [
+    { id: "gpt-6.2-sol", name: "GPT-6.2-Sol", description: "Frontier agentic coding", efforts: codexEfforts, defaultEffort: "low" },
+    { id: "gpt-6.2-astra", name: "GPT-6.2-Astra", description: "Deep reasoning for long tasks", efforts: codexEfforts, defaultEffort: "low" },
+    { id: "gpt-6-luna", name: "GPT-6-Luna", description: "Fast and cheap", efforts: codexEfforts.slice(0, 5), defaultEffort: "medium" },
+  ],
+  default: { model: "gpt-6.2-sol", effort: "medium" },
+};
+
 async function gwCall(gateway: string, method: string, p: Record<string, unknown>): Promise<unknown> {
   await new Promise((r) => setTimeout(r, 120));
   switch (method) {
@@ -988,7 +1009,12 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
       return { ok: true, key: `agent:${p.agentId}:dashboard:${crypto.randomUUID()}` };
     case "sessions.patch": {
       const g = roster.gateways.find((g) => g.id === gateway);
-      const flags = Object.fromEntries(Object.entries(p).filter(([k]) => ["label", "pinned", "archived", "unread"].includes(k)));
+      const flags: Record<string, unknown> = Object.fromEntries(Object.entries(p).filter(([k]) => ["label", "pinned", "archived", "unread"].includes(k)));
+      if ("model" in p || "effort" in p) {
+        if (!g?.status.capabilities.switchModels) throw { code: "UNSUPPORTED", message: "A Claude Code thread keeps the model it started on. Start a new thread to use another." };
+        if ("model" in p) flags.modelChoice = p.model ?? undefined;
+        if ("effort" in p) flags.effortChoice = p.effort ?? undefined;
+      }
       if (g) g.sessions = g.sessions.map((r) => (r.key === p.key ? { ...r, ...flags } : r));
       emit("lg:roster", { ...roster, gateways: [...roster.gateways] });
       return { ok: true, key: p.key };
@@ -1008,6 +1034,8 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
     case "cron.runs":
       return { entries: [{ ts: now - 9 * 60 * min, runAtMs: now - 9 * 60 * min, jobId: p.jobId, status: "ok", summary: "Sunny, 24°. 3 meetings today.", sessionKey: "agent:main:cron:job1:run:r1" }], total: 1 };
     case "models.list":
+      if (gateway === claudeCode.id) return claudeModels;
+      if (gateway === codexSessions.id) return codexModels;
       return { models: [{ id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" }, { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic" }, { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "openai" }] };
     case "agents.files.get": {
       const content = workspaceFiles[String(p.name)] ?? "# SOUL.md\n";

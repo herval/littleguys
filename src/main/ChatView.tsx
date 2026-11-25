@@ -6,7 +6,7 @@ import { channelName, followsSessions, gatewayOf, guyName, hasMainChat, isOnThis
 import { core } from "../lib/ipc";
 import { doingNow, presentTense, rowActivity, toolKind } from "../lib/toolPhrases";
 import { firstUnread } from "../lib/transcript";
-import type { Guy, SessionRow } from "../lib/types";
+import type { Guy, RowModel, SessionRow } from "../lib/types";
 import { useChangesOpen, useCoderPrefs, usePullRequest, useRepoStatus } from "../lib/code";
 import { useApp } from "../stores/app";
 import { useArchive, useArchivedRow } from "../stores/archive";
@@ -17,6 +17,7 @@ import { Approvals } from "./Approvals";
 import { CoderOffer, NextSteps, RepoButtons, RepoPlace, TerminalButton } from "./ChangesPanel";
 import { Composer } from "./Composer";
 import { FolderPicker, threadFolder, tildify, useCanWorktree, usePendingFolder } from "./FolderPicker";
+import { ModelChip, usePendingPick } from "./ModelChip";
 import { phaseLabel as livePhaseLabel, runningTool, toItems, Transcript } from "./Transcript";
 
 /** How far down the pane an unread thread opens its "New" divider: under the day chip, with a bit of what you'd read. */
@@ -129,6 +130,8 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
   const browsing = Boolean(activeTool && toolKind(activeTool.name) === "browse");
   // ACP and Claude Code threads can start in any folder on this Mac; it's fixed once they have messages.
   const [pendingFolder, setPendingFolder] = usePendingFolder(tid);
+  // Claude Code and Codex threads start on the model and effort you pick in the composer.
+  const [pendingPick, setPendingPick] = usePendingPick(tid);
   // Coder mode: start it in a new worktree of that folder.
   const [worktree, setWorktree] = useState(false);
   const canWorktree = useCanWorktree(guy, pendingFolder ?? threadFolder(guy, row));
@@ -285,11 +288,14 @@ export function ChatView({ guy, sessionKey }: { guy: Guy; sessionKey: string }) 
             if (row?.archived) await useArchive.getState().unarchive(guy, row);
             setFollow(true);
             const cwd = canPickFolder && unstarted && pendingFolder !== folder ? (pendingFolder ?? undefined) : undefined;
-            await send(tid, text, attachments, cwd, canPickFolder && unstarted && worktree && canWorktree, delivery);
+            const pick = unstarted && (pendingPick.model || pendingPick.effort) ? pendingPick : undefined;
+            await send(tid, text, attachments, cwd, canPickFolder && unstarted && worktree && canWorktree, delivery, pick);
             setPendingFolder(null);
+            setPendingPick({});
             setWorktree(false);
           }}
           onStop={() => abort(tid)}
+          beforeSend={<ModelChip guy={guy} sessionKey={sessionKey} row={row as RowModel | undefined} unstarted={unstarted} pick={pendingPick} onPick={setPendingPick} />}
         />
       </div>
     </div>

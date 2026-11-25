@@ -58,7 +58,7 @@ use crate::openclaw::runtime as cli;
 use crate::runtime::acp;
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
 use crate::runtime::search;
-use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
+use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, ModelChoice, RuntimeKind, ThreadFlags};
 
 const AGENT_ID: &str = "claude";
 pub const PLUGIN_ID: &str = "littleguys@littleguys";
@@ -151,6 +151,10 @@ fn capabilities(config: &ClaudeCodeConfig) -> Capabilities {
         // At the next tool call (PostToolUse), in sessions with the plugin's hooks. Not on
         // Windows, where that hook would start PowerShell after every tool call.
         steer: cfg!(unix),
+        // Started threads keep the options they started with until /model and /effort can be
+        // sent into them (see docs/MODELS-AND-EFFORT.md).
+        thread_models: true,
+        switch_models: false,
     }
 }
 
@@ -274,6 +278,14 @@ struct Draft {
     outbox: Vec<PendingMessage>,
     /// Start it in a new worktree of this name (coder mode's "In a new worktree").
     worktree: Option<String>,
+    /// The model and effort it starts on (`chat.send {model?, effort?}`).
+    choice: ModelChoice,
+}
+
+impl Draft {
+    fn new(cwd: String) -> Self {
+        Self { cwd, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None, choice: ModelChoice::default() }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -375,6 +387,8 @@ struct Session {
     delivering: bool,
     /// How many times the outbox was handed over (a routine waits for its message's turn).
     handed: u64,
+    /// The model and effort its last reply came from (its transcript says, on each).
+    ran: ModelChoice,
 }
 
 impl Session {
@@ -656,6 +670,7 @@ impl ClaudeCodeClient {
             "skills.status" => skills_status(inner, &params).await,
             "skills.read" => skills_read(inner, &params).await,
             "commands.list" => commands_list(inner, &params).await,
+            "models.list" => models_list(inner, &params).await,
             "mcp.servers.list" => {
                 check_agent(&params)?;
                 let cwd = folder_of(inner, &params);
@@ -1658,6 +1673,10 @@ async fn follow_transcripts(inner: &Arc<Inner>) {
 fn note_line(s: &mut Session, line: &Value, live: bool, emits: &mut Emits) -> bool {
     let meta = line_meta(line);
     let mut changed = false;
+    if let Some(ran) = ran_on(line) {
+        changed |= live && ran != s.ran;
+        s.ran = ran;
+    }
     if let Some(title) = meta.ai_title {
         changed |= s.ai_title.as_ref() != Some(&title);
         s.ai_title = Some(title);
@@ -1683,6 +1702,17 @@ fn note_line(s: &mut Session, line: &Value, live: bool, emits: &mut Emits) -> bo
         changed |= s.set_busy(false, emits);
     }
     changed
+}
+
+/// The model and effort a reply came from: Claude Code notes both on each assistant line
+/// (not `<synthetic>` ones it makes up itself, or a subagent's).
+fn ran_on(line: &Value) -> Option<ModelChoice> {
+    if line.get("type").and_then(Value::as_str) != Some("assistant") || flag(line, "isSidechain") {
+        return None;
+    }
+    let model = line.pointer("/message/model").and_then(Value::as_str).filter(|m| !m.is_empty() && !m.starts_with('<'))?;
+    let effort = line.get("effort").and_then(Value::as_str).filter(|e| !e.is_empty());
+    Some(ModelChoice { model: Some(model.to_string()), effort: effort.map(str::to_string) })
 }
 
 /// What one transcript line says about its session, besides its messages.
@@ -2303,6 +2333,12 @@ fn session_row(s: &Session) -> Value {
     if let Some(activity) = s.activity() {
         row["activity"] = activity;
     }
+    if let Some(model) = &s.ran.model {
+        row["model"] = json!(model);
+    }
+    if let Some(effort) = &s.ran.effort {
+        row["effort"] = json!(effort);
+    }
     s.flags.add_to(&mut row);
     row
 }
@@ -2320,6 +2356,9 @@ fn sessions_patch(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
                 json!({ "key": key, "agentId": AGENT_ID, "archived": true })
             }
             Thread::Draft => return Err(RpcError::new("INVALID_REQUEST", "This thread hasn't started yet.")),
+            Thread::Session(_) if params.get("model").is_some() || params.get("effort").is_some() => {
+                return Err(RpcError::new("UNSUPPORTED", "A Claude Code thread keeps the model it started on. Start a new thread to use another."));
+            }
             Thread::Session(sid) => {
                 let s = st.sessions.get_mut(&sid).ok_or_else(|| RpcError::new("NOT_FOUND", "Not a Claude Code session."))?;
                 s.unsaved |= s.flags.patch(params);
@@ -2398,7 +2437,7 @@ fn sessions_create(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
     {
         let mut st = inner.st.lock().unwrap();
         let cwd = st.default_folder();
-        st.drafts.insert(key.clone(), Draft { cwd, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
+        st.drafts.insert(key.clone(), Draft::new(cwd));
     }
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "created" }));
     Ok(json!({ "ok": true, "key": key }))
@@ -2451,12 +2490,16 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
         Thread::Draft => {
             let cwd = params.get("cwd").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
             let worktree = params.get("worktree").and_then(Value::as_bool) == Some(true) && crate::code::worktrees_allowed();
+            let choice = ModelChoice::from_params(params)?;
             let start = {
                 let mut st = inner.st.lock().unwrap();
                 let fallback = st.default_folder();
-                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft { cwd: fallback, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
+                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft::new(fallback));
                 if let Some(cwd) = cwd.filter(|_| !d.launching) {
                     d.cwd = cwd;
+                }
+                if !d.launching {
+                    d.choice = choice;
                 }
                 if worktree && !d.launching && d.worktree.is_none() && crate::code::repo_root(Path::new(&d.cwd)).is_some() {
                     d.worktree = Some(crate::code::worktree_name(&text));
@@ -2605,11 +2648,11 @@ async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, ru
 async fn start_draft(inner: Arc<Inner>, key: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
-        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone(), d.worktree.clone()))
+        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone(), d.worktree.clone(), d.choice.clone()))
     };
-    let Some((batch, cwd, worktree)) = job else { return };
+    let Some((batch, cwd, worktree, choice)) = job else { return };
     let text = delivery::text(&batch);
-    let result = launch(&inner, &key, &cwd, &text, None, worktree.as_deref(), true).await;
+    let result = launch(&inner, &key, &cwd, &text, None, worktree.as_deref(), true, &choice).await;
     let mut emits: Emits = vec![refresh(), delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
@@ -2648,9 +2691,10 @@ async fn start_draft(inner: Arc<Inner>, key: String) {
 }
 
 /// `claude "<text>" --bg` in `cwd`: a new background session, shown as thread `key`, in a
-/// new worktree with `-w <worktree>`. Resolves to its session id once Claude Code lists it.
+/// new worktree with `-w <worktree>`, on `choice` (`--model`, `--effort`). Resolves to its
+/// session id once Claude Code lists it.
 #[allow(clippy::too_many_arguments)]
-async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Option<&str>, worktree: Option<&str>, keep: bool) -> Result<String, String> {
+async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Option<&str>, worktree: Option<&str>, keep: bool, choice: &ModelChoice) -> Result<String, String> {
     let claude = inner.claude.lock().unwrap().clone().ok_or("Claude Code isn't installed")?;
     if !Path::new(cwd).is_dir() {
         return Err(format!("{cwd} isn't a folder on this {}.", crate::platform::COMPUTER));
@@ -2666,6 +2710,7 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
     if let Some(worktree) = worktree {
         cmd.args(["-w", worktree]);
     }
+    cmd.args(choice_flags(choice));
     let out = output(cmd, Duration::from_secs(60)).await?;
     let short = backgrounded_id(&out).ok_or_else(|| format!("Claude Code didn't say which session it started ({})", first_line(&out)))?;
     inner.st.lock().unwrap().pending.insert(short.clone(), key.to_string());
@@ -2680,10 +2725,14 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
             Some(sid) => {
                 st.pending.remove(&short);
                 let known = st.started.remove(&sid).unwrap_or_default();
-                let thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep, ..known };
+                let mut thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep, ..known };
+                thread.flags.model = choice.model.clone();
+                thread.flags.effort = choice.effort.clone();
                 remember(&inner.started_path, &mut st.started, &sid, thread).map_err(|e| e.to_string())?;
                 let s = st.session(&sid);
                 s.kept = keep;
+                s.flags.model = choice.model.clone();
+                s.flags.effort = choice.effort.clone();
                 if s.key.as_deref() != Some(key) {
                     // Its hooks reported before littleguys knew it: show it under its key, from the top.
                     s.key = Some(key.to_string());
@@ -2715,6 +2764,19 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
     };
     flush(inner, emits);
     result
+}
+
+/// `--model`, `--effort` for `choice`. Only a new session takes them: a background one keeps
+/// the options it started with, and flags on its resume start a copy of it.
+fn choice_flags(choice: &ModelChoice) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(model) = &choice.model {
+        args.extend(["--model".to_string(), model.clone()]);
+    }
+    if let Some(effort) = &choice.effort {
+        args.extend(["--effort".to_string(), effort.clone()]);
+    }
+    args
 }
 
 /// The id of the session `claude --bg` printed `short` for: from its hooks, or `claude agents`.
@@ -2769,7 +2831,7 @@ impl RoutineRunner for Runner {
                     let text = |p: &str| job.as_ref().and_then(|j| j.pointer(p)).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
                     let cwd = text("/payload/cwd").unwrap_or_else(|| inner.st.lock().unwrap().default_folder());
                     let key = keys::routine_run(AGENT_ID, &job_id, &uuid::Uuid::new_v4().to_string());
-                    let sid = launch(&inner, &key, &cwd, &message, text("/name").as_deref(), None, false).await?;
+                    let sid = launch(&inner, &key, &cwd, &message, text("/name").as_deref(), None, false, &ModelChoice::default()).await?;
                     (key, sid, Box::new(|s: &Session| s.turn > 0 && !s.busy))
                 }
                 Some(key) => {
@@ -3358,6 +3420,41 @@ async fn skills_read(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcErr
 }
 
 /// What the composer offers after `/`: skills, custom commands, and the built-ins that work here.
+/// What `--model` takes: an alias for the latest model of each family.
+const MODELS: &[(&str, &str, &str)] = &[
+    ("fable", "Fable", "The most capable, for the hardest work"),
+    ("opus", "Opus", "Complex, long tasks"),
+    ("sonnet", "Sonnet", "Everyday coding"),
+    ("haiku", "Haiku", "Quick, simple tasks"),
+];
+/// What `--effort` takes.
+const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// The models and efforts a new thread can start on, and what it starts on otherwise.
+async fn models_list(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    check_agent(params)?;
+    let cwd = folder_of(inner, params);
+    blocking(move || {
+        let default = settings_default(&cwd, &claude_home());
+        let models: Vec<Value> = MODELS.iter().map(|(id, name, description)| json!({ "id": id, "name": name, "description": description })).collect();
+        Ok(json!({ "models": models, "efforts": EFFORTS, "default": { "model": default.model, "effort": default.effort } }))
+    })
+    .await
+}
+
+/// What Claude Code's settings start a session in `cwd` on (`model`, `effortLevel`): the
+/// folder's local settings over its shared ones over yours.
+fn settings_default(cwd: &Path, claude_home: &Path) -> ModelChoice {
+    let mut choice = ModelChoice::default();
+    for path in [claude_home.join("settings.json"), cwd.join(".claude").join("settings.json"), cwd.join(".claude").join("settings.local.json")] {
+        let Some(settings) = acp::read_json(&path) else { continue };
+        let field = |name: &str| settings.get(name).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+        choice.model = field("model").or(choice.model);
+        choice.effort = field("effortLevel").or(choice.effort);
+    }
+    choice
+}
+
 async fn commands_list(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
     check_agent(params)?;
     let cwd = folder_of(inner, params);
@@ -4065,7 +4162,7 @@ mod tests {
     fn threads_resolve_to_drafts_and_the_sessions_littleguys_started() {
         let mut st = State::default();
         let draft = keys::thread(AGENT_ID, "d-1");
-        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: false, outbox: Vec::new(), worktree: None });
+        st.drafts.insert(draft.clone(), Draft { created_at: 1, ..Draft::new("/w".into()) });
         assert!(matches!(st.thread(&draft), Some(Thread::Draft)));
         // The guy's main key is a draft until a session has it.
         let main = keys::main(AGENT_ID);
@@ -4090,7 +4187,7 @@ mod tests {
         // Reported before its id was known: matched by the short id `claude --bg` printed,
         // it takes over its draft (and what you wrote meanwhile).
         let draft = keys::thread(AGENT_ID, "d-2");
-        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: true, outbox: vec!["and then".into()], worktree: None });
+        st.drafts.insert(draft.clone(), Draft { created_at: 1, launching: true, outbox: vec!["and then".into()], ..Draft::new("/w".into()) });
         st.pending.insert("31009426".into(), draft.clone());
         let sid = "31009426-f4da-4001-87f2-0d40829fb8af";
         assert_eq!(st.session(sid).key(), draft);
@@ -4369,7 +4466,7 @@ mod tests {
         {
             let mut st = client.inner.st.lock().unwrap();
             st.connected = true;
-            st.drafts.insert(key.clone(), Draft { cwd: folder.display().to_string(), created_at: 1, launching: false, outbox: Vec::new(), worktree: None });
+            st.drafts.insert(key.clone(), Draft { created_at: 1, ..Draft::new(folder.display().to_string()) });
         }
         *client.inner.claude.lock().unwrap() = Some(fake_untrusting_claude(&dir));
         let calls = || std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default().lines().filter(|l| l.contains("--bg")).count();
@@ -5355,5 +5452,98 @@ mod tests {
 
         tmux(&["kill-server"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replies_say_what_they_ran_on() {
+        let reply = json!({ "type": "assistant", "effort": "xhigh", "message": { "model": "claude-test-large", "content": [{ "type": "text", "text": "done" }] } });
+        assert_eq!(ran_on(&reply), Some(ModelChoice { model: Some("claude-test-large".into()), effort: Some("xhigh".into()) }));
+        let made_up = json!({ "type": "assistant", "message": { "model": "<synthetic>", "content": [] } });
+        assert_eq!(ran_on(&made_up), None);
+        let helper = json!({ "type": "assistant", "isSidechain": true, "message": { "model": "claude-test-small", "content": [] } });
+        assert_eq!(ran_on(&helper), None);
+        assert_eq!(ran_on(&json!({ "type": "user", "message": { "content": "hi" } })), None);
+
+        let mut s = Session::new("s1");
+        assert!(note_line(&mut s, &reply, true, &mut Vec::new()));
+        assert!(!note_line(&mut s, &reply, true, &mut Vec::new()), "the same again changes nothing");
+        s.flags.model = Some("opus".into());
+        let row = session_row(&s);
+        assert_eq!((row["model"].as_str(), row["effort"].as_str()), (Some("claude-test-large"), Some("xhigh")));
+        assert_eq!(row["modelChoice"], "opus");
+    }
+
+    #[test]
+    fn new_sessions_take_the_choice_as_flags() {
+        let choice = ModelChoice { model: Some("opus".into()), effort: Some("high".into()) };
+        assert_eq!(choice_flags(&choice), ["--model", "opus", "--effort", "high"]);
+        assert_eq!(choice_flags(&ModelChoice { model: None, effort: Some("low".into()) }), ["--effort", "low"]);
+        assert!(choice_flags(&ModelChoice::default()).is_empty());
+    }
+
+    #[test]
+    fn the_default_comes_from_claude_codes_settings() {
+        let (home, folder) = (temp_dir("settings-home"), temp_dir("settings-folder"));
+        assert_eq!(settings_default(&folder, &home), ModelChoice::default());
+        write(&home.join("settings.json"), r#"{"model": "sonnet", "effortLevel": "medium"}"#);
+        assert_eq!(settings_default(&folder, &home), ModelChoice { model: Some("sonnet".into()), effort: Some("medium".into()) });
+        write(&folder.join(".claude/settings.json"), r#"{"model": "opus"}"#);
+        write(&folder.join(".claude/settings.local.json"), r#"{"effortLevel": "max"}"#);
+        assert_eq!(settings_default(&folder, &home), ModelChoice { model: Some("opus".into()), effort: Some("max".into()) });
+    }
+
+    #[tokio::test]
+    async fn a_started_thread_keeps_its_model() {
+        let (client, _) = following(false, true);
+        let key = keys::thread(AGENT_ID, "s1");
+        let refused = client.call("sessions.patch", json!({ "key": key, "model": "opus" })).await.unwrap_err();
+        assert_eq!(refused.code, "UNSUPPORTED");
+        assert!(client.call("sessions.patch", json!({ "key": key, "pinned": true })).await.is_ok());
+        let listed = client.call("models.list", json!({ "agentId": AGENT_ID })).await.unwrap();
+        assert_eq!(listed["models"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect::<Vec<_>>(), ["fable", "opus", "sonnet", "haiku"]);
+        assert_eq!(listed["efforts"], json!(["low", "medium", "high", "xhigh", "max"]));
+    }
+
+    /// `claude` that logs each call and says it started a background session.
+    #[cfg(unix)]
+    fn fake_claude(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let claude = dir.join("claude");
+        write(&claude, &format!("#!/bin/sh\necho \"$*\" >> '{}'\necho 'backgrounded · 0badf00d'\n", dir.join("calls.log").display()));
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_thread_starts_on_the_model_you_picked() {
+        let dir = temp_dir("model");
+        let folder = dir.join("shop");
+        std::fs::create_dir_all(&folder).unwrap();
+        let hooks = Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks);
+        let key = keys::thread(AGENT_ID, "new");
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            st.drafts.insert(key.clone(), Draft { created_at: 1, ..Draft::new(folder.display().to_string()) });
+        }
+        *client.inner.claude.lock().unwrap() = Some(fake_claude(&dir));
+        let refused = client.call("chat.send", json!({ "sessionKey": key, "message": "hi", "model": "-p" })).await.unwrap_err();
+        assert_eq!(refused.code, "INVALID_REQUEST", "nothing that reads as a flag");
+
+        let send = json!({ "sessionKey": key, "message": "add a cart", "idempotencyKey": "send-1", "model": "opus", "effort": "high" });
+        client.call("chat.send", send).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let launched = loop {
+            let calls = std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default();
+            if let Some(line) = calls.lines().find(|l| l.contains("--bg")) {
+                break line.to_string();
+            }
+            assert!(Instant::now() < deadline, "never launched");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(launched.starts_with("add a cart --bg"), "{launched}");
+        assert!(launched.ends_with("--model opus --effort high"), "{launched}");
     }
 }
