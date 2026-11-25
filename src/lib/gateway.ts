@@ -12,11 +12,13 @@ import type {
   McpServer,
   MessageHit,
   ModelChoice,
+  ModelPick,
   PastSession,
   PluginEntry,
   QueuedMessage,
   SessionRow,
   SkillEntry,
+  ThreadModels,
   ToolGroup,
   WorkspaceFile,
   WorkspaceListing,
@@ -54,7 +56,7 @@ export const sessions = {
   patch: (
     gw: string,
     key: string,
-    patch: { label?: string | null; pinned?: boolean; archived?: boolean; unread?: boolean },
+    patch: { label?: string | null; pinned?: boolean; archived?: boolean; unread?: boolean; model?: string | null; effort?: string | null },
     expectedSessionId?: string,
   ) => gwCall<SessionRow>(gw, "sessions.patch", { key, ...patch, ...(expectedSessionId ? { expectedSessionId } : {}) }),
   remove: (gw: string, key: string, expectedSessionId?: string) =>
@@ -113,8 +115,9 @@ export const chat = {
   /**
    * `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode).
    * `delivery`: while the guy works. `status: "held"` means littleguys keeps it until the turn ends.
+   * `pick`: the model and effort a new thread starts on (if `threadModels`).
    */
-  send: (gw: string, sessionKey: string, message: string, attachments: Attachment[] = [], cwd?: string, clientSendId = newIdempotencyKey(), worktree?: boolean, delivery?: Delivery, to?: string[]) =>
+  send: (gw: string, sessionKey: string, message: string, attachments: Attachment[] = [], cwd?: string, clientSendId = newIdempotencyKey(), worktree?: boolean, delivery?: Delivery, pick?: ModelPick, to?: string[]) =>
     gwCall<SendReceipt>(
       gw,
       "chat.send",
@@ -124,6 +127,8 @@ export const chat = {
         idempotencyKey: clientSendId,
         ...(cwd ? { cwd } : {}),
         ...(worktree ? { worktree: true } : {}),
+        ...(pick?.model ? { model: pick.model } : {}),
+        ...(pick?.effort ? { effort: pick.effort } : {}),
         ...(delivery ? { delivery } : {}),
         ...(to?.length ? { to } : {}),
         ...(attachments.length
@@ -162,6 +167,9 @@ export const artifacts = {
 export const models = {
   list: (gw: string, agentId?: string) =>
     gwCall<{ models: ModelChoice[] }>(gw, "models.list", { view: "configured", ...(agentId ? { agentId } : {}) }),
+  /** What a thread can run on (Claude Code, Codex: `threadModels`). */
+  forThreads: (gw: string, agentId: string, sessionKey?: string) =>
+    gwCall<ThreadModels>(gw, "models.list", { agentId, ...(sessionKey ? { sessionKey } : {}) }),
 };
 
 export const cron = {

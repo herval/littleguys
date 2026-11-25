@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
 
+use crate::activity::{Notifications, NotifyPrefs};
 use crate::gateway::client::RpcError;
+use crate::limits::Limit;
 
 #[derive(Debug, Clone)]
 pub enum HostEvent {
@@ -21,6 +24,32 @@ pub enum HostEvent {
     BotsChanged,
     /// Something the Mac notifies about, for paired phones' pushes.
     Notice(Notice),
+    /// Notifications or Coder mode changed (on the Mac or on a phone).
+    Settings(PhoneSettings),
+}
+
+/// What a phone sees of the Mac's settings (`settings.get`, the `settings` event).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PhoneSettings {
+    /// What notifies you, for everyone and per guy (`gatewayId/agentId`).
+    pub notifications: Notifications,
+    pub coder: PhoneCoder,
+}
+
+/// The parts of Coder mode a phone shows. Folders, the terminal and the rest stay on the Mac.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PhoneCoder {
+    pub on: bool,
+    /// A coding thread's edits show as diffs between its messages.
+    pub edits: bool,
+    /// Pull requests and checks, through `gh`.
+    pub prs: bool,
+}
+
+impl PhoneSettings {
+    pub fn new(notifications: Notifications, coder: &crate::code::CoderPrefs) -> Self {
+        Self { notifications, coder: PhoneCoder { on: coder.on, edits: coder.edits, prs: coder.prs } }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +108,14 @@ pub trait BridgeHost: Send + Sync + 'static {
     fn set_face(&self, _gateway: &str, _agent_id: &str, _face: Option<String>) -> Result<(), RpcError> {
         Err(RpcError::new("UNSUPPORTED", "This Mac can't set guys' pictures."))
     }
+    /// How much of `provider`'s rate limit is used ("claude", "codex"); `None` when
+    /// there's no current reading, or no such provider.
+    fn limit(&self, provider: &str) -> BoxFuture<'static, Result<Option<Limit>, RpcError>>;
+    fn settings(&self) -> Result<PhoneSettings, RpcError>;
+    /// What notifies you about a guy (`gatewayId/agentId`), or with no `uid` about
+    /// everyone (which every guy then follows). A guy with `prefs: None` goes back to
+    /// everyone's.
+    fn set_notify(&self, uid: Option<&str>, prefs: Option<NotifyPrefs>) -> Result<(), RpcError>;
 }
 
 /// A `ConnStatus` as phones see it ("BotStatus"): Mac-only fields dropped,

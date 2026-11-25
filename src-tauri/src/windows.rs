@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WindowEvent};
 use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -18,7 +18,7 @@ pub const POPOVER: &str = "popover";
 /// would immediately re-open it.
 static POPOVER_BLURRED_AT: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Navigate {
     pub gateway_id: Option<String>,

@@ -58,7 +58,7 @@ use crate::openclaw::runtime as cli;
 use crate::runtime::acp;
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
 use crate::runtime::search;
-use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
+use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, ModelChoice, RuntimeKind, ThreadFlags};
 
 const AGENT_ID: &str = "claude";
 pub const PLUGIN_ID: &str = "littleguys@littleguys";
@@ -102,6 +102,16 @@ const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const CLI_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a session `claude --bg` started has to show up in `claude agents`.
 const LAUNCH_FIND: Duration = Duration::from_secs(30);
+/// How long a background session `claude stop` was sent to gets to stop before littleguys
+/// resumes it anyway.
+const STOP_WAIT: Duration = Duration::from_secs(20);
+/// Claude Code lets go of a stopped session a moment after `claude agents` stops listing its
+/// process, and resuming it before then starts a copy (seen 2026-11-24: one resume 0.7 s
+/// before the daemon settled the original, one 64 ms after).
+const STOP_SETTLE: Duration = Duration::from_millis(1500);
+/// Resumes Claude Code turns away because the session is still shutting down, retried this
+/// many times, a second apart.
+const RESUME_RETRIES: u32 = 5;
 /// A routine's turn gets this long before littleguys stops waiting for it.
 const ROUTINE_MAX: Duration = Duration::from_secs(4 * 3600);
 /// Sessions littleguys started are remembered (by the key it gave them) this long.
@@ -151,6 +161,10 @@ fn capabilities(config: &ClaudeCodeConfig) -> Capabilities {
         // At the next tool call (PostToolUse), in sessions with the plugin's hooks. Not on
         // Windows, where that hook would start PowerShell after every tool call.
         steer: cfg!(unix),
+        // Started threads keep the options they started with until /model and /effort can be
+        // sent into them (see docs/MODELS-AND-EFFORT.md).
+        thread_models: true,
+        switch_models: false,
     }
 }
 
@@ -232,7 +246,9 @@ impl State {
         if self.drafts.contains_key(key) {
             return Some(Thread::Draft);
         }
-        if let Some((sid, _)) = self.started.iter().find(|(_, t)| t.key == key) {
+        // A copy that took a thread over (see `adopt_copy`) shares its key with the original,
+        // which is hidden: the copy is the thread.
+        if let Some((sid, _)) = self.started.iter().filter(|(_, t)| t.key == key).min_by_key(|(_, t)| t.hidden) {
             return Some(Thread::Session(sid.clone()));
         }
         match keys::split(key) {
@@ -274,6 +290,14 @@ struct Draft {
     outbox: Vec<PendingMessage>,
     /// Start it in a new worktree of this name (coder mode's "In a new worktree").
     worktree: Option<String>,
+    /// The model and effort it starts on (`chat.send {model?, effort?}`).
+    choice: ModelChoice,
+}
+
+impl Draft {
+    fn new(cwd: String) -> Self {
+        Self { cwd, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None, choice: ModelChoice::default() }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -375,6 +399,8 @@ struct Session {
     delivering: bool,
     /// How many times the outbox was handed over (a routine waits for its message's turn).
     handed: u64,
+    /// The model and effort its last reply came from (its transcript says, on each).
+    ran: ModelChoice,
 }
 
 impl Session {
@@ -656,6 +682,7 @@ impl ClaudeCodeClient {
             "skills.status" => skills_status(inner, &params).await,
             "skills.read" => skills_read(inner, &params).await,
             "commands.list" => commands_list(inner, &params).await,
+            "models.list" => models_list(inner, &params).await,
             "mcp.servers.list" => {
                 check_agent(&params)?;
                 let cwd = folder_of(inner, &params);
@@ -1658,6 +1685,10 @@ async fn follow_transcripts(inner: &Arc<Inner>) {
 fn note_line(s: &mut Session, line: &Value, live: bool, emits: &mut Emits) -> bool {
     let meta = line_meta(line);
     let mut changed = false;
+    if let Some(ran) = ran_on(line) {
+        changed |= live && ran != s.ran;
+        s.ran = ran;
+    }
     if let Some(title) = meta.ai_title {
         changed |= s.ai_title.as_ref() != Some(&title);
         s.ai_title = Some(title);
@@ -1683,6 +1714,17 @@ fn note_line(s: &mut Session, line: &Value, live: bool, emits: &mut Emits) -> bo
         changed |= s.set_busy(false, emits);
     }
     changed
+}
+
+/// The model and effort a reply came from: Claude Code notes both on each assistant line
+/// (not `<synthetic>` ones it makes up itself, or a subagent's).
+fn ran_on(line: &Value) -> Option<ModelChoice> {
+    if line.get("type").and_then(Value::as_str) != Some("assistant") || flag(line, "isSidechain") {
+        return None;
+    }
+    let model = line.pointer("/message/model").and_then(Value::as_str).filter(|m| !m.is_empty() && !m.starts_with('<'))?;
+    let effort = line.get("effort").and_then(Value::as_str).filter(|e| !e.is_empty());
+    Some(ModelChoice { model: Some(model.to_string()), effort: effort.map(str::to_string) })
 }
 
 /// What one transcript line says about its session, besides its messages.
@@ -2303,6 +2345,12 @@ fn session_row(s: &Session) -> Value {
     if let Some(activity) = s.activity() {
         row["activity"] = activity;
     }
+    if let Some(model) = &s.ran.model {
+        row["model"] = json!(model);
+    }
+    if let Some(effort) = &s.ran.effort {
+        row["effort"] = json!(effort);
+    }
     s.flags.add_to(&mut row);
     row
 }
@@ -2320,6 +2368,9 @@ fn sessions_patch(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
                 json!({ "key": key, "agentId": AGENT_ID, "archived": true })
             }
             Thread::Draft => return Err(RpcError::new("INVALID_REQUEST", "This thread hasn't started yet.")),
+            Thread::Session(_) if params.get("model").is_some() || params.get("effort").is_some() => {
+                return Err(RpcError::new("UNSUPPORTED", "A Claude Code thread keeps the model it started on. Start a new thread to use another."));
+            }
             Thread::Session(sid) => {
                 let s = st.sessions.get_mut(&sid).ok_or_else(|| RpcError::new("NOT_FOUND", "Not a Claude Code session."))?;
                 s.unsaved |= s.flags.patch(params);
@@ -2398,7 +2449,7 @@ fn sessions_create(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
     {
         let mut st = inner.st.lock().unwrap();
         let cwd = st.default_folder();
-        st.drafts.insert(key.clone(), Draft { cwd, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
+        st.drafts.insert(key.clone(), Draft::new(cwd));
     }
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "created" }));
     Ok(json!({ "ok": true, "key": key }))
@@ -2451,12 +2502,16 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
         Thread::Draft => {
             let cwd = params.get("cwd").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
             let worktree = params.get("worktree").and_then(Value::as_bool) == Some(true) && crate::code::worktrees_allowed();
+            let choice = ModelChoice::from_params(params)?;
             let start = {
                 let mut st = inner.st.lock().unwrap();
                 let fallback = st.default_folder();
-                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft { cwd: fallback, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
+                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft::new(fallback));
                 if let Some(cwd) = cwd.filter(|_| !d.launching) {
                     d.cwd = cwd;
+                }
+                if !d.launching {
+                    d.choice = choice;
                 }
                 if worktree && !d.launching && d.worktree.is_none() && crate::code::repo_root(Path::new(&d.cwd)).is_some() {
                     d.worktree = Some(crate::code::worktree_name(&text));
@@ -2547,14 +2602,20 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
     let mut emits: Emits = vec![delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
+        let st = &mut *st;
         if let Some(s) = st.sessions.get_mut(&sid) {
             s.delivering = false;
             match &result {
-                Ok(()) => {
+                Ok(None) => {
                     s.running = true;
                     // Its hooks take a moment to report; don't let `claude agents` say otherwise meanwhile.
                     s.last_hook = Some(Instant::now());
                     s.set_busy(true, &mut emits);
+                }
+                Ok(Some(copy)) => {
+                    // The copy is at work on it. If it reports before `adopt_copy` finds it, it
+                    // shows under this thread's key from the start.
+                    st.pending.insert(copy.clone(), key.clone());
                 }
                 Err(e) => emits.push((
                     "chat",
@@ -2564,39 +2625,145 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
         }
     }
     flush(&inner, emits);
+    if let Ok(Some(copy)) = &result {
+        adopt_copy(&inner, &sid, copy).await;
+    }
     inner.poke.store(true, Ordering::SeqCst);
 }
 
+/// Claude Code continued `sid` in a copy (short id `short`) instead of resuming it, as it does
+/// while the original is still running. The copy has the whole conversation and your message,
+/// so it becomes the thread, under the same key, and the original is hidden: you see one thread.
+async fn adopt_copy(inner: &Arc<Inner>, sid: &str, short: &str) {
+    let Some(claude) = inner.claude.lock().unwrap().clone() else { return };
+    let found = find_session(inner, &claude, short).await;
+    let mut emits: Emits = vec![refresh()];
+    {
+        let mut st = inner.st.lock().unwrap();
+        let st = &mut *st;
+        st.pending.remove(short);
+        let Some(copy) = found.filter(|c| c != sid) else {
+            log::warn!("[claude] {sid} went on in a copy ({short}) that never showed up in `claude agents`");
+            return;
+        };
+        let Some(original) = st.sessions.get_mut(sid) else { return };
+        let key = original.key();
+        original.hidden = true;
+        original.unsaved = true;
+        let (kept, flags, cwd) = (original.kept, original.flags.clone(), original.cwd.clone());
+        let (outbox, steer) = (std::mem::take(&mut original.outbox), std::mem::take(&mut original.steer));
+        let thread = Started { key: key.clone(), at: now_ms(), cwd: (!cwd.is_empty()).then(|| cwd.clone()), keep: kept, flags: flags.clone(), hidden: false };
+        if let Err(e) = remember(&inner.started_path, &mut st.started, &copy, thread) {
+            log::warn!("[claude] couldn't save {copy} as the thread {key}: {}", e.message);
+        }
+        let s = st.session(&copy);
+        s.kept = kept;
+        s.flags = flags;
+        s.hidden = false;
+        s.background = true;
+        s.short_id = Some(short.to_string());
+        s.running = true;
+        if s.cwd.is_empty() {
+            s.cwd = cwd;
+        }
+        // What you sent while it was being resumed goes to the copy.
+        s.outbox.extend(outbox);
+        s.steer.extend(steer);
+        let before = s.key();
+        if before != key {
+            // It reported under a key of its own first: its turn moves over to the thread's.
+            if s.busy {
+                emits.push(("chat", json!({ "sessionKey": before, "runId": s.run_id(), "state": "aborted" })));
+                emits.push(("sessions.changed", json!({ "sessionKey": before, "agentId": AGENT_ID, "runId": s.run_id(), "phase": "end" })));
+            }
+            s.key = Some(key.clone());
+            if s.busy {
+                emits.push(("sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "runId": s.run_id(), "phase": "start" })));
+                emits.push(("chat", json!({ "sessionKey": key, "runId": s.run_id(), "state": "status", "phase": "thinking" })));
+            }
+        }
+        if !s.hooked {
+            // Its hooks take a moment to report; don't let `claude agents` say otherwise meanwhile.
+            s.last_hook = Some(Instant::now());
+            s.set_busy(true, &mut emits);
+        }
+    }
+    if let Err(e) = save_flags(inner) {
+        log::warn!("[claude] couldn't save that {sid} was replaced: {}", e.message);
+    }
+    flush(inner, emits);
+}
+
 /// `claude "<text>" --resume <id> --bg`, after stopping it if it's up in the background
-/// (resuming a running session starts a copy).
-async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, running_bg: bool, cwd: &str) -> Result<(), String> {
+/// (resuming a running session starts a copy). The copy's short id, if one started anyway.
+async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, running_bg: bool, cwd: &str) -> Result<Option<String>, String> {
     let claude = inner.claude.lock().unwrap().clone().ok_or("Claude Code isn't installed")?;
     if running_bg {
         if let Some(short) = short_id {
             run_cli(&claude, &["stop", short], CLI_TIMEOUT).await?;
-            for _ in 0..30 {
-                let up = list_agents(&claude).await.is_some_and(|all| all.iter().any(|l| l.session_id == sid && l.pid.is_some()));
-                if !up {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
+            wait_stopped(&claude, sid).await;
         }
     }
     // A prompt starting with '-' would read as a flag.
     let prompt = if text.starts_with('-') { format!(" {text}") } else { text.to_string() };
-    let mut cmd = cli::command(&claude);
-    // No other flags: a background session keeps the options it started with, and any
-    // passed here would start a copy of it instead.
-    cmd.arg(&prompt).args(["--resume", sid, "--bg"]);
-    if Path::new(cwd).is_dir() {
-        cmd.current_dir(cwd);
-    }
-    let out = output(cmd, Duration::from_secs(60)).await?;
-    if out.contains("started a copy") {
+    let mut tries = 0;
+    let out = loop {
+        let mut cmd = cli::command(&claude);
+        // No other flags: a background session keeps the options it started with, and any
+        // passed here would start a copy of it instead.
+        cmd.arg(&prompt).args(["--resume", sid, "--bg"]);
+        if Path::new(cwd).is_dir() {
+            cmd.current_dir(cwd);
+        }
+        match output(cmd, Duration::from_secs(60)).await {
+            // It's still letting go of the session: Claude Code says to try again in a moment.
+            Err(e) if e.contains("still shutting down") && tries < RESUME_RETRIES => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            done => break done?,
+        }
+    };
+    let copy = started_copy(&out, sid);
+    if copy.is_some() {
         log::warn!("[claude] resuming {sid} started a copy: {out}");
     }
-    Ok(())
+    Ok(copy)
+}
+
+/// Waits for a background session `claude stop` was sent to: until `claude agents` lists it
+/// without a process, then [`STOP_SETTLE`] more. A listing that fails says nothing either way.
+/// After [`STOP_WAIT`] it goes ahead regardless (a copy that starts then becomes the thread).
+async fn wait_stopped(claude: &Path, sid: &str) {
+    let deadline = Instant::now() + STOP_WAIT;
+    loop {
+        if list_agents(claude).await.is_some_and(|all| !all.iter().any(|l| l.session_id == sid && l.pid.is_some())) {
+            tokio::time::sleep(STOP_SETTLE).await;
+            return;
+        }
+        if Instant::now() >= deadline {
+            log::warn!("[claude] {sid} was still running {}s after `claude stop`", STOP_WAIT.as_secs());
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// The short id of the copy resuming `sid` started instead, when Claude Code made one: the id
+/// its note names (`… so this started a copy as 1a2b3c4d.`, `started a copy of that
+/// conversation as …`), or the session `claude --bg` says it started, when that isn't `sid`.
+/// A full session id counts by its short id (its first part).
+fn started_copy(stdout: &str, sid: &str) -> Option<String> {
+    let noted = stdout.lines().find_map(|line| {
+        let (_, rest) = line[line.find("started a copy")?..].split_once(" as ")?;
+        let id: String = rest.trim_start_matches(['`', '"', '\'']).chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        id.split('-').next().map(str::to_string)
+    });
+    let id = match noted.filter(|id| !id.is_empty()) {
+        Some(id) => id,
+        None => backgrounded_id(stdout)?,
+    };
+    (!sid.starts_with(&id)).then_some(id)
 }
 
 // ---- new sessions -------------------------------------------------------------------------
@@ -2605,11 +2772,11 @@ async fn resume(inner: &Inner, sid: &str, text: &str, short_id: Option<&str>, ru
 async fn start_draft(inner: Arc<Inner>, key: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
-        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone(), d.worktree.clone()))
+        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone(), d.worktree.clone(), d.choice.clone()))
     };
-    let Some((batch, cwd, worktree)) = job else { return };
+    let Some((batch, cwd, worktree, choice)) = job else { return };
     let text = delivery::text(&batch);
-    let result = launch(&inner, &key, &cwd, &text, None, worktree.as_deref(), true).await;
+    let result = launch(&inner, &key, &cwd, &text, None, worktree.as_deref(), true, &choice).await;
     let mut emits: Emits = vec![refresh(), delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
@@ -2648,9 +2815,10 @@ async fn start_draft(inner: Arc<Inner>, key: String) {
 }
 
 /// `claude "<text>" --bg` in `cwd`: a new background session, shown as thread `key`, in a
-/// new worktree with `-w <worktree>`. Resolves to its session id once Claude Code lists it.
+/// new worktree with `-w <worktree>`, on `choice` (`--model`, `--effort`). Resolves to its
+/// session id once Claude Code lists it.
 #[allow(clippy::too_many_arguments)]
-async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Option<&str>, worktree: Option<&str>, keep: bool) -> Result<String, String> {
+async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Option<&str>, worktree: Option<&str>, keep: bool, choice: &ModelChoice) -> Result<String, String> {
     let claude = inner.claude.lock().unwrap().clone().ok_or("Claude Code isn't installed")?;
     if !Path::new(cwd).is_dir() {
         return Err(format!("{cwd} isn't a folder on this {}.", crate::platform::COMPUTER));
@@ -2666,6 +2834,7 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
     if let Some(worktree) = worktree {
         cmd.args(["-w", worktree]);
     }
+    cmd.args(choice_flags(choice));
     let out = output(cmd, Duration::from_secs(60)).await?;
     let short = backgrounded_id(&out).ok_or_else(|| format!("Claude Code didn't say which session it started ({})", first_line(&out)))?;
     inner.st.lock().unwrap().pending.insert(short.clone(), key.to_string());
@@ -2680,10 +2849,14 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
             Some(sid) => {
                 st.pending.remove(&short);
                 let known = st.started.remove(&sid).unwrap_or_default();
-                let thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep, ..known };
+                let mut thread = Started { key: key.to_string(), at: now_ms(), cwd: Some(cwd.to_string()), keep, ..known };
+                thread.flags.model = choice.model.clone();
+                thread.flags.effort = choice.effort.clone();
                 remember(&inner.started_path, &mut st.started, &sid, thread).map_err(|e| e.to_string())?;
                 let s = st.session(&sid);
                 s.kept = keep;
+                s.flags.model = choice.model.clone();
+                s.flags.effort = choice.effort.clone();
                 if s.key.as_deref() != Some(key) {
                     // Its hooks reported before littleguys knew it: show it under its key, from the top.
                     s.key = Some(key.to_string());
@@ -2715,6 +2888,19 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, name: Opti
     };
     flush(inner, emits);
     result
+}
+
+/// `--model`, `--effort` for `choice`. Only a new session takes them: a background one keeps
+/// the options it started with, and flags on its resume start a copy of it.
+fn choice_flags(choice: &ModelChoice) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(model) = &choice.model {
+        args.extend(["--model".to_string(), model.clone()]);
+    }
+    if let Some(effort) = &choice.effort {
+        args.extend(["--effort".to_string(), effort.clone()]);
+    }
+    args
 }
 
 /// The id of the session `claude --bg` printed `short` for: from its hooks, or `claude agents`.
@@ -2769,7 +2955,7 @@ impl RoutineRunner for Runner {
                     let text = |p: &str| job.as_ref().and_then(|j| j.pointer(p)).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
                     let cwd = text("/payload/cwd").unwrap_or_else(|| inner.st.lock().unwrap().default_folder());
                     let key = keys::routine_run(AGENT_ID, &job_id, &uuid::Uuid::new_v4().to_string());
-                    let sid = launch(&inner, &key, &cwd, &message, text("/name").as_deref(), None, false).await?;
+                    let sid = launch(&inner, &key, &cwd, &message, text("/name").as_deref(), None, false, &ModelChoice::default()).await?;
                     (key, sid, Box::new(|s: &Session| s.turn > 0 && !s.busy))
                 }
                 Some(key) => {
@@ -3358,6 +3544,41 @@ async fn skills_read(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcErr
 }
 
 /// What the composer offers after `/`: skills, custom commands, and the built-ins that work here.
+/// What `--model` takes: an alias for the latest model of each family.
+const MODELS: &[(&str, &str, &str)] = &[
+    ("fable", "Fable", "The most capable, for the hardest work"),
+    ("opus", "Opus", "Complex, long tasks"),
+    ("sonnet", "Sonnet", "Everyday coding"),
+    ("haiku", "Haiku", "Quick, simple tasks"),
+];
+/// What `--effort` takes.
+const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// The models and efforts a new thread can start on, and what it starts on otherwise.
+async fn models_list(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
+    check_agent(params)?;
+    let cwd = folder_of(inner, params);
+    blocking(move || {
+        let default = settings_default(&cwd, &claude_home());
+        let models: Vec<Value> = MODELS.iter().map(|(id, name, description)| json!({ "id": id, "name": name, "description": description })).collect();
+        Ok(json!({ "models": models, "efforts": EFFORTS, "default": { "model": default.model, "effort": default.effort } }))
+    })
+    .await
+}
+
+/// What Claude Code's settings start a session in `cwd` on (`model`, `effortLevel`): the
+/// folder's local settings over its shared ones over yours.
+fn settings_default(cwd: &Path, claude_home: &Path) -> ModelChoice {
+    let mut choice = ModelChoice::default();
+    for path in [claude_home.join("settings.json"), cwd.join(".claude").join("settings.json"), cwd.join(".claude").join("settings.local.json")] {
+        let Some(settings) = acp::read_json(&path) else { continue };
+        let field = |name: &str| settings.get(name).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+        choice.model = field("model").or(choice.model);
+        choice.effort = field("effortLevel").or(choice.effort);
+    }
+    choice
+}
+
 async fn commands_list(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
     check_agent(params)?;
     let cwd = folder_of(inner, params);
@@ -3557,16 +3778,31 @@ pub async fn install_plugin(data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether Claude Code has an account to work with (`claude auth status`, which exits 1
+/// when it hasn't); None when it can't tell, as with a Claude Code too old to have it.
+async fn signed_in(claude: &Path) -> Option<bool> {
+    let mut cmd = cli::command(claude);
+    cmd.args(["auth", "status", "--json"]).stdout(Stdio::piped()).stderr(Stdio::null());
+    let out = tokio::time::timeout(CLI_TIMEOUT, cmd.output()).await.ok()?.ok()?;
+    logged_in(&out.stdout)
+}
+
+/// `claude auth status --json`'s `loggedIn`, printed whether it exits 0 or 1.
+fn logged_in(stdout: &[u8]) -> Option<bool> {
+    serde_json::from_slice::<Value>(stdout).ok()?.get("loggedIn")?.as_bool()
+}
+
 /// Claude Code on this Mac, for the "Add a bot" tab.
 pub async fn detect() -> Value {
     let Some(claude) = find_claude() else {
-        return json!({ "installed": false, "version": Value::Null, "plugin": Value::Null });
+        return json!({ "installed": false, "version": Value::Null, "plugin": Value::Null, "signedIn": Value::Null });
     };
-    let (version, plugin) = tokio::join!(claude_version(&claude), plugin_state(&claude));
+    let (version, plugin, signed_in) = tokio::join!(claude_version(&claude), plugin_state(&claude), signed_in(&claude));
     json!({
         "installed": true,
         "version": version,
         "plugin": plugin.map(|p| json!({ "enabled": p.enabled, "folder": p.folder })),
+        "signedIn": signed_in,
     })
 }
 
@@ -3577,6 +3813,14 @@ pub(super) fn first_line(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logged_in_reads_claude_auth_status() {
+        assert_eq!(logged_in(br#"{"loggedIn": true, "authMethod": "claude.ai"}"#), Some(true));
+        assert_eq!(logged_in(br#"{"loggedIn": false, "authMethod": "none"}"#), Some(false));
+        // An older Claude Code without `auth status` prints its usage, not JSON.
+        assert_eq!(logged_in(b"error: unknown command 'auth'\n"), None);
+    }
 
     fn line(v: Value) -> Value {
         v
@@ -4039,10 +4283,25 @@ mod tests {
     }
 
     #[test]
+    fn a_resume_that_started_a_copy_says_which() {
+        let sid = "aaaa1111-0000-4000-8000-000000000001";
+        assert_eq!(started_copy("backgrounded · aaaa1111 · shop\n", sid), None, "resumed in place");
+        assert_eq!(started_copy("", sid), None);
+        let out = "note: session aaaa1111 is already running in the background, so this started a copy as c0ffee12. `claude attach aaaa1111` opens the original.\nbackgrounded · c0ffee12 · shop\n";
+        assert_eq!(started_copy(out, sid).as_deref(), Some("c0ffee12"));
+        // The note alone, naming the copy by its full session id.
+        let out = "note: started a copy of that conversation as `c0ffee12-0000-4000-8000-000000000002`. To continue a session under its own id, pass its full session id.\n";
+        assert_eq!(started_copy(out, sid).as_deref(), Some("c0ffee12"));
+        // Only what `claude --bg` printed, and the hint naming the original.
+        assert_eq!(started_copy("backgrounded · c0ffee12 · shop\n  claude attach c0ffee12\n", sid).as_deref(), Some("c0ffee12"));
+        assert_eq!(started_copy("  claude attach aaaa1111    open the original\n", sid), None);
+    }
+
+    #[test]
     fn threads_resolve_to_drafts_and_the_sessions_littleguys_started() {
         let mut st = State::default();
         let draft = keys::thread(AGENT_ID, "d-1");
-        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: false, outbox: Vec::new(), worktree: None });
+        st.drafts.insert(draft.clone(), Draft { created_at: 1, ..Draft::new("/w".into()) });
         assert!(matches!(st.thread(&draft), Some(Thread::Draft)));
         // The guy's main key is a draft until a session has it.
         let main = keys::main(AGENT_ID);
@@ -4067,7 +4326,7 @@ mod tests {
         // Reported before its id was known: matched by the short id `claude --bg` printed,
         // it takes over its draft (and what you wrote meanwhile).
         let draft = keys::thread(AGENT_ID, "d-2");
-        st.drafts.insert(draft.clone(), Draft { cwd: "/w".into(), created_at: 1, launching: true, outbox: vec!["and then".into()], worktree: None });
+        st.drafts.insert(draft.clone(), Draft { created_at: 1, launching: true, outbox: vec!["and then".into()], ..Draft::new("/w".into()) });
         st.pending.insert("31009426".into(), draft.clone());
         let sid = "31009426-f4da-4001-87f2-0d40829fb8af";
         assert_eq!(st.session(sid).key(), draft);
@@ -4346,7 +4605,7 @@ mod tests {
         {
             let mut st = client.inner.st.lock().unwrap();
             st.connected = true;
-            st.drafts.insert(key.clone(), Draft { cwd: folder.display().to_string(), created_at: 1, launching: false, outbox: Vec::new(), worktree: None });
+            st.drafts.insert(key.clone(), Draft { created_at: 1, ..Draft::new(folder.display().to_string()) });
         }
         *client.inner.claude.lock().unwrap() = Some(fake_untrusting_claude(&dir));
         let calls = || std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default().lines().filter(|l| l.contains("--bg")).count();
@@ -5331,6 +5590,230 @@ mod tests {
         until("the tool to run", 30, || ran(1010)).await;
 
         tmux(&["kill-server"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replies_say_what_they_ran_on() {
+        let reply = json!({ "type": "assistant", "effort": "xhigh", "message": { "model": "claude-test-large", "content": [{ "type": "text", "text": "done" }] } });
+        assert_eq!(ran_on(&reply), Some(ModelChoice { model: Some("claude-test-large".into()), effort: Some("xhigh".into()) }));
+        let made_up = json!({ "type": "assistant", "message": { "model": "<synthetic>", "content": [] } });
+        assert_eq!(ran_on(&made_up), None);
+        let helper = json!({ "type": "assistant", "isSidechain": true, "message": { "model": "claude-test-small", "content": [] } });
+        assert_eq!(ran_on(&helper), None);
+        assert_eq!(ran_on(&json!({ "type": "user", "message": { "content": "hi" } })), None);
+
+        let mut s = Session::new("s1");
+        assert!(note_line(&mut s, &reply, true, &mut Vec::new()));
+        assert!(!note_line(&mut s, &reply, true, &mut Vec::new()), "the same again changes nothing");
+        s.flags.model = Some("opus".into());
+        let row = session_row(&s);
+        assert_eq!((row["model"].as_str(), row["effort"].as_str()), (Some("claude-test-large"), Some("xhigh")));
+        assert_eq!(row["modelChoice"], "opus");
+    }
+
+    #[test]
+    fn new_sessions_take_the_choice_as_flags() {
+        let choice = ModelChoice { model: Some("opus".into()), effort: Some("high".into()) };
+        assert_eq!(choice_flags(&choice), ["--model", "opus", "--effort", "high"]);
+        assert_eq!(choice_flags(&ModelChoice { model: None, effort: Some("low".into()) }), ["--effort", "low"]);
+        assert!(choice_flags(&ModelChoice::default()).is_empty());
+    }
+
+    #[test]
+    fn the_default_comes_from_claude_codes_settings() {
+        let (home, folder) = (temp_dir("settings-home"), temp_dir("settings-folder"));
+        assert_eq!(settings_default(&folder, &home), ModelChoice::default());
+        write(&home.join("settings.json"), r#"{"model": "sonnet", "effortLevel": "medium"}"#);
+        assert_eq!(settings_default(&folder, &home), ModelChoice { model: Some("sonnet".into()), effort: Some("medium".into()) });
+        write(&folder.join(".claude/settings.json"), r#"{"model": "opus"}"#);
+        write(&folder.join(".claude/settings.local.json"), r#"{"effortLevel": "max"}"#);
+        assert_eq!(settings_default(&folder, &home), ModelChoice { model: Some("opus".into()), effort: Some("max".into()) });
+    }
+
+    #[tokio::test]
+    async fn a_started_thread_keeps_its_model() {
+        let (client, _) = following(false, true);
+        let key = keys::thread(AGENT_ID, "s1");
+        let refused = client.call("sessions.patch", json!({ "key": key, "model": "opus" })).await.unwrap_err();
+        assert_eq!(refused.code, "UNSUPPORTED");
+        assert!(client.call("sessions.patch", json!({ "key": key, "pinned": true })).await.is_ok());
+        let listed = client.call("models.list", json!({ "agentId": AGENT_ID })).await.unwrap();
+        assert_eq!(listed["models"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect::<Vec<_>>(), ["fable", "opus", "sonnet", "haiku"]);
+        assert_eq!(listed["efforts"], json!(["low", "medium", "high", "xhigh", "max"]));
+    }
+
+    /// `claude` that logs each call and says it started a background session.
+    #[cfg(unix)]
+    fn fake_claude(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let claude = dir.join("claude");
+        write(&claude, &format!("#!/bin/sh\necho \"$*\" >> '{}'\necho 'backgrounded · 0badf00d'\n", dir.join("calls.log").display()));
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_thread_starts_on_the_model_you_picked() {
+        let dir = temp_dir("model");
+        let folder = dir.join("shop");
+        std::fs::create_dir_all(&folder).unwrap();
+        let hooks = Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.clone(), hooks);
+        let key = keys::thread(AGENT_ID, "new");
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            st.drafts.insert(key.clone(), Draft { created_at: 1, ..Draft::new(folder.display().to_string()) });
+        }
+        *client.inner.claude.lock().unwrap() = Some(fake_claude(&dir));
+        let refused = client.call("chat.send", json!({ "sessionKey": key, "message": "hi", "model": "-p" })).await.unwrap_err();
+        assert_eq!(refused.code, "INVALID_REQUEST", "nothing that reads as a flag");
+
+        let send = json!({ "sessionKey": key, "message": "add a cart", "idempotencyKey": "send-1", "model": "opus", "effort": "high" });
+        client.call("chat.send", send).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let launched = loop {
+            let calls = std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default();
+            if let Some(line) = calls.lines().find(|l| l.contains("--bg")) {
+                break line.to_string();
+            }
+            assert!(Instant::now() < deadline, "never launched");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(launched.starts_with("add a cart --bg"), "{launched}");
+        assert!(launched.ends_with("--model opus --effort high"), "{launched}");
+    }
+
+    #[cfg(unix)]
+    const IDLE_SID: &str = "aaaa1111-0000-4000-8000-000000000001";
+    #[cfg(unix)]
+    const COPY_SID: &str = "c0ffee12-0000-4000-8000-000000000002";
+
+    /// `claude` with one background session, `aaaa1111`, that logs each call. `claude stop`
+    /// leaves its process listed `stopping` more times; resuming it while it's listed, or
+    /// whenever `<dir>/always-copy` exists, starts a copy (`c0ffee12`) the way Claude Code does.
+    /// A `<dir>/fail` file makes the next `claude agents` fail.
+    #[cfg(unix)]
+    fn fake_stopping_claude(dir: &Path, stopping: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = r#"#!/bin/sh
+D='@DIR@'
+echo "$*" >> "$D/calls.log"
+up=$(cat "$D/up" 2>/dev/null || echo 0)
+case "$1" in
+  stop) echo @STOPPING@ > "$D/up" ;;
+  agents)
+    if [ -f "$D/fail" ]; then rm "$D/fail"; exit 1; fi
+    if [ "$up" -gt 0 ]; then echo $((up - 1)) > "$D/up"; pid=4242; else pid=null; fi
+    copy=''
+    if [ -f "$D/copied" ]; then copy=',{"pid":4343,"id":"c0ffee12","kind":"background","sessionId":"@COPY@","cwd":"/shop","status":"busy","state":"working"}'; fi
+    echo "[{\"pid\":$pid,\"id\":\"aaaa1111\",\"kind\":\"background\",\"sessionId\":\"@IDLE@\",\"cwd\":\"/shop\",\"status\":\"idle\",\"state\":\"done\"}$copy]" ;;
+  *)
+    if [ "$up" -gt 0 ] || [ -f "$D/always-copy" ]; then
+      touch "$D/copied"
+      echo 'note: session aaaa1111 is already running in the background, so this started a copy as c0ffee12. `claude attach aaaa1111` opens the original.'
+      echo 'backgrounded · c0ffee12 · shop'
+    else
+      echo 'backgrounded · aaaa1111 · shop'
+    fi ;;
+esac
+"#
+        .replace("@DIR@", &dir.display().to_string())
+        .replace("@STOPPING@", &stopping.to_string())
+        .replace("@IDLE@", IDLE_SID)
+        .replace("@COPY@", COPY_SID);
+        let claude = dir.join("claude");
+        write(&claude, &script);
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    /// A client following `aaaa1111`, up and idle in the background, as a pinned thread you started.
+    #[cfg(unix)]
+    fn idle_background_thread(dir: &Path, claude: PathBuf) -> (ClaudeCodeClient, String) {
+        let hooks = Hooks { status: Box::new(|_| {}), event: Box::new(|_, _, _| {}), connected: Box::new(|| {}) };
+        let client = ClaudeCodeClient::new("t".into(), "Claude".into(), ClaudeCodeConfig::default(), dir.to_path_buf(), hooks);
+        let key = keys::thread(AGENT_ID, "mine");
+        {
+            let mut st = client.inner.st.lock().unwrap();
+            st.connected = true;
+            let flags = ThreadFlags { pinned: true, ..Default::default() };
+            st.started.insert(IDLE_SID.into(), Started { key: key.clone(), at: now_ms(), keep: true, flags, ..Default::default() });
+            let s = st.session(IDLE_SID);
+            s.running = true;
+            s.background = true;
+            s.short_id = Some("aaaa1111".into());
+            s.cwd = dir.display().to_string();
+        }
+        *client.inner.claude.lock().unwrap() = Some(claude);
+        (client, key)
+    }
+
+    #[cfg(unix)]
+    async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_message_to_an_idle_background_session_waits_for_it_to_stop() {
+        let dir = temp_dir("stop");
+        // The first listing after `claude stop` fails, then it's listed stopping three more times.
+        write(&dir.join("fail"), "");
+        let (client, key) = idle_background_thread(&dir, fake_stopping_claude(&dir, 3));
+        client.call("chat.send", json!({ "sessionKey": key, "message": "add a cart" })).await.unwrap();
+        let calls = || std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default();
+        wait_for("never resumed", || calls().contains("--resume")).await;
+
+        let calls = calls();
+        assert!(!dir.join("copied").exists(), "resumed while it was still up:\n{calls}");
+        let order: Vec<&str> = calls.lines().map(|l| l.split_whitespace().next().unwrap_or_default()).collect();
+        assert_eq!(order, ["stop", "agents", "agents", "agents", "agents", "agents", "add"], "{calls}");
+        assert!(calls.contains(&format!("add a cart --resume {IDLE_SID} --bg")), "{calls}");
+        wait_for("never marked busy", || client.inner.st.lock().unwrap().sessions[IDLE_SID].busy).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_copy_claude_code_starts_anyway_becomes_the_thread() {
+        let dir = temp_dir("copy");
+        write(&dir.join("always-copy"), "");
+        let (client, key) = idle_background_thread(&dir, fake_stopping_claude(&dir, 0));
+        client.call("chat.send", json!({ "sessionKey": key, "message": "add a cart", "idempotencyKey": "send-1" })).await.unwrap();
+        let resolves_to_copy = || matches!(client.inner.st.lock().unwrap().thread(&key), Some(Thread::Session(sid)) if sid == COPY_SID);
+        wait_for("the thread never became the copy", resolves_to_copy).await;
+
+        {
+            let st = client.inner.st.lock().unwrap();
+            assert!(st.sessions[IDLE_SID].hidden, "the original is hidden");
+            let copy = &st.sessions[COPY_SID];
+            assert_eq!(copy.key.as_deref(), Some(key.as_str()));
+            assert!(copy.kept && copy.flags.pinned, "the thread keeps what you set on it");
+            assert!(copy.busy, "at work on your message");
+            assert_eq!(copy.short_id.as_deref(), Some("c0ffee12"));
+            assert!(st.pending.is_empty());
+        }
+        let listed = client.call("sessions.list", json!({})).await.unwrap();
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.iter().filter(|r| r["key"] == key).count(), 1, "one thread: {listed}");
+        assert!(rows.iter().any(|r| r["key"] == key && r["sessionId"] == COPY_SID), "{listed}");
+        assert!(rows.iter().all(|r| r["sessionId"] != IDLE_SID), "{listed}");
+
+        // It's saved: after a restart the thread is still the copy.
+        let saved = load_started(&client.inner.started_path);
+        assert!(saved[IDLE_SID].hidden);
+        assert_eq!(saved[COPY_SID].key, key);
+        assert!(saved[COPY_SID].keep && !saved[COPY_SID].hidden);
+        let mut st = State { started: saved, ..Default::default() };
+        assert!(matches!(st.thread(&key), Some(Thread::Session(sid)) if sid == COPY_SID));
+        assert_eq!(st.session(COPY_SID).key.as_deref(), Some(key.as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

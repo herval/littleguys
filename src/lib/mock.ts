@@ -2,6 +2,9 @@
 // Shapes mirror real gateway responses. Query params:
 //   ?phase=pairing|offline|no-config   previews the Doctor (no gateway connected)
 //   ?single=1                          one gateway only
+//   ?only=claudecode                   only the gateways of that kind (someone who's added just Claude Code)
+//   ?missing=codex,claude              not installed yet, so Add a bot offers to install them
+//   ?signedout=codex                   installed but not signed in; ?installfails=codex fails its install
 //   ?empty=1                           connected, but no guys yet
 //   ?stills=1                          the browser tab isn't in front, so its stream sends no frames
 //   ?slow=1                            replies take a while (time to queue messages while a guy works)
@@ -9,7 +12,7 @@ import claudeFace from "../../src-tauri/assets/claude-code.svg";
 import { bridgeMockInvoke } from "./bridge";
 import { mockRooms } from "./mockRooms";
 import type { Backend } from "./ipc";
-import type { ChatMessage, CoderPrefs, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster, TerminalApp } from "./types";
+import type { ChatMessage, CoderPrefs, ConnStatus, DiscoveredGateway, DoctorReport, GatewayRoster, Limit, NotifyPrefs, Roster, SetupAgent, TerminalApp } from "./types";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -135,8 +138,8 @@ const claudeCode = gateway("claude-5f2a9c1e7b", "Claude Code", "This Mac", "conn
   agents: [{ id: "claude", name: "Claude Code", identity: { name: "Claude Code", avatarUrl: claudeFace }, workspace: "/Users/you/dev/shop-api" }] as never,
   sessions: [
     { key: ccKey("c1"), agentId: "claude", kind: "direct", derivedTitle: "Fix the flaky checkout test", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 20_000, lastMessagePreview: "Running the suite 20 times to catch the race…", hasActiveRun: true, status: "running" },
-    { key: ccKey("c2"), agentId: "claude", kind: "direct", derivedTitle: "Upgrade the Terraform providers", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 2 * min, lastMessagePreview: "The plan only touches the providers. Applying it next.", status: "done" },
-    { key: ccKey("c3"), agentId: "claude", kind: "direct", derivedTitle: "Add CSV export", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 40 * min, lastMessagePreview: "CSV export is in; 14 tests pass.", status: "done" },
+    { key: ccKey("c2"), agentId: "claude", kind: "direct", derivedTitle: "Upgrade the Terraform providers", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 2 * min, lastMessagePreview: "The plan only touches the providers. Applying it next.", status: "done", model: "claude-opus-5-5", effort: "high", modelChoice: "opus" },
+    { key: ccKey("c3"), agentId: "claude", kind: "direct", derivedTitle: "Add CSV export", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 40 * min, lastMessagePreview: "CSV export is in; 14 tests pass.", status: "done", model: "claude-sonnet-5-5", effort: "medium" },
     { key: ccKey("c4"), agentId: "claude", kind: "direct", derivedTitle: "Weekly dependency bump", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 5 * 60 * min, lastMessagePreview: "Bumped 9 packages; nothing broke.", status: "done" },
   ] as never,
   running: [ccKey("c1")],
@@ -157,7 +160,7 @@ claudeCode.status = {
   mode: "local",
   serverVersion: "2.1.296",
   hello: { approvals: true },
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, editFiles: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: true, models: false, files: true, editFiles: true, skills: true, commands: true, tools: false, plugins: true, browser: false, pastSessions: true, code: true, steer: true, threadModels: true, switchModels: false },
 };
 
 const codex = gateway("acp-codex", "Codex", "npx -y @agentclientprotocol/codex-acp", "connected", {
@@ -183,8 +186,8 @@ const codexSessions = gateway("codex-8e1d4b7a20", "Codex", "This Mac", "connecte
   agents: [{ id: "codex", name: "Codex", identity: { name: "Codex", emoji: "🌀" }, workspace: "/Users/you/dev/shop-api" }] as never,
   sessions: [
     { key: cxKey("x1"), agentId: "codex", kind: "direct", derivedTitle: "Speed up the search index", workspaceDir: "/Users/you/dev/shop-api", updatedAt: now - 30_000, lastMessagePreview: "Rebuilding the index with the new tokenizer…", hasActiveRun: true, status: "running" },
-    { key: cxKey("x2"), agentId: "codex", kind: "direct", derivedTitle: "Clean up the old build scripts", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 3 * min, lastMessagePreview: "Waiting for you in Codex", status: "done" },
-    { key: cxKey("x3"), agentId: "codex", kind: "direct", derivedTitle: "Write the changelog for 2.4", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 50 * min, lastMessagePreview: "Changelog's in; 6 entries.", status: "done" },
+    { key: cxKey("x2"), agentId: "codex", kind: "direct", derivedTitle: "Clean up the old build scripts", workspaceDir: "/Users/you/dev/infra", updatedAt: now - 3 * min, lastMessagePreview: "Waiting for you in Codex", status: "done", model: "gpt-6.2-sol", effort: "high" },
+    { key: cxKey("x3"), agentId: "codex", kind: "direct", derivedTitle: "Write the changelog for 2.4", workspaceDir: "/Users/you/dev/billing-api", updatedAt: now - 50 * min, lastMessagePreview: "Changelog's in; 6 entries.", status: "done", model: "gpt-6-luna", effort: "low", modelChoice: "gpt-6-luna", effortChoice: "low" },
   ] as never,
   running: [cxKey("x1")],
   approvals: [
@@ -203,18 +206,29 @@ codexSessions.status = {
   kind: "codex",
   mode: "local",
   serverVersion: "0.166.0",
-  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, editFiles: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true, steer: true },
+  capabilities: { manageGuys: false, routines: true, routinesLocal: true, approvals: true, threadActions: true, newThreads: true, attachments: false, models: false, files: true, editFiles: true, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: true, code: true, steer: true, threadModels: true, switchModels: true },
 };
 
 /** The face each bot gave a guy, from before a photo was picked for them. */
 const botFaces = new Map<string, string | undefined>();
+
+// Claude Code and Codex on this computer, for Add a bot's install and sign-in.
+const missing = (params.get("missing") ?? "").split(",");
+const signedOut = (params.get("signedout") ?? "").split(",");
+const setup: Record<SetupAgent, { installed: boolean; signedIn: boolean }> = {
+  claude: { installed: !missing.includes("claude"), signedIn: !signedOut.includes("claude") },
+  codex: { installed: !missing.includes("codex"), signedIn: !signedOut.includes("codex") },
+};
+const signInCancel: Partial<Record<SetupAgent, () => void>> = {};
 
 const roster: Roster = {
   gateways: forcedPhase
     ? [attic]
     : params.get("single")
       ? [attic]
-      : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude, params.get("codex") ? codexSessions : codex],
+      : params.get("only")
+        ? [attic, garage, shed, lab, hermes, claude, claudeCode, codex, codexSessions].filter((g) => g.status.kind === params.get("only"))
+        : [attic, garage, shed, lab, hermes, params.get("claudecode") ? claudeCode : claude, params.get("codex") ? codexSessions : codex],
   hidden: ["hermes-1/research"],
   steps: [],
   notifications: { everyone: { replies: true, routines: "all" }, guys: {} },
@@ -916,6 +930,27 @@ function searchMessages(gateway: string, p: Record<string, unknown>) {
   return { results: [...results, ...past].slice(0, Number(p.limit ?? 10)) };
 }
 
+// What `models.list` answers for Claude Code (its `--model` aliases) and Codex (its app server's list).
+const claudeModels = {
+  models: [
+    { id: "fable", name: "Fable", description: "The most capable, for the hardest work" },
+    { id: "opus", name: "Opus", description: "Complex, long tasks" },
+    { id: "sonnet", name: "Sonnet", description: "Everyday coding" },
+    { id: "haiku", name: "Haiku", description: "Quick, simple tasks" },
+  ],
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+  default: { model: "sonnet", effort: "high" },
+};
+const codexEfforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+const codexModels = {
+  models: [
+    { id: "gpt-6.2-sol", name: "GPT-6.2-Sol", description: "Frontier agentic coding", efforts: codexEfforts, defaultEffort: "low" },
+    { id: "gpt-6.2-astra", name: "GPT-6.2-Astra", description: "Deep reasoning for long tasks", efforts: codexEfforts, defaultEffort: "low" },
+    { id: "gpt-6-luna", name: "GPT-6-Luna", description: "Fast and cheap", efforts: codexEfforts.slice(0, 5), defaultEffort: "medium" },
+  ],
+  default: { model: "gpt-6.2-sol", effort: "medium" },
+};
+
 async function gwCall(gateway: string, method: string, p: Record<string, unknown>): Promise<unknown> {
   await new Promise((r) => setTimeout(r, 120));
   if (rooms && gateway === "rooms") return rooms.call(method, p);
@@ -983,7 +1018,12 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
       return { ok: true, key: `agent:${p.agentId}:dashboard:${crypto.randomUUID()}` };
     case "sessions.patch": {
       const g = roster.gateways.find((g) => g.id === gateway);
-      const flags = Object.fromEntries(Object.entries(p).filter(([k]) => ["label", "pinned", "archived", "unread"].includes(k)));
+      const flags: Record<string, unknown> = Object.fromEntries(Object.entries(p).filter(([k]) => ["label", "pinned", "archived", "unread"].includes(k)));
+      if ("model" in p || "effort" in p) {
+        if (!g?.status.capabilities.switchModels) throw { code: "UNSUPPORTED", message: "A Claude Code thread keeps the model it started on. Start a new thread to use another." };
+        if ("model" in p) flags.modelChoice = p.model ?? undefined;
+        if ("effort" in p) flags.effortChoice = p.effort ?? undefined;
+      }
       if (g) g.sessions = g.sessions.map((r) => (r.key === p.key ? { ...r, ...flags } : r));
       emit("lg:roster", { ...roster, gateways: [...roster.gateways] });
       return { ok: true, key: p.key };
@@ -1003,6 +1043,8 @@ async function gwCall(gateway: string, method: string, p: Record<string, unknown
     case "cron.runs":
       return { entries: [{ ts: now - 9 * 60 * min, runAtMs: now - 9 * 60 * min, jobId: p.jobId, status: "ok", summary: "Sunny, 24°. 3 meetings today.", sessionKey: "agent:main:cron:job1:run:r1" }], total: 1 };
     case "models.list":
+      if (gateway === claudeCode.id) return claudeModels;
+      if (gateway === codexSessions.id) return codexModels;
       return { models: [{ id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" }, { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic" }, { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "openai" }] };
     case "agents.files.get": {
       const content = workspaceFiles[String(p.name)] ?? "# SOUL.md\n";
@@ -1241,10 +1283,44 @@ export const mockBackend: Backend = {
         return [{ url: "http://127.0.0.1:9119", version: "0.21.5", mode: "local", authRequired: false }] as T;
       case "claude_code_detect":
         await new Promise((r) => setTimeout(r, 400));
-        return { installed: true, version: "2.1.296", plugin: null } as T;
+        return setup.claude.installed
+          ? ({ installed: true, version: "2.1.296", plugin: null, signedIn: setup.claude.signedIn } as T)
+          : ({ installed: false, version: null, plugin: null, signedIn: null } as T);
       case "codex_detect":
         await new Promise((r) => setTimeout(r, 400));
-        return { installed: true, version: "0.166.0", sessions: true } as T;
+        return setup.codex.installed
+          ? ({ installed: true, version: "0.166.0", sessions: true, signedIn: setup.codex.signedIn } as T)
+          : ({ installed: false, version: null, sessions: false, signedIn: null } as T);
+      case "agent_install": {
+        const agent = (args as { agent: SetupAgent }).agent;
+        const say = (line: string) => emit("lg:agent-setup", { agent, step: "install", line });
+        const lines =
+          agent === "codex"
+            ? ["Downloading the Codex installer…", "==> Installing Codex CLI 0.166.0", "==> Downloading codex-package-aarch64-apple-darwin.tar.gz", "==> Verifying checksum", "==> Adding ~/.local/bin to PATH in ~/.zshrc", "Codex CLI 0.166.0 installed successfully."]
+            : ["Downloading the Claude Code installer…", "Setting up Claude Code...", "✔ Claude Code successfully installed!", "", "✅ Installation complete!"];
+        for (const line of lines) {
+          say(line);
+          await new Promise((r) => setTimeout(r, 450));
+        }
+        if (params.get("installfails") === agent) throw "curl: (6) Could not resolve host: releases.openai.com";
+        setup[agent] = { installed: true, signedIn: false };
+        return undefined as T;
+      }
+      case "agent_sign_in": {
+        const agent = (args as { agent: SetupAgent }).agent;
+        const page = agent === "codex" ? "https://auth.openai.com/oauth/authorize?client_id=app_EXAMPLE&state=x1" : "https://claude.ai/oauth/authorize?code=true&state=x1";
+        emit("lg:agent-setup", { agent, step: "signin", line: `If your browser did not open, navigate to this URL to authenticate: ${page}` });
+        const done = await new Promise<boolean>((resolve) => {
+          signInCancel[agent] = () => resolve(false);
+          setTimeout(() => resolve(true), 4000);
+        });
+        if (!done) throw "Sign-in cancelled.";
+        setup[agent].signedIn = true;
+        return undefined as T;
+      }
+      case "agent_sign_in_cancel":
+        signInCancel[(args as { agent: SetupAgent }).agent]?.();
+        return undefined as T;
       case "claude_code_install_plugin":
         await new Promise((r) => setTimeout(r, 900));
         return undefined as T;

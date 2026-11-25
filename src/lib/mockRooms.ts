@@ -12,7 +12,7 @@ interface MockRoom {
   timers: ReturnType<typeof setTimeout>[];
 }
 
-const NO_CAPS = { manageGuys: false, routines: false, routinesLocal: false, approvals: false, threadActions: false, newThreads: false, attachments: false, models: false, files: false, editFiles: false, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: false, code: false, steer: false };
+const NO_CAPS = { manageGuys: false, routines: false, routinesLocal: false, approvals: false, threadActions: false, newThreads: false, attachments: false, models: false, files: false, editFiles: false, skills: false, commands: false, tools: false, plugins: false, browser: false, pastSessions: false, code: false, steer: false, threadModels: false, switchModels: false };
 
 export function mockRooms(roster: Roster, emit: (event: string, payload: unknown) => void, base: ConnStatus, now: number) {
   const min = 60_000;

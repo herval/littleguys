@@ -1,5 +1,5 @@
 import { ArrowUp, Clock3, Paperclip, Pencil, Square, X } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { findCommand, loadCommands, matchSlash } from "../lib/commands";
 import type { Delivery } from "../lib/gateway";
 import { errorMessage } from "../lib/ipc";
@@ -28,6 +28,7 @@ export function Composer({
   onStop,
   draftKey,
   room,
+  beforeSend,
 }: {
   gatewayId: string;
   agentId: string;
@@ -49,6 +50,8 @@ export function Composer({
    * never waits for a turn to end: it's for the room, and the room takes it from there.
    */
   room?: { seats: Seat[]; to: string };
+  /** Beside the send button: the thread's model and effort (`ModelChip`). */
+  beforeSend?: ReactNode;
 }) {
   const [text, setText] = useState(() => sessionStorage.getItem(`draft:${draftKey}`) ?? "");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -412,6 +415,7 @@ export function Composer({
             }}
             className="selectable max-h-[220px] min-h-[36px] flex-1 resize-none bg-transparent py-[8px] text-[13.5px] leading-[20px] outline-none placeholder:text-[var(--color-ink-3)]"
           />
+          {beforeSend}
           {running && !text.trim() && attachments.length === 0 ? (
             <button
               onClick={onStop}

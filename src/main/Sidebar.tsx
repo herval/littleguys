@@ -88,7 +88,7 @@ export function Sidebar() {
   );
 }
 
-/** Beside the traffic lights: back to the guys, search, settings. New guys are made in Settings › Agents. */
+/** Beside the traffic lights: back to the guys, search, settings. New guys and agents are added in Settings › Agents. */
 function SidebarTop({ back }: { back: boolean }) {
   const browse = useApp((s) => s.browse);
   const setSettingsOpen = useApp((s) => s.setSettingsOpen);

@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::demo::{Demo, DemoHost, CLAUDE, HERMES, OPENCLAW};
-use super::phone::{connect, ConnectError, Invite, PhoneKeys};
+use super::phone::{connect, ConnectError, Invite, PhoneKeys, PhoneSession};
 use super::{Bridge, BridgeConfig};
 
 fn temp_dir() -> std::path::PathBuf {
@@ -80,6 +80,7 @@ async fn pairs_then_reconnects_and_talks_to_bots() {
     assert!(bots[0]["hello"].get("snapshot").is_none());
     assert_eq!(phone.hello["protocol"], 1);
     assert_eq!(phone.hello["policy"]["maxPayload"], 33_554_432);
+    assert_eq!(phone.hello["features"], json!(["chat.queue", "limits.read", "settings"]));
     let state = bridge.state();
     assert_eq!(state.phones.len(), 1);
     assert_eq!(state.phones[0].name, "Test iPhone");
@@ -168,6 +169,139 @@ async fn pairs_then_reconnects_and_talks_to_bots() {
     assert!(timeout(phone.next_event()).await.is_none());
     assert_eq!(phone.close_code(), Some(4010));
     assert!(bridge.port().is_none(), "no phones and no pairing: stop listening");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The next `bot.event` named `name`: its payload.
+async fn bot_event(phone: &mut PhoneSession, name: &str) -> Value {
+    loop {
+        let frame = timeout(phone.wait_event("bot.event")).await.expect("the session ended");
+        if frame["payload"]["event"] == name {
+            return frame["payload"]["payload"].clone();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_message_written_while_a_guy_works_waits_its_turn() {
+    let dir = temp_dir();
+    let mut host = DemoHost::new();
+    host.word_delay = Duration::from_millis(60);
+    let bridge = bridge(host.leak(), &dir);
+    let (invite, addr) = pair(&bridge).await;
+    let mut phone = timeout(connect(&addr, &invite, &PhoneKeys::generate(), client(), true)).await.unwrap();
+    // A thread of its own: the queue is shared by every test in this process.
+    let key = "agent:fox:dashboard:queue-test";
+    let call = |method: &str, params: Value| json!({ "gateway": OPENCLAW, "method": method, "params": params });
+    let queue = |message: &str| call("chat.send", json!({ "sessionKey": key, "message": message, "delivery": "queue" }));
+
+    // Nothing under way: it goes at once.
+    let first = phone.request("bot.call", queue("first")).await.unwrap();
+    assert_eq!(first["status"], "started");
+
+    // Fox is replying: the next one waits in littleguys.
+    let held = phone.request("bot.call", queue("second")).await.unwrap();
+    assert_eq!(held["status"], "held");
+    let changed = bot_event(&mut phone, "chat.queue").await;
+    assert_eq!(changed["sessionKey"], key);
+    assert_eq!(changed["queued"][0]["id"], held["runId"]);
+    assert_eq!(changed["queued"][0]["text"], "second");
+    assert_eq!(changed["queued"][0]["attachments"], json!([]));
+    let history = phone.request("bot.call", call("chat.history", json!({ "sessionKey": key }))).await.unwrap();
+    assert_eq!(history["queued"][0]["text"], "second");
+
+    // The turn's over: it's handed over as the next message.
+    let sending = bot_event(&mut phone, "chat.queue").await;
+    assert_eq!(sending["sent"]["text"], "second");
+    assert_eq!(sending["queued"], json!([]));
+    let accepted = bot_event(&mut phone, "chat.queue").await;
+    assert_eq!(accepted["accepted"]["id"], sending["sent"]["id"]);
+    assert_eq!(accepted["accepted"]["receipt"]["status"], "started");
+
+    // Taken back while that one's answered.
+    let held = phone.request("bot.call", queue("third")).await.unwrap();
+    assert_eq!(held["status"], "held");
+    let id = held["runId"].clone();
+    assert_eq!(bot_event(&mut phone, "chat.queue").await["queued"][0]["text"], "third");
+    let removed = phone.request("bot.call", call("chat.queue.remove", json!({ "sessionKey": key, "id": id }))).await.unwrap();
+    assert_eq!(removed["removed"], true);
+    assert_eq!(bot_event(&mut phone, "chat.queue").await["queued"], json!([]));
+    let err = phone.request("bot.call", call("chat.queue.send", json!({ "sessionKey": key, "id": id }))).await.unwrap_err();
+    assert_eq!(err["code"], "NOT_FOUND");
+
+    // Fox answers what was queued.
+    loop {
+        let chat = bot_event(&mut phone, "chat").await;
+        if chat["state"] == "final" {
+            assert!(chat["message"]["content"][0]["text"].as_str().unwrap().contains("second"));
+            break;
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn phones_read_limits_and_set_notifications() {
+    let dir = temp_dir();
+    let bridge = bridge(DemoHost::new().leak(), &dir);
+    let (invite, addr) = pair(&bridge).await;
+    let mut phone = timeout(connect(&addr, &invite, &PhoneKeys::generate(), client(), true)).await.unwrap();
+
+    // limits.read
+    let claude = phone.request("limits.read", json!({ "provider": "claude" })).await.unwrap();
+    assert_eq!(claude["limit"]["usedPercent"], 42.0);
+    assert!(claude["limit"]["resetsAtMs"].as_u64().unwrap() > claude["limit"]["readAtMs"].as_u64().unwrap());
+    assert_eq!(phone.request("limits.read", json!({ "provider": "codex" })).await.unwrap(), json!({ "limit": null }));
+    assert_eq!(phone.request("limits.read", json!({ "provider": "gemini" })).await.unwrap(), json!({ "limit": null }));
+    assert_eq!(phone.request("limits.read", json!({})).await.unwrap_err()["code"], "INVALID_PARAMS");
+
+    // settings.get: Coder mode's switches, never its folders or terminal.
+    let everything = json!({ "replies": true, "routines": "all" });
+    assert_eq!(
+        phone.request("settings.get", json!({})).await.unwrap(),
+        json!({ "notifications": { "everyone": everything, "guys": {} }, "coder": { "on": true, "edits": true, "prs": false } })
+    );
+
+    // One guy set apart: every phone hears it (`settings`), and settings.get agrees.
+    let fox = format!("{OPENCLAW}/fox");
+    let quiet = json!({ "replies": false, "routines": "failing" });
+    let set = |uid: Option<&str>, prefs: &Value| match uid {
+        Some(uid) => json!({ "uid": uid, "prefs": prefs }),
+        None => json!({ "prefs": prefs }),
+    };
+    assert_eq!(phone.request("notify.set", set(Some(&fox), &quiet)).await.unwrap(), json!({}));
+    let settings = timeout(phone.wait_event("settings")).await.unwrap()["payload"].clone();
+    assert_eq!(settings["notifications"]["guys"][&fox], quiet);
+    assert_eq!(settings["notifications"]["everyone"], everything);
+    assert_eq!(phone.request("settings.get", json!({})).await.unwrap(), settings);
+
+    // `prefs: null` puts the guy back to everyone's…
+    phone.request("notify.set", set(Some(&fox), &Value::Null)).await.unwrap();
+    assert_eq!(timeout(phone.wait_event("settings")).await.unwrap()["payload"]["notifications"]["guys"], json!({}));
+    // …and so does setting them to what everyone gets, as the Mac's Settings does.
+    phone.request("notify.set", set(Some(&fox), &quiet)).await.unwrap();
+    timeout(phone.wait_event("settings")).await.unwrap();
+    phone.request("notify.set", set(Some(&fox), &everything)).await.unwrap();
+    assert_eq!(timeout(phone.wait_event("settings")).await.unwrap()["payload"]["notifications"]["guys"], json!({}));
+
+    // Everyone: every guy follows.
+    phone.request("notify.set", set(Some(&fox), &quiet)).await.unwrap();
+    timeout(phone.wait_event("settings")).await.unwrap();
+    let no_routines = json!({ "replies": true, "routines": "off" });
+    phone.request("notify.set", set(None, &no_routines)).await.unwrap();
+    let settings = timeout(phone.wait_event("settings")).await.unwrap()["payload"].clone();
+    assert_eq!(settings["notifications"], json!({ "everyone": no_routines, "guys": {} }));
+
+    for bad in [
+        json!({}),
+        json!({ "prefs": null }),
+        json!({ "uid": "fox", "prefs": quiet }),
+        json!({ "uid": 7, "prefs": quiet }),
+        json!({ "prefs": { "replies": true, "routines": "sometimes" } }),
+        json!({ "prefs": { "replies": true } }),
+    ] {
+        assert_eq!(phone.request("notify.set", bad.clone()).await.unwrap_err()["code"], "INVALID_PARAMS", "{bad}");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -49,6 +49,43 @@ export interface Capabilities {
   code: boolean;
   /** A message can join the turn under way (`chat.send` with `delivery: "steer"`). */
   steer: boolean;
+  /** A new thread can start on a model and effort you pick (`models.list`, `chat.send {model, effort}`). */
+  threadModels?: boolean;
+  /** …and a started one can switch, from its next turn (`sessions.patch {model, effort}`). */
+  switchModels?: boolean;
+}
+
+/** A model and effort for a thread; `null` (or missing) is the engine's default. */
+export interface ModelPick {
+  model?: string | null;
+  effort?: string | null;
+}
+
+/** One model a thread can run on (`models.list` from Claude Code and Codex). */
+export interface ModelOption {
+  id: string;
+  name?: string;
+  description?: string | null;
+  /** The efforts it takes, when they depend on the model. */
+  efforts?: string[];
+  defaultEffort?: string | null;
+}
+
+/** `models.list` from a runtime with `threadModels`. */
+export interface ThreadModels {
+  models: ModelOption[];
+  /** The efforts every model takes, when they don't depend on the model. */
+  efforts?: string[];
+  /** What a thread runs on when you don't pick (the engine's own settings). */
+  default?: ModelPick;
+}
+
+/** What a thread runs on, from its session row: its last turn, and what you picked. */
+export interface RowModel {
+  model?: string | null;
+  effort?: string | null;
+  modelChoice?: string | null;
+  effortChoice?: string | null;
 }
 
 /** A message littleguys holds until the guy's turn ends (`chat.queue`, src-tauri/src/outbox.rs). */
@@ -304,6 +341,18 @@ export interface ClaudeCodeProbe {
   installed: boolean;
   version?: string | null;
   plugin?: { enabled: boolean; folder?: string | null } | null;
+  /** It has an account to work with; null when it can't tell. */
+  signedIn?: boolean | null;
+}
+
+/** What "Add a bot" can install and sign in to (src-tauri/src/agent_setup.rs). */
+export type SetupAgent = "claude" | "codex";
+
+/** A line of an install or sign-in's output (`lg:agent-setup`). */
+export interface AgentSetupLine {
+  agent: SetupAgent;
+  step: "install" | "signin";
+  line: string;
 }
 
 /** Whose rate limit a guy runs on (see src/lib/limits.ts). */
@@ -323,6 +372,8 @@ export interface CodexProbe {
   version?: string | null;
   /** It has run here: there are sessions to show. */
   sessions?: boolean;
+  /** It has an account to work with; null when it can't tell. */
+  signedIn?: boolean | null;
 }
 
 export interface GatewayEntry {

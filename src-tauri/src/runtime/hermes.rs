@@ -442,6 +442,8 @@ fn capabilities(mode: HermesMode) -> Capabilities {
         code: false,
         // Hermes folds a prompt that comes mid-turn into that turn.
         steer: true,
+        thread_models: false,
+        switch_models: false,
     }
 }
 

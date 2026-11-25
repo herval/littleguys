@@ -1,4 +1,5 @@
 mod activity;
+mod agent_setup;
 mod avatar_file;
 pub mod bridge;
 mod browser_stream;
@@ -10,6 +11,8 @@ pub mod gateways;
 mod hub;
 mod limits;
 pub mod localfs;
+#[cfg(target_os = "macos")]
+mod mac_notifications;
 mod media;
 pub mod openclaw;
 mod outbox;
@@ -28,6 +31,28 @@ use crate::activity::Activity;
 use crate::hub::Hub;
 use crate::tray::TrayAnimator;
 use crate::updater::Updates;
+
+#[cfg(target_os = "macos")]
+fn install_settings_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{MenuItem, MenuItemKind};
+
+    const SETTINGS: &str = "app-settings";
+    if let Some(menu) = app.menu() {
+        if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.first() {
+            let settings = MenuItem::with_id(app, SETTINGS, "Settings…", true, Some("Cmd+,"))?;
+            app_menu.insert(&settings, 1)?;
+            app.on_menu_event(|app, event| {
+                if event.id().as_ref() == SETTINGS {
+                    windows::open_main(app, Some(windows::Navigate {
+                        view: Some("settings".into()),
+                        ..Default::default()
+                    }));
+                }
+            });
+        }
+    }
+    Ok(())
+}
 
 pub fn run() {
     // Started to build a message index, out of the app's own memory: that, and nothing else.
@@ -75,6 +100,9 @@ pub fn run() {
             commands::claude_code_configure,
             commands::codex_configure,
             commands::codex_detect,
+            agent_setup::agent_install,
+            agent_setup::agent_sign_in,
+            agent_setup::agent_sign_in_cancel,
             commands::gateway_setup_code,
             commands::acp_registry,
             commands::hermes_detect,
@@ -122,7 +150,10 @@ pub fn run() {
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                install_settings_menu(app)?;
+            }
 
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir()?;
@@ -154,6 +185,8 @@ pub fn run() {
             animator.start(handle.clone());
 
             windows::setup(&handle);
+            #[cfg(target_os = "macos")]
+            mac_notifications::setup(&handle);
 
             // Self-update from GitHub releases
             let updates = Updates::new(app.package_info().version.to_string());

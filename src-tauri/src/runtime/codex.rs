@@ -52,7 +52,7 @@ use crate::openclaw::runtime as cli;
 use crate::runtime::claudecode::{first_line, modified_ms, read_lines};
 use crate::runtime::scheduler::{LocalScheduler, RoutineRunner, TurnOutcome};
 use crate::runtime::search;
-use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, RuntimeKind, ThreadFlags};
+use crate::runtime::{blocking, home, keys, parse_iso_ms, truncate, unsupported, Capabilities, ModelChoice, RuntimeKind, ThreadFlags};
 
 const AGENT_ID: &str = "codex";
 
@@ -128,6 +128,9 @@ fn capabilities() -> Capabilities {
         code: true,
         // `turn/steer`, for sessions the shared server has open.
         steer: true,
+        // `turn/start {model, effort}`, which sticks for later turns.
+        thread_models: true,
+        switch_models: true,
     }
 }
 
@@ -252,6 +255,14 @@ struct Draft {
     outbox: Vec<PendingMessage>,
     /// Start it in a new worktree of this name (coder mode's "In a new worktree").
     worktree: Option<String>,
+    /// The model and effort it starts on (`chat.send {model?, effort?}`).
+    choice: ModelChoice,
+}
+
+impl Draft {
+    fn new(cwd: String) -> Self {
+        Self { cwd, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None, choice: ModelChoice::default() }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -347,6 +358,8 @@ struct Session {
     handed: u64,
     /// Stops the `codex exec` running it.
     exec: Option<oneshot::Sender<()>>,
+    /// The model and effort its last turn ran on (its rollout's `turn_context`).
+    ran: ModelChoice,
 }
 
 impl Session {
@@ -598,6 +611,7 @@ impl CodexClient {
             "sessions.past" => sessions_past(inner).await,
             "sessions.open" => sessions_open(inner, &params),
             "sessions.search" => sessions_search(inner, &params).await,
+            "models.list" => models_list(inner).await,
             // The folder of the thread you're on (`sessionKey`), else the one you last worked in.
             "agents.workspace.list" | "agents.workspace.get" | "agents.workspace.set" => {
                 check_agent(&params)?;
@@ -1199,6 +1213,10 @@ fn note_line(s: &mut Session, line: &Value, only: Option<&str>, live: bool, emit
     note_start(s, line, only);
     let meta = line_meta(line);
     let mut changed = false;
+    if let Some(ran) = turn_context(line) {
+        changed |= live && ran != s.ran;
+        s.ran = ran;
+    }
     if let Some(said) = meta.said {
         s.said = Some(said);
         changed = live;
@@ -1224,6 +1242,15 @@ fn note_line(s: &mut Session, line: &Value, only: Option<&str>, live: bool, emit
         }
     }
     changed
+}
+
+/// The model and effort a turn runs on, from its `turn_context` line.
+fn turn_context(line: &Value) -> Option<ModelChoice> {
+    if line.get("type").and_then(Value::as_str) != Some("turn_context") {
+        return None;
+    }
+    let field = |name: &str| line.pointer(&format!("/payload/{name}")).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string);
+    Some(ModelChoice { model: field("model"), effort: field("effort").or_else(|| field("reasoning_effort")) })
 }
 
 fn chat_message(role: &str, content: Vec<Value>, ts: Option<u64>, id: &str) -> Value {
@@ -1796,12 +1823,16 @@ fn chat_send(inner: &Arc<Inner>, params: &Value) -> Result<Value, RpcError> {
         Thread::Draft => {
             let cwd = params.get("cwd").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
             let worktree = params.get("worktree").and_then(Value::as_bool) == Some(true) && crate::code::worktrees_allowed();
+            let choice = ModelChoice::from_params(params)?;
             let start = {
                 let mut st = inner.st.lock().unwrap();
                 let fallback = st.default_folder();
-                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft { cwd: fallback, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
+                let d = st.drafts.entry(key.clone()).or_insert_with(|| Draft::new(fallback));
                 if let Some(cwd) = cwd.filter(|_| !d.launching) {
                     d.cwd = cwd;
+                }
+                if !d.launching {
+                    d.choice = choice;
                 }
                 if worktree && !d.launching && d.worktree.is_none() && crate::code::repo_root(Path::new(&d.cwd)).is_some() {
                     d.worktree = Some(crate::code::worktree_name(&text));
@@ -1886,11 +1917,11 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
                 return;
             }
             s.handed += 1;
-            (std::mem::take(&mut s.outbox), s.busy, s.live, s.interrupted, s.cwd.clone(), s.key())
+            (std::mem::take(&mut s.outbox), s.busy, s.live, s.interrupted, s.cwd.clone(), s.key(), s.flags.model_choice())
         };
-        let (batch, busy, live, interrupted, cwd, key) = job;
+        let (batch, busy, live, interrupted, cwd, key, choice) = job;
         let text = delivery::text(&batch);
-        let result = hand_over(&inner, &sid, &text, busy, live, &cwd).await;
+        let result = hand_over(&inner, &sid, &text, busy, live, &cwd, &choice).await;
         if let Err(e) = &result {
             log::warn!("[codex] couldn't reach {sid}: {e}");
         }
@@ -1918,12 +1949,15 @@ async fn deliver(inner: Arc<Inner>, sid: String) {
     }
 }
 
-async fn hand_over(inner: &Arc<Inner>, sid: &str, text: &str, busy: bool, live: bool, cwd: &str) -> Result<Handed, String> {
+/// Hands `text` to session `sid`. A turn littleguys starts (on the shared server, or with
+/// `codex exec`) runs on the thread's `choice`; one queued for a terminal runs on the
+/// terminal's.
+async fn hand_over(inner: &Arc<Inner>, sid: &str, text: &str, busy: bool, live: bool, cwd: &str, choice: &ModelChoice) -> Result<Handed, String> {
     let srv = server(inner);
     let can_queue = inner.can_queue.load(Ordering::SeqCst);
     match route(busy, live, srv.is_some(), can_queue)? {
         Route::Queue => queue(inner, sid, text).await.map(|()| Handed::Queued),
-        Route::Exec => exec_resume(inner, sid, text, cwd).await.map(|()| Handed::Turn),
+        Route::Exec => exec_resume(inner, sid, text, cwd, choice).await.map(|()| Handed::Turn),
         Route::Turn => {
             let srv = srv.ok_or("lost the connection to Codex")?;
             // Failure to attach is safe to route through the queue: no prompt was submitted.
@@ -1932,7 +1966,7 @@ async fn hand_over(inner: &Arc<Inner>, sid: &str, text: &str, busy: bool, live: 
                 return if can_queue { queue(inner, sid, text).await.map(|()| Handed::Queued) } else { Err(e) };
             }
             inner.st.lock().unwrap().joined.insert(sid.to_string(), Instant::now());
-            srv.call("turn/start", json!({ "threadId": sid, "input": turn_input(text) })).await?;
+            srv.call("turn/start", turn_start(sid, text, choice)).await?;
             Ok(Handed::Turn)
         }
     }
@@ -1940,6 +1974,30 @@ async fn hand_over(inner: &Arc<Inner>, sid: &str, text: &str, busy: bool, live: 
 
 fn turn_input(text: &str) -> Value {
     json!([{ "type": "text", "text": text, "text_elements": [] }])
+}
+
+/// `turn/start` for `text`, on `choice` (Codex keeps it for the turns after too).
+fn turn_start(sid: &str, text: &str, choice: &ModelChoice) -> Value {
+    let mut params = json!({ "threadId": sid, "input": turn_input(text) });
+    if let Some(model) = &choice.model {
+        params["model"] = json!(model);
+    }
+    if let Some(effort) = &choice.effort {
+        params["effort"] = json!(effort);
+    }
+    params
+}
+
+/// `codex exec` flags for `choice`.
+fn exec_flags(choice: &ModelChoice) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(model) = &choice.model {
+        args.extend(["-m".to_string(), model.clone()]);
+    }
+    if let Some(effort) = &choice.effort {
+        args.extend(["-c".to_string(), format!("model_reasoning_effort=\"{effort}\"")]);
+    }
+    args
 }
 
 /// `codex queue --thread <id> --message <text> --resume`: safe however the session is
@@ -2050,9 +2108,11 @@ async fn run_exec(inner: &Arc<Inner>, args: Vec<String>, cwd: &str) -> Result<(S
     }
 }
 
-async fn exec_resume(inner: &Arc<Inner>, sid: &str, text: &str, cwd: &str) -> Result<(), String> {
+async fn exec_resume(inner: &Arc<Inner>, sid: &str, text: &str, cwd: &str, choice: &ModelChoice) -> Result<(), String> {
     let dir = if Path::new(cwd).is_dir() { cwd.to_string() } else { home().display().to_string() };
-    let args = ["exec", "resume", "--json", "--skip-git-repo-check", sid].iter().map(|a| a.to_string()).chain([prompt_arg(text)]).collect();
+    let mut args: Vec<String> = ["exec", "resume", "--json", "--skip-git-repo-check"].iter().map(|a| a.to_string()).collect();
+    args.extend(exec_flags(choice));
+    args.extend([sid.to_string(), prompt_arg(text)]);
     let (_, stop) = run_exec(inner, args, &dir).await?;
     if let Some(s) = inner.st.lock().unwrap().sessions.get_mut(sid) {
         s.exec = Some(stop);
@@ -2066,11 +2126,11 @@ async fn exec_resume(inner: &Arc<Inner>, sid: &str, text: &str, cwd: &str) -> Re
 async fn start_draft(inner: Arc<Inner>, key: String) {
     let job = {
         let mut st = inner.st.lock().unwrap();
-        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone(), d.worktree.is_some()))
+        st.drafts.get_mut(&key).map(|d| (std::mem::take(&mut d.outbox), d.cwd.clone(), d.worktree.is_some(), d.choice.clone()))
     };
-    let Some((batch, cwd, worktree)) = job else { return };
+    let Some((batch, cwd, worktree, choice)) = job else { return };
     let text = delivery::text(&batch);
-    let result = launch(&inner, &key, &cwd, &text, worktree, true).await;
+    let result = launch(&inner, &key, &cwd, &text, worktree, true, &choice).await;
     let mut emits: Emits = vec![refresh(), delivery::event(&key, &batch, result.as_ref().err().map(String::as_str))];
     {
         let mut st = inner.st.lock().unwrap();
@@ -2104,7 +2164,7 @@ async fn start_draft(inner: Arc<Inner>, key: String) {
 }
 
 /// Makes `sid` thread `key`, from the top of its rollout, at work on its first turn.
-fn bind(inner: &Inner, sid: &str, key: &str, cwd: &str, keep: bool, path: Option<PathBuf>) {
+fn bind(inner: &Inner, sid: &str, key: &str, cwd: &str, keep: bool, path: Option<PathBuf>, choice: &ModelChoice) {
     let mut emits: Emits = vec![refresh()];
     {
         let mut st = inner.st.lock().unwrap();
@@ -2115,6 +2175,8 @@ fn bind(inner: &Inner, sid: &str, key: &str, cwd: &str, keep: bool, path: Option
         let s = st.session(sid);
         s.unsaved = true;
         s.kept = keep;
+        s.flags.model = choice.model.clone();
+        s.flags.effort = choice.effort.clone();
         s.key = Some(key.to_string());
         s.tail = Some(Tail::default());
         s.cwd = cwd.to_string();
@@ -2132,13 +2194,14 @@ fn bind(inner: &Inner, sid: &str, key: &str, cwd: &str, keep: bool, path: Option
 /// A new session in `cwd`, shown as thread `key`: on the shared server, else with `codex exec`.
 /// With `worktree`, in a new worktree Codex makes, which only `codex exec --worktree` does
 /// (the app server has no such option), so that session runs outside the shared server.
-async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, worktree: bool, keep: bool) -> Result<String, String> {
+async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, worktree: bool, keep: bool, choice: &ModelChoice) -> Result<String, String> {
     if !Path::new(cwd).is_dir() {
         return Err(format!("{cwd} isn't a folder on this {}.", crate::platform::COMPUTER));
     }
+    let run_on = ModelChoice { model: choice.model.clone().or_else(|| inner.model.clone()), effort: choice.effort.clone() };
     if let Some(srv) = server(inner).filter(|_| !worktree) {
         let mut params = json!({ "cwd": cwd });
-        if let Some(model) = &inner.model {
+        if let Some(model) = &run_on.model {
             params["model"] = json!(model);
         }
         match srv.call("thread/start", params).await {
@@ -2146,8 +2209,8 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, worktree: 
                 let sid = started.pointer("/thread/id").and_then(Value::as_str).ok_or("Codex didn't say which session it started")?.to_string();
                 let path = started.pointer("/thread/path").and_then(Value::as_str).map(PathBuf::from);
                 inner.st.lock().unwrap().joined.insert(sid.clone(), Instant::now());
-                bind(inner, &sid, key, cwd, keep, path);
-                srv.call("turn/start", json!({ "threadId": sid, "input": turn_input(text) })).await?;
+                bind(inner, &sid, key, cwd, keep, path, choice);
+                srv.call("turn/start", turn_start(&sid, text, &run_on)).await?;
                 return Ok(sid);
             }
             Err(e) => log::warn!("[codex] the shared app server wouldn't start a session: {e}"),
@@ -2157,12 +2220,10 @@ async fn launch(inner: &Arc<Inner>, key: &str, cwd: &str, text: &str, worktree: 
     if worktree {
         args.push("--worktree".to_string());
     }
-    if let Some(model) = &inner.model {
-        args.extend(["-m".to_string(), model.clone()]);
-    }
+    args.extend(exec_flags(&run_on));
     args.push(prompt_arg(text));
     let (sid, stop) = run_exec(inner, args, cwd).await?;
-    bind(inner, &sid, key, cwd, keep, None);
+    bind(inner, &sid, key, cwd, keep, None, choice);
     if let Some(s) = inner.st.lock().unwrap().sessions.get_mut(&sid) {
         s.exec = Some(stop);
     }
@@ -2195,7 +2256,7 @@ impl RoutineRunner for Runner {
                     let folder = job.as_ref().and_then(|j| j.pointer("/payload/cwd")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
                     let cwd = folder.unwrap_or_else(|| inner.st.lock().unwrap().default_folder());
                     let key = keys::routine_run(AGENT_ID, &job_id, &uuid::Uuid::new_v4().to_string());
-                    let sid = launch(&inner, &key, &cwd, &message, false, false).await?;
+                    let sid = launch(&inner, &key, &cwd, &message, false, false, &ModelChoice::default()).await?;
                     (key, sid, Box::new(|s: &Session| s.turn > 0 && !s.busy))
                 }
                 Some(key) => {
@@ -2264,6 +2325,107 @@ fn agents_list(inner: &Inner) -> Value {
     })
 }
 
+/// The models a thread can run on, each with its efforts: the shared server's `model/list`,
+/// else the list Codex caches (`models_cache.json`). `default` is what `config.toml` sets.
+async fn models_list(inner: &Inner) -> Result<Value, RpcError> {
+    let home = inner.home.clone();
+    let listed = match server(inner) {
+        Some(srv) => match srv.call("model/list", json!({ "limit": 100 })).await {
+            Ok(answer) => Some(models_from_server(&answer)),
+            Err(e) => {
+                log::debug!("[codex] model/list: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+    blocking(move || {
+        let (models, default_model) = match listed {
+            Some(listed) => listed,
+            None => (models_from_cache(&home), None),
+        };
+        let mut default = config_default(&home);
+        if default.model.is_none() {
+            default.model = default_model;
+        }
+        Ok(json!({ "models": models, "default": { "model": default.model, "effort": default.effort } }))
+    })
+    .await
+}
+
+/// `model/list`'s models you'd pick from, and the one it marks as the default.
+fn models_from_server(answer: &Value) -> (Vec<Value>, Option<String>) {
+    let mut default = None;
+    let models = answer
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|m| m.get("hidden").and_then(Value::as_bool) != Some(true))
+        .filter_map(|m| {
+            let id = m.get("model").or_else(|| m.get("id")).and_then(Value::as_str)?;
+            if m.get("isDefault").and_then(Value::as_bool) == Some(true) {
+                default = Some(id.to_string());
+            }
+            let efforts: Vec<&str> = m
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.get("reasoningEffort").or(Some(e)).and_then(Value::as_str))
+                .collect();
+            Some(json!({
+                "id": id,
+                "name": m.get("displayName").and_then(Value::as_str).unwrap_or(id),
+                "description": m.get("description"),
+                "efforts": efforts,
+                "defaultEffort": m.get("defaultReasoningEffort"),
+            }))
+        })
+        .collect();
+    (models, default)
+}
+
+/// The models Codex last fetched (`$CODEX_HOME/models_cache.json`), the listed ones.
+fn models_from_cache(home: &Path) -> Vec<Value> {
+    let Some(cache) = std::fs::read_to_string(home.join("models_cache.json")).ok().and_then(|raw| serde_json::from_str::<Value>(&raw).ok()) else {
+        return Vec::new();
+    };
+    cache
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|m| m.get("visibility").and_then(Value::as_str).is_none_or(|v| v == "list"))
+        .filter_map(|m| {
+            let id = m.get("slug").and_then(Value::as_str)?;
+            let efforts: Vec<&str> = m
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.get("effort").and_then(Value::as_str))
+                .collect();
+            Some(json!({
+                "id": id,
+                "name": m.get("display_name").and_then(Value::as_str).unwrap_or(id),
+                "description": m.get("description"),
+                "efforts": efforts,
+                "defaultEffort": m.get("default_reasoning_level"),
+            }))
+        })
+        .collect()
+}
+
+/// What `config.toml` sets new sessions to run on (`model`, `model_reasoning_effort`).
+fn config_default(home: &Path) -> ModelChoice {
+    let Some(config) = std::fs::read_to_string(home.join("config.toml")).ok().and_then(|raw| toml::from_str::<Value>(&raw).ok()) else {
+        return ModelChoice::default();
+    };
+    let field = |name: &str| config.get(name).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string);
+    ModelChoice { model: field("model"), effort: field("model_reasoning_effort") }
+}
+
 fn sessions_list(inner: &Inner, params: &Value) -> Value {
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(500) as usize;
     let archived = super::archived_filter(params);
@@ -2307,6 +2469,12 @@ fn session_row(s: &Session, waiting: Option<&WaitingOn>) -> Value {
         "hasActiveRun": s.busy,
         "status": if s.busy { "running" } else { "done" },
     });
+    if let Some(model) = &s.ran.model {
+        row["model"] = json!(model);
+    }
+    if let Some(effort) = &s.ran.effort {
+        row["effort"] = json!(effort);
+    }
     s.flags.add_to(&mut row);
     row
 }
@@ -2327,6 +2495,7 @@ fn sessions_patch(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
             Thread::Draft => return Err(RpcError::new("INVALID_REQUEST", "This thread hasn't started yet.")),
             Thread::Session(sid) => {
                 let s = st.sessions.get_mut(&sid).ok_or_else(|| RpcError::new("NOT_FOUND", "Not a Codex session."))?;
+                s.unsaved |= s.flags.patch_model(params)?;
                 s.unsaved |= s.flags.patch(params);
                 session_row(s, st.waiting.get(&sid))
             }
@@ -2400,7 +2569,7 @@ fn sessions_create(inner: &Inner, params: &Value) -> Result<Value, RpcError> {
     {
         let mut st = inner.st.lock().unwrap();
         let cwd = st.default_folder();
-        st.drafts.insert(key.clone(), Draft { cwd, created_at: now_ms(), launching: false, outbox: Vec::new(), worktree: None });
+        st.drafts.insert(key.clone(), Draft::new(cwd));
     }
     emit(inner, "sessions.changed", json!({ "sessionKey": key, "agentId": AGENT_ID, "reason": "created" }));
     Ok(json!({ "ok": true, "key": key }))
@@ -2665,13 +2834,32 @@ async fn codex_version(codex: &Path) -> Option<String> {
     out.split_whitespace().last().map(str::to_string)
 }
 
+/// Whether Codex has an account to work with (`codex login status`); None when it can't tell.
+async fn signed_in(codex: &Path) -> Option<bool> {
+    let mut cmd = cli::command(codex);
+    cmd.args(["login", "status"]).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = tokio::time::timeout(CLI_TIMEOUT, cmd.output()).await.ok()?.ok()?;
+    let text = format!("{}\n{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    login_status(out.status.success(), &text)
+}
+
+/// `codex login status` exits 0 when signed in, and 1 saying "Not logged in" (on stderr,
+/// maybe after a warning) when not. Any other failure says nothing either way.
+fn login_status(success: bool, output: &str) -> Option<bool> {
+    if success {
+        return Some(true);
+    }
+    output.lines().any(|l| l.trim().starts_with("Not logged in")).then_some(false)
+}
+
 /// Codex on this machine, for Add a bot and the first-run screen:
-/// `{installed, version, sessions: whether it has run here}`.
+/// `{installed, version, sessions: whether it has run here, signedIn}`.
 pub async fn detect() -> Value {
     let Some(codex) = find_codex() else {
-        return json!({ "installed": false, "version": Value::Null, "sessions": false });
+        return json!({ "installed": false, "version": Value::Null, "sessions": false, "signedIn": Value::Null });
     };
-    json!({ "installed": true, "version": codex_version(&codex).await, "sessions": codex_home().join("sessions").is_dir() })
+    let (version, signed_in) = tokio::join!(codex_version(&codex), signed_in(&codex));
+    json!({ "installed": true, "version": version, "sessions": codex_home().join("sessions").is_dir(), "signedIn": signed_in })
 }
 
 #[cfg(test)]
@@ -2679,6 +2867,14 @@ mod tests {
     use super::*;
 
     const ID: &str = "01a1a900-0000-7000-8000-00000000abcd";
+
+    #[test]
+    fn login_status_reads_codex_login_status() {
+        assert_eq!(login_status(true, "Logged in using ChatGPT\n"), Some(true));
+        assert_eq!(login_status(false, "Not logged in\n"), Some(false));
+        assert_eq!(login_status(false, "WARNING: unknown key in config.toml\nNot logged in\n"), Some(false));
+        assert_eq!(login_status(false, "error: unrecognized subcommand 'status'\n"), None);
+    }
 
     fn event(kind: &str, rest: Value) -> Value {
         let mut payload = json!({ "type": kind });
@@ -3302,7 +3498,7 @@ mod tests {
         assert!(st.thread("agent:claude:dashboard:x").is_none());
         st.started.insert("s1".into(), Started { key: "agent:codex:dashboard:mine".into(), ..Default::default() });
         assert!(matches!(st.thread("agent:codex:dashboard:mine"), Some(Thread::Session(sid)) if sid == "s1"));
-        st.drafts.insert("agent:codex:dashboard:new".into(), Draft { cwd: String::new(), created_at: 0, launching: false, outbox: Vec::new(), worktree: None });
+        st.drafts.insert("agent:codex:dashboard:new".into(), Draft { created_at: 0, ..Draft::new(String::new()) });
         assert!(matches!(st.thread("agent:codex:dashboard:new"), Some(Thread::Draft)));
     }
 
@@ -3416,5 +3612,82 @@ mod tests {
         let st = client.inner.st.lock().unwrap();
         assert!(!st.joined.contains_key(ID), "the server only replays a prompt to a session that rejoins");
         assert!(st.joined.contains_key("busy-elsewhere"));
+    }
+
+    #[test]
+    fn turns_say_what_they_ran_on() {
+        let ctx = json!({ "timestamp": "2026-11-01T10:00:00.000Z", "type": "turn_context", "payload": { "cwd": "/x", "model": "gpt-test-large", "effort": "xhigh" } });
+        let mut s = Session::new(ID);
+        assert!(note_line(&mut s, &ctx, None, true, &mut Vec::new()));
+        assert_eq!(s.ran, ModelChoice { model: Some("gpt-test-large".into()), effort: Some("xhigh".into()) });
+        assert!(!note_line(&mut s, &ctx, None, true, &mut Vec::new()), "the same again changes nothing");
+        s.flags.model = Some("gpt-test-small".into());
+        let row = session_row(&s, None);
+        assert_eq!(row["model"], "gpt-test-large");
+        assert_eq!(row["effort"], "xhigh");
+        assert_eq!(row["modelChoice"], "gpt-test-small");
+        assert!(row.get("effortChoice").is_none());
+    }
+
+    #[test]
+    fn turns_littleguys_starts_carry_the_threads_choice() {
+        let choice = ModelChoice { model: Some("gpt-test-small".into()), effort: Some("high".into()) };
+        let params = turn_start(ID, "hi", &choice);
+        assert_eq!((params["model"].as_str(), params["effort"].as_str()), (Some("gpt-test-small"), Some("high")));
+        assert_eq!(params["input"], turn_input("hi"));
+        let plain = turn_start(ID, "hi", &ModelChoice::default());
+        assert!(plain.get("model").is_none() && plain.get("effort").is_none());
+        assert_eq!(exec_flags(&choice), ["-m", "gpt-test-small", "-c", "model_reasoning_effort=\"high\""]);
+        assert!(exec_flags(&ModelChoice::default()).is_empty());
+    }
+
+    #[test]
+    fn models_come_from_the_server_else_codexs_cache() {
+        let answer = json!({ "data": [
+            { "id": "large", "model": "gpt-test-large", "displayName": "GPT Test Large", "description": "For hard work", "hidden": false, "isDefault": true,
+              "supportedReasoningEfforts": [{ "reasoningEffort": "low", "description": "Fast" }, { "reasoningEffort": "xhigh", "description": "Deep" }],
+              "defaultReasoningEffort": "low" },
+            { "id": "old", "model": "gpt-test-old", "displayName": "Old", "hidden": true, "supportedReasoningEfforts": [] },
+        ]});
+        let (models, default) = models_from_server(&answer);
+        assert_eq!(default.as_deref(), Some("gpt-test-large"));
+        assert_eq!(models.len(), 1, "hidden models aren't offered");
+        assert_eq!(models[0]["id"], "gpt-test-large");
+        assert_eq!(models[0]["name"], "GPT Test Large");
+        assert_eq!(models[0]["efforts"], json!(["low", "xhigh"]));
+        assert_eq!(models[0]["defaultEffort"], "low");
+
+        let dir = temp("models");
+        let cache = json!({ "fetched_at": "2026-11-20T00:00:00Z", "models": [
+            { "slug": "gpt-test-small", "display_name": "GPT Test Small", "default_reasoning_level": "medium",
+              "supported_reasoning_levels": [{ "effort": "medium", "description": "" }, { "effort": "max", "description": "" }], "visibility": "list" },
+            { "slug": "gpt-test-old", "display_name": "Old", "visibility": "hide" },
+        ]});
+        std::fs::write(dir.join("models_cache.json"), cache.to_string()).unwrap();
+        let cached = models_from_cache(&dir);
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0]["id"], "gpt-test-small");
+        assert_eq!(cached[0]["efforts"], json!(["medium", "max"]));
+        assert_eq!(cached[0]["defaultEffort"], "medium");
+        assert!(models_from_cache(&temp("no-cache")).is_empty());
+
+        std::fs::write(dir.join("config.toml"), "model = \"gpt-test-small\"\nmodel_reasoning_effort = \"max\"\n\n[profiles.fast]\nmodel = \"gpt-test-large\"\n").unwrap();
+        assert_eq!(config_default(&dir), ModelChoice { model: Some("gpt-test-small".into()), effort: Some("max".into()) });
+        assert_eq!(config_default(&temp("no-config")), ModelChoice::default());
+    }
+
+    #[test]
+    fn a_thread_switches_model_from_its_next_turn() {
+        let (client, _) = following(true);
+        let key = keys::thread(AGENT_ID, ID);
+        let row = sessions_patch(&client.inner, &json!({ "key": key, "model": "gpt-test-small", "effort": "high" })).unwrap();
+        assert_eq!((row["modelChoice"].as_str(), row["effortChoice"].as_str()), (Some("gpt-test-small"), Some("high")));
+        let row = sessions_patch(&client.inner, &json!({ "key": key, "model": null })).unwrap();
+        assert!(row.get("modelChoice").is_none(), "null goes back to the default");
+        assert_eq!(row["effortChoice"], "high");
+        let refused = sessions_patch(&client.inner, &json!({ "key": key, "model": "--dangerously-bypass-approvals-and-sandbox" })).unwrap_err();
+        assert_eq!(refused.code, "INVALID_REQUEST");
+        assert_eq!(load_started(&client.inner.started_path)[ID].flags.effort.as_deref(), Some("high"));
+        assert_eq!(client.inner.st.lock().unwrap().sessions[ID].flags.model_choice(), ModelChoice { model: None, effort: Some("high".into()) });
     }
 }

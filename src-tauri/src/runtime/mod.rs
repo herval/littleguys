@@ -6,19 +6,25 @@
 //! Calls (`Runtime::call(method, params)`):
 //! - `agents.list` → `{defaultId, agents:[{id, name, identity:{name, emoji}, workspace?, model?:{primary}}]}`
 //! - `sessions.list {limit?, archived?}` → `{sessions:[SessionRow-ish: {key, agentId, label?, derivedTitle?,
-//!   displayName?, lastMessagePreview?, updatedAt, unread?, lastReadAt?, archived?, hasActiveRun?, status?, sessionId?}]}`:
+//!   displayName?, lastMessagePreview?, updatedAt, unread?, lastReadAt?, archived?, hasActiveRun?, status?, sessionId?,
+//!   model?, effort? (what its last turn ran on), modelChoice?, effortChoice? (what you picked)}]}`:
 //!   the threads that aren't archived; `archived: true` lists only archived ones, `"all"` both ([`archived_filter`])
 //! - `sessions.subscribe`, `sessions.messages.subscribe {key}` → `{subscribed:true}`
 //! - `sessions.create {agentId, label?}` → `{ok:true, key}`
-//! - `sessions.patch {key, label?, pinned?, archived?, unread?}`, `sessions.delete {key}` (if `thread_actions`)
+//! - `sessions.patch {key, label?, pinned?, archived?, unread?}`, `sessions.delete {key}` (if `thread_actions`);
+//!   `model?`, `effort?` (if `switch_models`; `null` goes back to the default) switch it from its next turn
 //! - `chat.history {sessionKey, limit?}` → `{sessionKey, messages:[ChatMessage], hasMore:false}`
 //! - `chat.send {sessionKey, message, idempotencyKey, attachments?, delivery?}` → `{runId, status:"started", clientSendId?, delivery?}`;
 //!   `delivery: "steer"` asks to take it into the turn under way (if `steer`). `delivery: "queue"` never
 //!   reaches a runtime: littleguys holds it while the thread works (outbox.rs, `status:"held"`)
+//!   A new thread's first message can carry `model?`, `effort?` (if `thread_models`).
 //! - `chat.abort {sessionKey, runId?}`
 //! - `exec.approval.list` → `{approvals:[…]}`; `exec.approval.resolve {id, decision: allow-once|allow-always|deny}`
 //! - `cron.list|add|update|remove|run|runs` (if `routines`) — same shapes as OpenClaw
-//! - `models.list` (if `models`), `agents.create|update|delete`, `agents.files.get|set` (if `manage_guys`)
+//! - `models.list` (if `models` or `thread_models`) → `{models:[{id, name?, description?, efforts?:[string],
+//!   defaultEffort?}], efforts?:[string], default?:{model?, effort?}}`: `efforts` at the top when they don't depend
+//!   on the model; `default`, what a thread runs on when you don't pick (the engine's own settings)
+//! - `agents.create|update|delete`, `agents.files.get|set` (if `manage_guys`)
 //! - `agents.workspace.list {agentId, path?, offset?, limit?}` → `{agentId, path, parentPath?, entries:[{path,
 //!   name, kind: file|directory, size?, updatedAtMs?}], totalEntries, offset}` (dirs first, by name; root is `""`)
 //! - `agents.workspace.get {agentId, path}` → `{agentId, file:{path, name, size, updatedAtMs, mimeType,
@@ -144,6 +150,12 @@ pub struct Capabilities {
     /// A message can join the turn under way (`chat.send` with `delivery: "steer"`); without
     /// it, what you send while a guy works waits for its turn to end.
     pub steer: bool,
+    /// A new thread can start on a model and effort of your choice (`models.list`, then
+    /// `chat.send {model?, effort?}` with its first message).
+    pub thread_models: bool,
+    /// …and a thread that started can switch (`sessions.patch {key, model?, effort?}`), from
+    /// its next turn.
+    pub switch_models: bool,
 }
 
 impl Capabilities {
@@ -167,6 +179,8 @@ impl Capabilities {
             past_sessions: false,
             code: false,
             steer: true,
+            thread_models: false,
+            switch_models: false,
         }
     }
 
@@ -191,6 +205,8 @@ impl Capabilities {
             past_sessions: false,
             code: false,
             steer: false,
+            thread_models: false,
+            switch_models: false,
         }
     }
 
@@ -408,6 +424,49 @@ pub struct ThreadFlags {
     /// runtime decides (ACP: not archived; Claude Code: archived once it's done).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
+    /// The model you picked for it. `None`: the engine's default (or what it was started on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// …and the effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+/// A model and effort picked for a thread (see [`Capabilities::thread_models`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelChoice {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl ModelChoice {
+    /// `{model?, effort?}` from `chat.send` or `sessions.patch`. A missing key is `None` here
+    /// too; [`ThreadFlags::patch_model`] tells it apart from `null`.
+    pub fn from_params(params: &Value) -> Result<Self, RpcError> {
+        Ok(Self { model: choice(params, "model", model_name_ok)?.flatten(), effort: choice(params, "effort", effort_ok)?.flatten() })
+    }
+}
+
+/// `Some(None)` for `null` or "", `Some(Some(v))` for a good value, `None` when the key is missing.
+fn choice(params: &Value, name: &str, ok: fn(&str) -> bool) -> Result<Option<Option<String>>, RpcError> {
+    match params.get(name) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(Some(None)),
+        Some(Value::String(s)) if ok(s.trim()) => Ok(Some(Some(s.trim().to_string()))),
+        Some(other) => Err(RpcError::new("INVALID_REQUEST", format!("{other} isn't a {name} littleguys can pass on"))),
+    }
+}
+
+/// A model name or alias as engines take them (`opus`, `gpt-6-astra`, `claude-opus-5-5[1m]`):
+/// passed to a CLI as an argument, so it can't start with '-' or hold spaces.
+pub fn model_name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 100 && !name.starts_with('-') && name.chars().all(|c| c.is_ascii_alphanumeric() || "._:/[]-".contains(c))
+}
+
+/// An effort level (`low`, `xhigh`, `max`).
+pub fn effort_ok(effort: &str) -> bool {
+    !effort.is_empty() && effort.len() <= 20 && !effort.starts_with('-') && effort.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 impl ThreadFlags {
@@ -432,13 +491,39 @@ impl ThreadFlags {
         *self != before
     }
 
-    /// Adds the session-row fields they show as: `label`, `unread`, `lastReadAt` and `pinned`
-    /// (`archived` is the runtime's to work out).
+    /// Applies `sessions.patch {model?, effort?}` (`null` goes back to the default), for
+    /// runtimes that can switch a thread's model; returns whether anything changed.
+    pub fn patch_model(&mut self, params: &Value) -> Result<bool, RpcError> {
+        let model = choice(params, "model", model_name_ok)?;
+        let effort = choice(params, "effort", effort_ok)?;
+        let before = (self.model.clone(), self.effort.clone());
+        if let Some(model) = model {
+            self.model = model;
+        }
+        if let Some(effort) = effort {
+            self.effort = effort;
+        }
+        Ok(before != (self.model.clone(), self.effort.clone()))
+    }
+
+    pub fn model_choice(&self) -> ModelChoice {
+        ModelChoice { model: self.model.clone(), effort: self.effort.clone() }
+    }
+
+    /// Adds the session-row fields they show as: `label`, `unread`, `lastReadAt`, `pinned`,
+    /// and `modelChoice`/`effortChoice` when you picked them (`archived` is the runtime's to
+    /// work out; `model`/`effort`, what it last ran on, too).
     pub fn add_to(&self, row: &mut Value) {
         row["label"] = serde_json::json!(self.label);
         row["unread"] = Value::Bool(self.unread);
         row["lastReadAt"] = serde_json::json!(self.last_read_at);
         row["pinned"] = Value::Bool(self.pinned);
+        if let Some(model) = &self.model {
+            row["modelChoice"] = serde_json::json!(model);
+        }
+        if let Some(effort) = &self.effort {
+            row["effortChoice"] = serde_json::json!(effort);
+        }
     }
 }
 
@@ -499,6 +584,25 @@ mod tests {
         assert_eq!(row["unread"], false);
         assert_eq!(row["label"], Value::Null);
         assert_eq!(row["archived"], true);
+    }
+
+    #[test]
+    fn a_threads_model_and_effort_patch_and_show() {
+        let mut flags = ThreadFlags::default();
+        assert!(!flags.patch_model(&json!({ "key": "k", "label": "x" })).unwrap());
+        assert!(flags.patch_model(&json!({ "model": " claude-opus-5-5[1m] ", "effort": "xhigh" })).unwrap());
+        assert_eq!(flags.model_choice(), ModelChoice { model: Some("claude-opus-5-5[1m]".into()), effort: Some("xhigh".into()) });
+        assert!(flags.patch_model(&json!({ "model": null, "effort": "" })).unwrap());
+        assert_eq!(flags.model_choice(), ModelChoice::default());
+        for bad in [json!({ "model": "--yolo" }), json!({ "model": "opus; rm -rf ~" }), json!({ "effort": "High" }), json!({ "model": 4 })] {
+            assert_eq!(flags.patch_model(&bad).unwrap_err().code, "INVALID_REQUEST", "{bad}");
+            assert_eq!(ModelChoice::from_params(&bad).unwrap_err().code, "INVALID_REQUEST", "{bad}");
+        }
+        flags.patch_model(&json!({ "model": "gpt-test-large" })).unwrap();
+        let mut row = json!({});
+        flags.add_to(&mut row);
+        assert_eq!(row["modelChoice"], "gpt-test-large");
+        assert!(row.get("effortChoice").is_none());
     }
 
     #[test]

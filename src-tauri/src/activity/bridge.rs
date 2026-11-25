@@ -15,6 +15,11 @@ impl Activity {
             let _ = self.bridge.send(crate::bridge::HostEvent::Status(raw));
         }
     }
+    /// Paired phones keep a copy of the settings they show: send them the new one. Only
+    /// when they change (windows get them in every roster).
+    pub(super) fn settings_changed(&self) {
+        let _ = self.bridge.send(crate::bridge::HostEvent::Settings(self.phone_settings()));
+    }
     /// The same notification for paired phones, as a push (bridge/push.rs).
     pub(super) fn push_to_phones(
         &self,

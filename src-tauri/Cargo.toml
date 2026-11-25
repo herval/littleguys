@@ -61,6 +61,7 @@ plist = "1"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
 mac-notification-sys = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary", "NSString", "NSUserNotification"] }
 
 [target.'cfg(windows)'.dependencies]
 # Toasts that open the chat when clicked (the notification plugin ignores clicks).

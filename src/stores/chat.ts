@@ -3,7 +3,7 @@ import { create } from "zustand";
 import { chat as chatApi, sessions as sessionsApi, type Delivery } from "../lib/gateway";
 import { decodeChatEvent } from "../lib/chatEvents";
 import { errorMessage, listen } from "../lib/ipc";
-import type { Attachment, ChatMessage } from "../lib/types";
+import type { Attachment, ChatMessage, ModelPick } from "../lib/types";
 import { blank, reduceThread, type Action, type ThreadState } from "./chatReducer";
 export { waitingCount, type LiveRun, type ToolState, type ThreadState } from "./chatReducer";
 
@@ -19,9 +19,9 @@ interface ChatState {
   /**
    * `cwd`: folder for a thread's first message (ACP agents); `worktree`: start it in a new worktree (coder mode).
    * `delivery`: while the guy works, wait for its turn to end (`queue`) or go into it (`steer`).
-   * `to`: in a room, the members it's for.
+   * `pick`: the model and effort a new thread starts on. `to`: in a room, the members it's for.
    */
-  send(id: string, text: string, attachments: Attachment[], cwd?: string, worktree?: boolean, delivery?: Delivery, to?: string[]): Promise<void>;
+  send(id: string, text: string, attachments: Attachment[], cwd?: string, worktree?: boolean, delivery?: Delivery, pick?: ModelPick, to?: string[]): Promise<void>;
   /** A queued message, now (`steer`: into the turn under way). */
   sendQueued(id: string, queuedId: string, delivery?: Delivery): Promise<void>;
   /** Takes a queued message back. */
@@ -55,7 +55,7 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
         try { dispatch(key, { type: "history", request: ticket, epoch, history: await api.history(gw, sessionKey), now: Date.now() }); }
         catch (e) { dispatch(key, { type: "loadError", request: ticket, epoch, error: errorMessage(e) }); }
       },
-      async send(key, text, attachments, cwd, worktree, delivery, to) {
+      async send(key, text, attachments, cwd, worktree, delivery, pick, to) {
         const id = crypto.randomUUID();
         const message: ChatMessage = { role: "user", content: [
           ...(text ? [{ type: "text" as const, text }] : []),
@@ -64,7 +64,7 @@ export function createChatStore(api = chatApi, subscribe = sessionsApi.subscribe
         dispatch(key, { type: "send", pending: { idempotencyKey: id, message, status: "sending" } });
         const [gw, sessionKey] = splitThreadId(key);
         try {
-          const receipt = await api.send(gw, sessionKey, text, attachments, cwd, id, worktree, delivery, to);
+          const receipt = await api.send(gw, sessionKey, text, attachments, cwd, id, worktree, delivery, pick, to);
           dispatch(key, { type: "receipt", id, receipt });
         } catch (e) {
           const code = e && typeof e === "object" && "code" in e ? String(e.code) : "";

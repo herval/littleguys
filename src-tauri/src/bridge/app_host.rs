@@ -8,10 +8,11 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-use super::host::{BridgeHost, HostEvent, MediaFetch};
-use crate::activity::Activity;
+use super::host::{BridgeHost, HostEvent, MediaFetch, PhoneSettings};
+use crate::activity::{Activity, NotifyPrefs};
 use crate::gateway::client::RpcError;
 use crate::hub::Hub;
+use crate::limits::Limit;
 
 pub struct AppHost {
     hub: Arc<Hub>,
@@ -45,16 +46,15 @@ impl BridgeHost for AppHost {
             .collect()
     }
 
+    /// Through Activity, like the Mac's own windows: a message written while the thread
+    /// works waits in littleguys' queue (outbox.rs).
     fn call(&self, gateway: &str, method: &str, params: Value, timeout: Option<Duration>) -> BoxFuture<'static, Result<Value, RpcError>> {
         let client = self.hub.client(gateway);
         let activity = self.activity.clone();
         let (gateway, method) = (gateway.to_string(), method.to_string());
         Box::pin(async move {
             let client = client.ok_or_else(|| unknown(&gateway))?;
-            let mut result = match timeout {
-                Some(t) => client.call_with_timeout(&method, params, t).await,
-                None => client.call(&method, params).await,
-            }?;
+            let mut result = activity.call(&client, &method, params, timeout).await?;
             // The photos picked in littleguys are the guys' faces on the phone too.
             if method == "agents.list" {
                 if let Some(agents) = result.get_mut("agents").and_then(Value::as_array_mut) {
@@ -133,6 +133,23 @@ impl BridgeHost for AppHost {
 
     fn subscribe(&self) -> broadcast::Receiver<HostEvent> {
         self.activity.subscribe_bridge()
+    }
+
+    fn limit(&self, provider: &str) -> BoxFuture<'static, Result<Option<Limit>, RpcError>> {
+        Box::pin(crate::limits::limits_read(provider.to_string()))
+    }
+
+    fn settings(&self) -> Result<PhoneSettings, RpcError> {
+        Ok(self.activity.phone_settings())
+    }
+
+    fn set_notify(&self, uid: Option<&str>, prefs: Option<NotifyPrefs>) -> Result<(), RpcError> {
+        let saved = match (uid, prefs) {
+            (uid, Some(prefs)) => self.activity.set_notifications(uid, prefs),
+            (Some(uid), None) => self.activity.reset_notifications(uid),
+            (None, None) => return Err(RpcError::new("INVALID_PARAMS", "prefs is required")),
+        };
+        saved.map_err(|e| RpcError::new("UNAVAILABLE", e.to_string()))
     }
 }
 

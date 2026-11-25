@@ -226,6 +226,8 @@ fn capabilities(attachments: bool, local: bool, past: bool) -> Capabilities {
         code: local,
         // ACP has no way into a turn under way.
         steer: false,
+        thread_models: false,
+        switch_models: false,
     }
 }
 
@@ -4815,7 +4817,7 @@ enabled = false
             "unread": true, "lastReadAt": 3, "pinned": true, "archived": true,
         });
         let meta: SessionMeta = serde_json::from_value(saved).unwrap();
-        let flags = ThreadFlags { label: Some("Taxes".into()), unread: true, last_read_at: Some(3), pinned: true, archived: Some(true) };
+        let flags = ThreadFlags { label: Some("Taxes".into()), unread: true, last_read_at: Some(3), pinned: true, archived: Some(true), ..Default::default() };
         assert_eq!(meta.flags, flags);
         let again = serde_json::to_value(&meta).unwrap();
         for k in ["label", "unread", "lastReadAt", "pinned", "archived"] {
