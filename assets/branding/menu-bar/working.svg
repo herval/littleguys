@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="18" viewBox="0 0 22 18">
+  <defs>
+    <mask id="ghost" maskUnits="userSpaceOnUse" x="0" y="0" width="22" height="18">
+      <g transform="translate(0 -0.25) rotate(-3 11 9)">
+        <path fill="white" d="M2.25 7.65 C3.4 7.2 4.9 8.35 6.55 7.2 C8.45 5.85 9.45 3.8 12.4 3.15
+      C15.45 2.4 17.9 4.3 18.05 7.1 C18.3 10.35 16.15 12.9 13.15 13.25
+      C10.6 13.55 9.05 12.5 7.4 13.25 C5.75 13.95 4.6 15.3 3.65 14.6
+      C2.8 13.9 4.8 12.4 3.45 12.35 C2.45 12.25 1.05 12.8 .95 11.85
+      C.8 10.7 3.8 10.05 2.65 9.25 Q.95 8.25 2.25 7.65 Z"/>
+        <path d="M15.3 9Q18.1 9.5 20 7 M10.5 11.7Q9.4 13.55 8.6 14.5" fill="none" stroke="white" stroke-width="2.35" stroke-linecap="round"/>
+        <g fill="black" color="black"><g transform="translate(5.9 2.5) scale(.148)"><path d="M 37.4 28 C 38.3 20 45.9 17.3 49.1 23 C 52.8 29.8 51.4 37 47.4 36.5 C 43 36 40.8 28.5 44.8 22.6 Q 40.7 23.2 37.4 28 Z"/><path d="M 37.4 28 C 38.3 20 45.9 17.3 49.1 23 C 52.8 29.8 51.4 37 47.4 36.5 C 43 36 40.8 28.5 44.8 22.6 Q 40.7 23.2 37.4 28 Z" transform="translate(20.4 -3.5)"/></g></g>
+      </g>
+    </mask>
+  </defs>
+  <rect width="22" height="18" fill="black" mask="url(#ghost)"/>
+</svg>

@@ -5,7 +5,7 @@ import { botGateways, followsSessions, needsAction, needsProxyFix, RUNTIME_LABEL
 import { core, errorMessage, isTauri, listen } from "../lib/ipc";
 import type { GatewayRoster, UpdateState } from "../lib/types";
 import { type PopoverShows, useApp } from "../stores/app";
-import { GuyMark } from "../ui/Avatar";
+import appIcon from "../../src-tauri/icons/128x128@2x.png";
 import { confirmAction } from "../ui/confirm";
 import { Button, IconButton, inputClass, Modal, Segmented } from "../ui/kit";
 import { CoderMode } from "./CoderMode";
@@ -55,7 +55,7 @@ export function Settings() {
     <Modal onClose={close} width={580}>
       <div className="p-6">
         <div className="flex items-center gap-3">
-          <GuyMark size={48} />
+          <img src={appIcon} alt="" width={48} height={48} draggable={false} />
           <div>
             <h2 className="font-display text-[17px] font-semibold tracking-tight">Settings</h2>
             <p className="text-[12px] text-[var(--color-ink-3)]">littleguys · all your bots, in one place</p>

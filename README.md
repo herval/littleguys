@@ -115,6 +115,8 @@ make test          # Rust tests
 
 Run `make` to see every command.
 
+`pnpm icons` regenerates the desktop icons and animated menu-bar ghost. The source artwork, original ImageGen prompt and reusable black templates are in the [Ghost Wave branding assets](assets/branding/README.md).
+
 Rust development builds keep line-level backtraces and incremental compilation,
 with dependency debug symbols disabled to reduce disk use. On macOS, before Tauri builds
 and `make run` / `make check` / `make test`, the build clears this checkout's default

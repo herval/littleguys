@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="18" viewBox="0 0 22 18">
+  <defs>
+    <mask id="ghost" maskUnits="userSpaceOnUse" x="0" y="0" width="22" height="18">
+      <g transform="translate(0 0)">
+        <path fill="white" d="M6.05 8.35 C5.95 4.8 7.5 2 10.55 1.9 C13.8 1.65 15.55 4.45 15.5 7.9
+      C15.32 10.3 15.28 12.7 15.8 14.65 Q16.35 16.8 14.35 15.95
+      Q12.9 15.05 12 16.05 Q10.8 17.5 9.55 16.1 Q8.7 15.1 7.4 15.95
+      Q5.15 17.18 5.7 14.75 C6.25 12.55 6.05 10.05 6.05 8.35 Z"/>
+        <path d="M6.8 8.2 Q4.95 8.9 4 11.9 M14.8 8.2 Q16.65 8.9 17.6 11.7" fill="none" stroke="white" stroke-width="2.35" stroke-linecap="round"/>
+        <g fill="black" color="black"><g transform="translate(2 2.25) scale(.164)"><path d="M 37.4 28 C 38.3 20 45.9 17.3 49.1 23 C 52.8 29.8 51.4 37 47.4 36.5 C 43 36 40.8 28.5 44.8 22.6 Q 40.7 23.2 37.4 28 Z"/><path d="M 37.4 28 C 38.3 20 45.9 17.3 49.1 23 C 52.8 29.8 51.4 37 47.4 36.5 C 43 36 40.8 28.5 44.8 22.6 Q 40.7 23.2 37.4 28 Z" transform="translate(20.4 -3.5)"/></g></g>
+      </g>
+    </mask>
+  </defs>
+  <rect width="22" height="18" fill="black" mask="url(#ghost)"/>
+</svg>

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="18" viewBox="0 0 22 18">
+  <defs>
+    <mask id="ghost" maskUnits="userSpaceOnUse" x="0" y="0" width="22" height="18">
+      <g transform="translate(0 16) scale(1 1.05) translate(0 -16)">
+        <path fill="white" d="M2.2 12.35 C2 9.25 4.35 6.95 7.25 7.35 C10.55 7.7 10.9 10.3 13.25 10.1
+      C14.8 10.05 15.25 9.1 15.85 8.52 C16.9 7.55 17.6 8.12 17.25 9.45
+      C16.95 10.75 15.9 11.9 16.5 12.25 Q18 12.95 16.3 13.9
+      C14.65 14.5 14.3 14.25 14.7 15 Q15 16.1 12 16 L5.55 16
+      C3.6 16.2 2.35 15.45 2.2 12.35 Z"/>
+        <path d="M5.7 14.7 Q4.15 14.12 2.25 15.05 M9.4 14.9 Q7.7 14.35 6.15 15.22" fill="none" stroke="white" stroke-width="2.35" stroke-linecap="round"/>
+        <g fill="black" color="black"><path d="M3.65 11.75q1 1.25 2.05 -.1 M6.95 11.35q1.02 1.25 2.1 -.12 M3.35 14.45q1.2 -.6 2.22 -.33" fill="none" stroke="currentColor" stroke-width=".8" stroke-linecap="round"/></g>
+      </g>
+    </mask>
+  </defs>
+  <rect width="22" height="18" fill="black" mask="url(#ghost)"/>
+  <path d="M13.1 4.65h2.45l-2.45 2.45h2.45" fill="none" stroke="currentColor" stroke-width="0.7595000000000001" stroke-linecap="round" stroke-linejoin="round"/><path d="M17.15 2.3h1.85l-1.85 1.85h1.85" fill="none" stroke="currentColor" stroke-width="0.5735" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

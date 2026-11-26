@@ -1,98 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
-      <stop offset="0" stop-color="#FFC56E"/>
-      <stop offset="0.55" stop-color="#FF8F4E"/>
-      <stop offset="1" stop-color="#FF5F45"/>
-    </linearGradient>
-    <radialGradient id="sheen" cx="0.3" cy="0.12" r="0.75">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
-      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="vignette" cx="0.5" cy="1.05" r="0.7">
-      <stop offset="0" stop-color="#C2321A" stop-opacity="0.35"/>
-      <stop offset="1" stop-color="#C2321A" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="guy" cx="0.36" cy="0.25" r="0.95">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="0.6" stop-color="#FFF6F0"/>
-      <stop offset="1" stop-color="#F5D9CB"/>
-    </radialGradient>
-    <radialGradient id="pal" cx="0.36" cy="0.25" r="0.95">
-      <stop offset="0" stop-color="#C9F7E2"/>
-      <stop offset="0.6" stop-color="#8FE3BF"/>
-      <stop offset="1" stop-color="#5BC79F"/>
-    </radialGradient>
-    <linearGradient id="eye" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#4A2E22"/>
-      <stop offset="1" stop-color="#21130D"/>
-    </linearGradient>
-    <linearGradient id="bubble" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#FFF1E8"/>
-    </linearGradient>
-    <clipPath id="plateClip"><path d="M 629.074 100.000 c 103.234 0 154.851 0 194.281 20.091 a 184.329 184.329 0 0 1 80.555 80.555 c 20.091 39.430 20.091 91.047 20.091 194.281 L 924.000 629.074 c 0 103.234 0 154.851 -20.091 194.281 a 184.329 184.329 0 0 1 -80.555 80.555 c -39.430 20.091 -91.047 20.091 -194.281 20.091 L 394.926 924.000 c -103.234 0 -154.851 0 -194.281 -20.091 a 184.329 184.329 0 0 1 -80.555 -80.555 c -20.091 -39.430 -20.091 -91.047 -20.091 -194.281 L 100.000 394.926 c 0 -103.234 0 -154.851 20.091 -194.281 a 184.329 184.329 0 0 1 80.555 -80.555 c 39.430 -20.091 91.047 -20.091 194.281 -20.091 Z"/></clipPath>
-    <filter id="plateShadow" x="-10%" y="-10%" width="120%" height="125%">
-      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000" flood-opacity="0.24"/>
-    </filter>
-    <filter id="lift" x="-30%" y="-30%" width="160%" height="170%">
-      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#8A2A10" flood-opacity="0.3"/>
-    </filter>
-    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="14"/></filter>
-  </defs>
-
-  <path d="M 629.074 100.000 c 103.234 0 154.851 0 194.281 20.091 a 184.329 184.329 0 0 1 80.555 80.555 c 20.091 39.430 20.091 91.047 20.091 194.281 L 924.000 629.074 c 0 103.234 0 154.851 -20.091 194.281 a 184.329 184.329 0 0 1 -80.555 80.555 c -39.430 20.091 -91.047 20.091 -194.281 20.091 L 394.926 924.000 c -103.234 0 -154.851 0 -194.281 -20.091 a 184.329 184.329 0 0 1 -80.555 -80.555 c -20.091 -39.430 -20.091 -91.047 -20.091 -194.281 L 100.000 394.926 c 0 -103.234 0 -154.851 20.091 -194.281 a 184.329 184.329 0 0 1 80.555 -80.555 c 39.430 -20.091 91.047 -20.091 194.281 -20.091 Z" fill="url(#bg)" filter="url(#plateShadow)"/>
-  <g clip-path="url(#plateClip)">
-    <rect width="1024" height="1024" fill="url(#vignette)"/>
-    <rect width="1024" height="1024" fill="url(#sheen)"/>
-  </g>
-
-  <!-- contact shadows -->
-  <ellipse cx="282" cy="716" rx="104" ry="16" fill="#9C2F12" opacity="0.3" filter="url(#soft)"/>
-  <ellipse cx="560" cy="788" rx="176" ry="22" fill="#9C2F12" opacity="0.34" filter="url(#soft)"/>
-
-  <!-- the friend, peeking from behind -->
-  <g transform="translate(282 584)" filter="url(#lift)">
-    
-    <path d="M -124 0 A 124 124 0 0 1 124 0 L 124 69.44 Q 124 101.67999999999999 91.75999999999999 101.67999999999999 L -91.75999999999999 101.67999999999999 Q -124 101.67999999999999 -124 69.44 Z" fill="url(#pal)"/>
-    <rect x="-66.96" y="82.708" width="57.04" height="42.160000000000004" rx="20.236800000000002" fill="url(#pal)"/>
-    <rect x="9.92" y="82.708" width="57.04" height="42.160000000000004" rx="20.236800000000002" fill="url(#pal)"/>
-    
-    <ellipse cx="-34.224000000000004" cy="-14.879999999999999" rx="18.599999999999998" ry="26.04" fill="url(#eye)"/>
-    <ellipse cx="55.056" cy="-14.879999999999999" rx="18.599999999999998" ry="26.04" fill="url(#eye)"/>
-    <circle cx="-27.714000000000006" cy="-24.775199999999998" r="6.695999999999999" fill="#fff"/>
-    <circle cx="61.565999999999995" cy="-24.775199999999998" r="6.695999999999999" fill="#fff"/>
-    <circle cx="-39.804" cy="-3.943199999999999" r="2.604" fill="#fff" opacity="0.8"/>
-    <circle cx="49.476" cy="-3.943199999999999" r="2.604" fill="#fff" opacity="0.8"/>
-    <ellipse cx="-81.84" cy="24.8" rx="18.599999999999998" ry="11.16" fill="#FF5C8A" opacity="0.42"/>
-    <ellipse cx="81.84" cy="24.8" rx="18.599999999999998" ry="11.16" fill="#FF5C8A" opacity="0.42"/>
-    <path d="M -8.184 24.8 Q 10.415999999999999 42.160000000000004 29.016 24.8" stroke="#3A2318" stroke-width="8.680000000000001" fill="none" stroke-linecap="round"/>
-  </g>
-
-  <!-- the main guy -->
-  <g transform="translate(560 574)" filter="url(#lift)">
-    
-    <path d="M -204 0 A 204 204 0 0 1 204 0 L 204 114.24000000000001 Q 204 167.28 150.96 167.28 L -150.96 167.28 Q -204 167.28 -204 114.24000000000001 Z" fill="url(#guy)"/>
-    <rect x="-110.16" y="136.068" width="93.84" height="69.36" rx="33.2928" fill="url(#guy)"/>
-    <rect x="16.32" y="136.068" width="93.84" height="69.36" rx="33.2928" fill="url(#guy)"/>
-    <ellipse cx="-88" cy="-122" rx="66" ry="36" transform="rotate(-24 -88 -122)" fill="#FFFFFF" opacity="0.9"/>
-    
-    <ellipse cx="-78.336" cy="-24.48" rx="30.599999999999998" ry="42.839999999999996" fill="url(#eye)"/>
-    <ellipse cx="68.544" cy="-24.48" rx="30.599999999999998" ry="42.839999999999996" fill="url(#eye)"/>
-    <circle cx="-67.626" cy="-40.7592" r="11.015999999999998" fill="#fff"/>
-    <circle cx="79.25399999999999" cy="-40.7592" r="11.015999999999998" fill="#fff"/>
-    <circle cx="-87.51599999999999" cy="-6.487200000000001" r="4.284" fill="#fff" opacity="0.8"/>
-    <circle cx="59.364" cy="-6.487200000000001" r="4.284" fill="#fff" opacity="0.8"/>
-    <ellipse cx="-134.64000000000001" cy="40.800000000000004" rx="30.599999999999998" ry="18.36" fill="#FF7F86" opacity="0.5"/>
-    <ellipse cx="134.64000000000001" cy="40.800000000000004" rx="30.599999999999998" ry="18.36" fill="#FF7F86" opacity="0.5"/>
-    <path d="M -35.495999999999995 40.800000000000004 Q -4.896 69.36 25.703999999999997 40.800000000000004" stroke="#3A2318" stroke-width="14.280000000000001" fill="none" stroke-linecap="round"/>
-  </g>
-
-  <!-- chat bubble, typing -->
-  <g transform="translate(712 256)" filter="url(#lift)">
-    <path d="M -116 -64 h 232 a 64 64 0 0 1 64 64 v 0 a 64 64 0 0 1 -64 64 h -150 l -58 44 l 6 -46 a 64 64 0 0 1 -94 -62 v 0 a 64 64 0 0 1 64 -64 z" fill="url(#bubble)"/>
-    <circle cx="-62" cy="0" r="22" fill="#FF8F4E"/>
-    <circle cx="0" cy="0" r="22" fill="#FF8F4E" opacity="0.75"/>
-    <circle cx="62" cy="0" r="22" fill="#FF8F4E" opacity="0.5"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="-10 -17 120 120">
+  <defs><linearGradient id="enamel" x2=".25" y2="1"><stop stop-color="#fff"/><stop offset="1" stop-color="#ffecdf"/></linearGradient></defs>
+  <path d="M 18 43 C 17 34 15 24 24 12.5 C 30 4.5 40 0 49.8 0
+    C 65.5 0 76.5 15 78.7 35.5 C 82 35 85 32 83 27 C 81 20 87 15 94 17.5
+  C 102 20.3 101 32 96.5 39.5 C 92.5 46 86.8 49.2 81 51
+    C 81.5 57 86 70.7 81.8 76.5 C 78.8 81 74.2 75 69.5 78
+    C 63 81.4 60.4 86.2 53.3 82.2 C 48.5 79.1 47.8 80.3 42.8 83.6
+    C 37.2 87.4 32 87 28.6 82.5 C 25.1 78.3 20.1 82.7 14.7 83.4
+    C 8.8 84.2 7.7 80 10.8 75.2 C 15.2 68.5 18.3 64 18.5 59
+    C 12.7 60 3.4 62 0.7 55.8 C -2 49.5 3.9 45.4 11.1 44.8
+    C 14.5 44.5 17.5 44.8 18 43 Z" fill="url(#enamel)" stroke="#e8b39c" stroke-width="1.5" stroke-linejoin="round"/>
+  <g fill="#39241b" color="#39241b"><path d="M 37.4 28 C 38.3 20 45.9 17.3 49.1 23 C 52.8 29.8 51.4 37 47.4 36.5 C 43 36 40.8 28.5 44.8 22.6 Q 40.7 23.2 37.4 28 Z"/><path d="M 37.4 28 C 38.3 20 45.9 17.3 49.1 23 C 52.8 29.8 51.4 37 47.4 36.5 C 43 36 40.8 28.5 44.8 22.6 Q 40.7 23.2 37.4 28 Z" transform="translate(20.4 -3.5)"/></g>
 </svg>
